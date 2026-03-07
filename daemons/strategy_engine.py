@@ -34,16 +34,23 @@ class BaseStrategy:
         current_time = now.strftime("%H:%M")
         
         days = self.schedule.get('days', [])
-        start = self.schedule.get('start', "00:00")
-        end = self.schedule.get('end', "23:59")
         
         if days and current_day not in days:
             return False
             
-        if not (start <= current_time <= end):
-            return False
+        slots = self.schedule.get('slots', [])
+        # Backwards compatibility for single-slot configs
+        if not slots and 'start' in self.schedule and 'end' in self.schedule:
+            slots = [{'start': self.schedule['start'], 'end': self.schedule['end']}]
             
-        return True
+        if not slots:
+            return True
+            
+        for slot in slots:
+            if slot.get('start', "00:00") <= current_time <= slot.get('end', "23:59"):
+                return True
+                
+        return False
 
 class SMACrossoverStrategy(BaseStrategy):
     def __init__(self, strategy_id, symbols, period=10):

@@ -16,14 +16,19 @@ def start_services():
 
     print("Starting Python microservices...")
     
-    # Define the processes we need to run
-    # Note: These paths will exist once we create the daemons
     processes = [
-        ("Data Gateway", f"{sys.executable} -m daemons.data_gateway"),
         ("Strategy Engine", f"{sys.executable} -m daemons.strategy_engine"),
         ("Paper Bridge", f"{sys.executable} -m daemons.paper_bridge"),
         ("Dashboard", f"{sys.executable} -m streamlit run dashboard/app.py --server.headless true")
     ]
+    
+    if len(sys.argv) > 1 and sys.argv[1] == '--live':
+        print("🟢 Live Mode Requested: Adding Shoonya Gateway and Live execution bridge...")
+        processes.insert(0, ("Shoonya Gateway", f"{sys.executable} -m daemons.shoonya_gateway"))
+        processes.insert(3, ("Live Bridge", f"{sys.executable} -m daemons.live_bridge"))
+    else:
+        print("📄 Paper Mode: Using Mock Data Gateway.")
+        processes.insert(0, ("Mock Data Gateway", f"{sys.executable} -m daemons.data_gateway"))
     
     running_procs = []
     
