@@ -30,6 +30,10 @@ def start_services():
         print("📄 Paper Mode: Using Mock Data Gateway.")
         processes.insert(0, ("Mock Data Gateway", f"{sys.executable} -m daemons.data_gateway"))
     
+    if '--shadow' in sys.argv:
+        print("👤 Shadow Mode Requested: Launching an experimental Shadow Strategy Engine...")
+        processes.append(("Shadow Strategy Engine", f"{sys.executable} -m daemons.strategy_engine --shadow"))
+    
     running_procs = []
     
     try:

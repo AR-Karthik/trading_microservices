@@ -7,6 +7,13 @@ import asyncpg
 from core.mq import MQManager, Ports
 from redis import asyncio as redis
 import json
+import time
+from collections import deque
+
+try:
+    import uvloop
+except ImportError:
+    uvloop = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("PaperBridge")
@@ -59,19 +66,25 @@ async def init_db(pool):
         logger.info("Database schema initialized.")
 
 async def calculate_slippage_and_fees(order):
-    """Simulates real-world execution costs."""
+    """
+    Simulates real-world execution costs.
+    --- Recommendation 8: Dynamic Slippage Model ---
+    Buy Price = LTP + (Spread * 0.5)
+    Sell Price = LTP - (Spread * 0.5)
+    """
     # Base broker fee (e.g., 20 INR per order)
     fees = 20.0
     
-    # Random slippage relative to volatility
-    slippage_bps = random.uniform(0.5, 2.0) # 0.5 to 2 basis points
-    slippage_amount = order['price'] * (slippage_bps / 10000)
+    # Calculate a dynamic mock spread (0.05% of LTP)
+    price = float(order['price'])
+    mock_spread = price * 0.0005 # 5 basis points
+    penalty = mock_spread * 0.5
     
     # Adjust execution price
     if order['action'] == "BUY":
-        execution_price = order['price'] + slippage_amount
+        execution_price = price + penalty
     else:
-        execution_price = order['price'] - slippage_amount
+        execution_price = price - penalty
         
     return execution_price, fees
 
@@ -143,6 +156,7 @@ async def execute_orders(pull_socket, pool, mq_manager, redis_client):
     
     # Optional Pub socket to broadcast trade confirmations
     trade_pub_socket = mq_manager.create_publisher(Ports.TRADE_EVENTS)
+    order_timestamps = deque()
     
     while True:
         try:
@@ -151,6 +165,19 @@ async def execute_orders(pull_socket, pool, mq_manager, redis_client):
             if not order:
                 continue
                 
+            # --- Rate Limiting Compliance (10 OPS) ---
+            while True:
+                now = time.time()
+                while order_timestamps and order_timestamps[0] <= now - 1.0:
+                    order_timestamps.popleft()
+                
+                if len(order_timestamps) < 10:
+                    order_timestamps.append(now)
+                    break
+                
+                wait_time = order_timestamps[0] + 1.001 - now
+                await asyncio.sleep(max(0, wait_time))
+
             logger.info(f"Received Order: {order['action']} {order['quantity']} {order['symbol']} [Strat: {order['strategy_id']}]")
             
             # 1. RISK CHECK: Fetch global risk settings
@@ -258,11 +285,14 @@ async def start_bridge():
     logger.info("Initializing Paper Bridge...")
     
     # Ensure event loop compatibility for ZeroMQ
-    try:
-        if hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy()) # type: ignore
-    except Exception:
-        pass
+    if uvloop:
+        uvloop.install()
+    else:
+        try:
+            if hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy()) # type: ignore
+        except Exception:
+            pass
 
     # Initialize ZeroMQ Messaging
     mq = MQManager()

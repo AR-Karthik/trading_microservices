@@ -5,13 +5,21 @@ import uuid
 import json
 import os
 import hashlib
+import time
+from collections import deque
 from datetime import datetime, timezone
 
 import asyncpg
 import redis.asyncio as redis
 from dotenv import load_dotenv
 from core.mq import MQManager, Ports
+from core.execution_wrapper import MultiLegExecutor
 from NorenRestApiPy.NorenApi import NorenApi
+
+try:
+    import uvloop
+except ImportError:
+    uvloop = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("LiveBridge-Shoonya")
@@ -32,6 +40,12 @@ class LiveExecutionEngine:
         self.vc = os.getenv("SHOONYA_VC")
         self.app_key = os.getenv("SHOONYA_APP_KEY")
         self.imei = os.getenv("SHOONYA_IMEI", "abc1234")
+        self.daily_loss_limit = float(os.getenv("DAILY_LOSS_LIMIT", "-5000.0"))
+        
+        self.is_kill_switch_triggered = False
+        self.total_realized_pnl = 0.0
+        self.multileg_executor = MultiLegExecutor(self)
+        self.order_timestamps = deque()
         
         ws_url = self.host.replace('https', 'wss').replace('NorenWClientTP', 'NorenWSTP')
         if not ws_url.endswith('/'): ws_url += '/'
@@ -113,6 +127,20 @@ class LiveExecutionEngine:
             """,
             new_qty, new_avg_price, realized_pnl, execution['time'], symbol, strategy_id, exec_type
         )
+        self.total_realized_pnl = realized_pnl # Update for kill switch check
+
+    async def check_kill_switch(self):
+        """Monitors total realized P&L against the Hard Kill Switch boundary."""
+        if self.total_realized_pnl <= self.daily_loss_limit:
+            logger.critical(f"🛑 KILL SWITCH TRIGGERED: Daily Loss {self.total_realized_pnl} <= Limit {self.daily_loss_limit}")
+            self.is_kill_switch_triggered = True
+            await self.redis.publish("panic_channel", json.dumps({
+                "action": "SQUARE_OFF", 
+                "execution_type": "Actual",
+                "reason": "KILL_SWITCH"
+            }))
+            return True
+        return False
 
     async def execute_live_order(self, order):
         """Dispatches real network requests to Shoonya routing engine."""
@@ -123,6 +151,19 @@ class LiveExecutionEngine:
         symbol = order['symbol']
         action = action_map.get(order['action'], 'B')
         
+        # --- Rate Limiting Compliance (10 OPS) ---
+        while True:
+            now = time.time()
+            while self.order_timestamps and self.order_timestamps[0] <= now - 1.0:
+                self.order_timestamps.popleft()
+            
+            if len(self.order_timestamps) < 10:
+                self.order_timestamps.append(now)
+                break
+            
+            wait_time = self.order_timestamps[0] + 1.001 - now
+            await asyncio.sleep(max(0, wait_time))
+
         logger.warning(f"🚀 SENDING LIVE MKT ORDER: {action} {order['quantity']} {symbol}")
         
         loop = asyncio.get_running_loop()
@@ -166,8 +207,39 @@ class LiveExecutionEngine:
             logger.error(f"❌ Live Order Rejected by Broker: {res}")
             return None
 
+    async def handle_order(self, order, trade_pub_socket):
+        """Async task handler for a single order to avoid blocking the main loop."""
+        if self.is_kill_switch_triggered:
+            logger.warning(f"Order rejected: Kill switch active. Symbol: {order['symbol']}")
+            return
+
+        execution = await self.execute_live_order(order)
+        
+        if execution:
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        """
+                        INSERT INTO trades (id, time, symbol, action, quantity, price, fees, strategy_id, execution_type)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        """,
+                        uuid.UUID(int=hash(execution['id'])),
+                        execution['time'], execution['symbol'], execution['action'],
+                        execution['quantity'], execution['price'], execution['fees'], 
+                        execution['strategy_id'], execution['execution_type']
+                    )
+                    await self.update_portfolio(conn, execution, execution['fees'])
+            
+            await self.mq.send_json(trade_pub_socket, {
+                "id": execution["id"], "symbol": execution["symbol"],
+                "price": float(execution['price']), "type": "EXECUTION"
+            }, topic=f"EXEC.{execution['symbol']}")
+            
+            # Check kill switch after every trade execution
+            await self.check_kill_switch()
+
     async def run(self, pull_socket):
-        """Listens for orders targeted at Actual market Execution."""
+        """Listens for orders and spawns async handlers (Fire-and-Forget)."""
         logger.info("Started Live Execution loop. Waiting for signals...")
         
         trade_pub_socket = self.mq.create_publisher(Ports.TRADE_EVENTS)
@@ -179,40 +251,23 @@ class LiveExecutionEngine:
                     
                 exec_type = order.get('execution_type', 'Paper')
                 if exec_type != "Actual":
-                    continue # Ignore paper orders here
+                    continue
                     
-                logger.info(f"[LIVE SIGNAL] Action: {order['action']} | Qty: {order['quantity']} | Sym: {order['symbol']} | Strat: {order['strategy_id']}")
+                logger.info(f"[LIVE SIGNAL] Queueing order: {order.get('action', 'MULTI_LEG')} {order.get('quantity', 'N/A')} {order.get('symbol', 'N/A')}")
                 
-                # ... Global Risk Checks would be identical to paper bridge here ...
-                # Skipping boilerplate to focus on network boundary
+                # --- Recommendation 4: Fire-and-Forget Execution ---
+                # We don't 'await' the full handler, we fire a task
+                if order.get('type') == 'MULTI_LEG':
+                    # Recommendation 5: Multi-Leg Atomic Execution
+                    asyncio.create_task(self.multileg_executor.execute_legs(order['legs']))
+                else:
+                    # Regular single order
+                    asyncio.create_task(self.handle_order(order, trade_pub_socket))
                 
-                execution = await self.execute_live_order(order)
-                
-                if execution:
-                    # Persist actual execution to database
-                    async with self.pool.acquire() as conn:
-                        async with conn.transaction():
-                            await conn.execute(
-                                """
-                                INSERT INTO trades (id, time, symbol, action, quantity, price, fees, strategy_id, execution_type)
-                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                                """,
-                                uuid.UUID(int=hash(execution['id'])), # Convert norenordno string to UUID hash
-                                execution['time'], execution['symbol'], execution['action'],
-                                execution['quantity'], execution['price'], execution['fees'], 
-                                execution['strategy_id'], execution['execution_type']
-                            )
-                            await self.update_portfolio(conn, execution, execution['fees'])
-                    
-                    await self.mq.send_json(trade_pub_socket, {
-                        "id": execution["id"], "symbol": execution["symbol"],
-                        "price": float(execution['price']), "type": "EXECUTION"
-                    }, topic=f"EXEC.{execution['symbol']}")
-                    
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.exception(f"Error processing real order: {e}")
+                logger.exception(f"Error in execution dispatcher: {e}")
 
     async def panic_listener(self):
         """Listens for Global Square Off commands via Redis PubSub."""
@@ -281,6 +336,8 @@ async def main():
         logger.error("Data integrity failure. Shutting down Live Bridge to prevent errant fires.")
 
 if __name__ == "__main__":
-    if hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
+    if uvloop:
+        uvloop.install()
+    elif hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

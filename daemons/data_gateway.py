@@ -6,6 +6,11 @@ from datetime import datetime, timezone
 import redis.asyncio as redis
 from core.mq import MQManager, Ports
 
+try:
+    import uvloop
+except ImportError:
+    uvloop = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("DataGateway")
 
@@ -105,7 +110,9 @@ async def start_gateway():
 
 if __name__ == "__main__":
     try:
-        if hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
+        if uvloop:
+            uvloop.install()
+        elif hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         asyncio.run(start_gateway())
     except KeyboardInterrupt:

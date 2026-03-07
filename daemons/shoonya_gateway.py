@@ -7,19 +7,21 @@ from datetime import datetime, timezone
 import redis.asyncio as redis
 from dotenv import load_dotenv
 
-from core.mq import MQManager, Ports
+from core.mq import MQManager, Ports, RedisLogger
+from core.health import Heartbeat
 from NorenRestApiPy.NorenApi import NorenApi
+
+try:
+    import uvloop
+except ImportError:
+    uvloop = None
+
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from utils.shoonya_master import get_token, get_symbol
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("ShoonyaGateway")
-
-# Mapped identifiers (token to symbol for Shoonya NSE)
-# In production, this dictionary would be built dynamically by searching NorenApi for tokens
-TOKEN_MAP = {
-    "26000": "NIFTY50",
-    "26001": "BANKNIFTY", 
-    "2885": "RELIANCE"
-}
 
 class ShoonyaDataStreamer:
     def __init__(self, redis_client, pub_socket):
@@ -28,18 +30,27 @@ class ShoonyaDataStreamer:
         self.mq_manager = MQManager()
         
         load_dotenv()
-        self.host = os.getenv("SHOONYA_HOST")
-        self.user = os.getenv("SHOONYA_USER")
-        self.pwd = os.getenv("SHOONYA_PWD")
-        self.factor2 = os.getenv("SHOONYA_FACTOR2")
-        self.vc = os.getenv("SHOONYA_VC")
-        self.app_key = os.getenv("SHOONYA_APP_KEY")
+        self.host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP")
+        self.user = os.getenv("SHOONYA_USER", "")
+        self.pwd = os.getenv("SHOONYA_PWD", "")
+        self.factor2 = os.getenv("SHOONYA_FACTOR2", "")
+        self.vc = os.getenv("SHOONYA_VC", "")
+        self.app_key = os.getenv("SHOONYA_APP_KEY", "")
         self.imei = os.getenv("SHOONYA_IMEI", "abc1234")
         
         ws_url = self.host.replace('https', 'wss').replace('NorenWClientTP', 'NorenWSTP')
         if not ws_url.endswith('/'): ws_url += '/'
         
-        self.api = NorenApi(host=self.host, websocket=ws_url)
+        self.active_tokens = {
+            "26000": "NIFTY50",   # Hardcode NSE indices as fallbacks
+            "26001": "BANKNIFTY", 
+            "2885": "RELIANCE"
+        }
+        
+        # Shared Memory Setup
+        self.shm = TickSharedMemory(create=True)
+        self.symbol_slots = {}
+        self.next_slot = 0
 
     def event_handler_feed_update(self, tick_data):
         """Callback fired by Shoonya WebSocket on every price tick."""
@@ -48,10 +59,15 @@ class ShoonyaDataStreamer:
                 return # Ignore non-price updates
 
             token = tick_data.get('tk')
-            if token not in TOKEN_MAP:
-                return
+            if token not in self.active_tokens:
+                # Try to reverse lookup NFO token if we dynamically subscribed to it
+                sym = get_symbol(token)
+                if sym:
+                    self.active_tokens[token] = sym
+                else:
+                    return
                 
-            symbol = TOKEN_MAP[token]
+            symbol = self.active_tokens[token]
             price = float(tick_data['lp'])
             volume = int(tick_data.get('v', 0))
             
@@ -76,23 +92,61 @@ class ShoonyaDataStreamer:
             logger.error(f"Error handling feed update: {e}")
 
     async def _broadcast_tick(self, symbol, payload):
-        """Asynchronously blasts the tick data to Redis and ZeroMQ."""
-        # 1. Update latest state for Dashboard API
+        """Asynchronously blasts the tick data to Redis, Shared Memory, and ZeroMQ."""
+        # 1. Shared Memory Zero-Copy Write
+        if symbol not in self.symbol_slots:
+            if self.next_slot < MAX_SLOTS:
+                self.symbol_slots[symbol] = self.next_slot
+                await self.redis.hset("shm_slots", symbol, self.next_slot)
+                self.next_slot += 1
+            else:
+                logger.warning(f"Shared memory full! Cannot allocate slot for {symbol}")
+        
+        if symbol in self.symbol_slots:
+            slot = self.symbol_slots[symbol]
+            # Offload blocking write to thread pool if needed, but struct.pack is fast
+            self.shm.write_tick(slot, symbol, payload['price'], payload['volume'])
+
+        # 2. Update latest state for Dashboard API (Legacy/Fallback)
         await self.redis.set(f"latest_tick:{symbol}", json.dumps(payload))
         
-        # 2. Push directly to ZeroMQ (Brokerless) for Strategy Engine
+        # --- Recommendation 3: Redis Time-Travel Buffer ---
+        # Store last 100 ticks for quick engine recovery
+        list_key = f"tick_buffer:{symbol}"
+        await self.redis.lpush(list_key, json.dumps(payload))
+        await self.redis.ltrim(list_key, 0, 99)
+        
+        # 3. Push directly to ZeroMQ (Brokerless) for Strategy Engine (Event trigger)
         topic = f"TICK.{symbol}"
+        # We can now just send the topic or a minimal payload since data is in SHM
         await self.mq_manager.send_json(self.pub_socket, payload, topic=topic)
         
-        logger.debug(f"Broadcasted live {symbol} @ {payload['price']}")
+        logger.debug(f"Broadcasted live {symbol} @ {payload['price']} [SHM Slot {self.symbol_slots.get(symbol)}]")
 
     def open_callback(self):
         """Callback fired when WebSocket opens."""
         logger.info("Shoonya WebSocket Opened.")
-        # Subscribe to tokens
-        for token in TOKEN_MAP.keys():
+        
+        # 1. Subscribe to base indices (NSE)
+        for token in ["26000", "26001", "2885"]:
             self.api.subscribe(f"NSE|{token}")
-            logger.info(f"Subscribed to NSE|{token}")
+            logger.info(f"Subscribed to Base NSE|{token}")
+            
+        # 2. Dynamically fetch deployed symbols from Redis, resolve NFO tokens, and subscribe
+        try:
+            active_strats = self.redis.hgetall("active_strategies")
+            for strat_id_b, config_b in active_strats.items():
+                config = json.loads(config_b)
+                if config.get("enabled", True):
+                    for symbol in config.get("symbols", []):
+                        # Example: If a strategy deployed "NIFTY24FEB26C22000"
+                        resolved_token = get_token(symbol)
+                        if resolved_token:
+                            self.api.subscribe(f"NFO|{resolved_token}")
+                            self.active_tokens[resolved_token] = symbol
+                            logger.info(f"Subscribed to Dynamic NFO|{resolved_token} for {symbol}")
+        except Exception as e:
+            logger.error(f"Error subscribing to dynamic tokens: {e}")
 
     async def start(self):
         self.loop = asyncio.get_running_loop()
@@ -148,6 +202,8 @@ async def main():
         mq.context.term()
 
 if __name__ == "__main__":
-    if hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
+    if uvloop:
+        uvloop.install()
+    elif hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())
