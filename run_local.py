@@ -19,10 +19,10 @@ def start_services():
     # Define the processes we need to run
     # Note: These paths will exist once we create the daemons
     processes = [
-        ("Data Gateway", "python -m daemons.data_gateway"),
-        ("Strategy Engine", "python -m daemons.strategy_engine"),
-        ("Paper Bridge", "python -m daemons.paper_bridge"),
-        ("Dashboard", "streamlit run dashboard/app.py")
+        ("Data Gateway", f"{sys.executable} -m daemons.data_gateway"),
+        ("Strategy Engine", f"{sys.executable} -m daemons.strategy_engine"),
+        ("Paper Bridge", f"{sys.executable} -m daemons.paper_bridge"),
+        ("Dashboard", f"{sys.executable} -m streamlit run dashboard/app.py --server.headless true")
     ]
     
     running_procs = []

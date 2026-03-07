@@ -19,12 +19,13 @@ async def broker_websocket_simulation(redis_client: redis.Redis, pub_socket):
     """
     logger.info("Starting simulated Broker WebSocket connection...")
     
-    # Initial mock prices
+    # Initial mock prices and OI
     prices = {
         "NIFTY50": 22000.0,
         "BANKNIFTY": 46000.0,
         "RELIANCE": 2900.0
     }
+    oi = {s: 1000000 for s in SYMBOLS}
     
     while True:
         try:
@@ -38,11 +39,18 @@ async def broker_websocket_simulation(redis_client: redis.Redis, pub_socket):
             change = prices[symbol] * random.uniform(-0.0005, 0.0005)
             prices[symbol] = round(prices[symbol] + change, 2)
             
+            # Random walk OI variation (+/- 0.1%)
+            prev_symbol_oi = oi[symbol]
+            oi_change = prev_symbol_oi * random.uniform(-0.001, 0.0015) # Slight bullish bias on OI
+            oi[symbol] = int(prev_symbol_oi + oi_change)
+
             # Format tick payload
             tick_data = {
                 "symbol": symbol,
                 "price": prices[symbol],
                 "volume": random.randint(1, 100),
+                "oi": oi[symbol],
+                "prev_oi": prev_symbol_oi,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "type": "TICK"
             }

@@ -56,7 +56,13 @@ class MQManager:
     async def recv_json(self, socket):
         """Helper to receive JSON payloads. Returns (topic, data) for Sub sockets."""
         message = await socket.recv_string()
-        
+        # If it starts with { or [, it's raw JSON without a topic
+        if message.startswith("{") or message.startswith("["):
+            try:
+                return None, json.loads(message)
+            except json.JSONDecodeError:
+                return None, message
+
         # If there's a space, we assume it's topic + payload (PUB/SUB)
         if " " in message:
             parts = message.split(" ", 1)
@@ -71,8 +77,30 @@ class MQManager:
         except json.JSONDecodeError:
             return None, message
 
+from datetime import datetime
+import redis.asyncio as redis
+
 # Common Ports Configuration
 class Ports:
     MARKET_DATA = 5555  # Data Gateway publishes here
     ORDERS = 5556       # Strategy Engine pushes orders here, Paper Bridge pulls
     TRADE_EVENTS = 5557 # Paper Bridge publishes executions here
+
+class RedisLogger:
+    """Streams logs to Redis for dashboard visibility."""
+    def __init__(self, redis_url="redis://localhost:6379", key="live_logs", max_len=100):
+        self.redis = redis.from_url(redis_url)
+        self.key = key
+        self.max_len = max_len
+
+    async def log(self, message, level="INFO"):
+        log_entry = json.dumps({
+            "timestamp": datetime.now().isoformat(),
+            "level": level,
+            "message": message
+        })
+        try:
+            await self.redis.lpush(self.key, log_entry)
+            await self.redis.ltrim(self.key, 0, self.max_len - 1)
+        except Exception:
+            pass
