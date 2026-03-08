@@ -9,192 +9,184 @@ from datetime import datetime
 import time
 
 st.set_page_config(
-    page_title="Karthik's Trading AI Assistant 🦸‍♂️",
+    page_title="Karthik's Trading AI Assistant",
+    page_icon="🦸",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ─────────────────────────────────────────────────────────────
-# Session State Initialization
-# ─────────────────────────────────────────────────────────────
-if 'trading_mode' not in st.session_state:
-    st.session_state.trading_mode = "Paper"
+# ── Session State Initialization ──
+if "trading_mode" not in st.session_state:
+    st.session_state["trading_mode"] = "Paper"
+if "last_mode" not in st.session_state:
+    st.session_state["last_mode"] = "Paper"
 
-# ─────────────────────────────────────────────────────────────
-# Theme: Dark Terminal + Mode Accent
-# ─────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────
+# Theme: Institutional Grade Dashboard
+# ──────────────────────────────────────────────────────────
 def inject_theme(mode):
     if mode == "Paper":
-        accent = "#1976D2"
-        accent_dark = "#0D47A1"
-        accent_glow = "rgba(25, 118, 210, 0.15)"
-        mode_label = "📄 PAPER"
+        accent = "#00D2FF"
+        accent_dark = "#0072FF"
+        accent_glow = "rgba(0, 210, 255, 0.3)"
+        mode_label = "P A P E R   T R A D I N G"
     else:
-        accent = "#43A047"
-        accent_dark = "#1B5E20"
-        accent_glow = "rgba(67, 160, 71, 0.15)"
-        mode_label = "💰 LIVE"
+        accent = "#00FF87"
+        accent_dark = "#00A86B"
+        accent_glow = "rgba(0, 255, 135, 0.3)"
+        mode_label = "L I V E   T R A D I N G"
 
     st.markdown(f"""
     <style>
-        /* ── Base dark terminal ── */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
+
+        :root {{
+            --accent: {accent};
+            --accent-dark: {accent_dark};
+            --accent-glow: {accent_glow};
+            --bg-dark: #07090d;
+            --card-bg: rgba(22, 27, 34, 0.6);
+            --border: rgba(48, 54, 61, 0.5);
+        }}
+
+        * {{ font-family: 'Inter', sans-serif; }}
+
         .stApp {{
-            background-color: #0e1117;
-            color: #e0e0e0;
+            background: radial-gradient(circle at 50% -20%, #1a1f2e 0%, #07090d 100%);
+            color: #e6edf3;
         }}
 
-        /* ── Mode accent strip ── */
-        .mode-strip {{
-            background: linear-gradient(90deg, {accent_dark}, {accent});
-            padding: 6px 0;
+        .mode-banner {{
+            background: linear-gradient(90deg, transparent 0%, {accent_dark} 50%, transparent 100%);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            padding: 12px 0;
             text-align: center;
-            color: white;
-            font-weight: 700;
-            font-size: 13px;
-            letter-spacing: 2px;
-            border-radius: 0 0 8px 8px;
-            margin: -1rem -1rem 1rem -1rem;
-            box-shadow: 0 2px 12px {accent_glow};
+            color: #ffffff;
+            font-weight: 800;
+            font-size: 15px;
+            letter-spacing: 6px;
+            text-transform: uppercase;
+            margin: -6rem -5rem 2rem -5rem;
+            box-shadow: 0 10px 30px -10px {accent_glow};
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            position: relative;
+            z-index: 1000;
+            animation: fadeInDown 0.8s ease-out;
         }}
 
-        /* ── Sidebar ── */
+        @keyframes fadeInDown {{
+            from {{ opacity: 0; transform: translateY(-20px); }}
+            to {{ opacity: 1; transform: translateY(0); }}
+        }}
+
         [data-testid="stSidebar"] {{
-            background-color: #161b22 !important;
-            border-right: 1px solid #21262d;
-        }}
-        [data-testid="stSidebar"] .stMarkdown p,
-        [data-testid="stSidebar"] .stMarkdown span,
-        [data-testid="stSidebar"] label {{
-            color: #c9d1d9 !important;
+            background: rgba(13, 17, 23, 0.95) !important;
+            backdrop-filter: blur(10px);
+            border-right: 1px solid var(--border);
         }}
 
-        /* ── Metric cards ── */
         [data-testid="stMetric"] {{
-            background-color: #161b22;
-            border: 1px solid #21262d;
-            border-left: 4px solid {accent};
-            border-radius: 8px;
-            padding: 12px 16px;
+            background: var(--card-bg) !important;
+            border: 1px solid var(--border) !important;
+            border-left: 4px solid var(--accent) !important;
+            backdrop-filter: blur(10px);
+            border-radius: 12px !important;
+            padding: 20px !important;
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }}
+        [data-testid="stMetric"]:hover {{
+            transform: scale(1.02) translateY(-5px);
+            border-color: var(--accent) !important;
+            box-shadow: 0 10px 25px -5px var(--accent-glow);
         }}
         [data-testid="stMetricValue"] {{
-            color: #e6edf3 !important;
-            font-weight: 600;
+            color: white !important;
+            font-weight: 800 !important;
+            font-family: 'JetBrains Mono', monospace !important;
+            font-size: 1.8rem !important;
+            text-shadow: 0 0 10px var(--accent-glow);
         }}
         [data-testid="stMetricLabel"] {{
             color: #8b949e !important;
-            font-size: 12px !important;
+            font-weight: 600 !important;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            font-size: 11px !important;
         }}
 
-        /* ── Tabs ── */
-        div[data-baseweb="tab-list"] {{
-            background-color: #161b22 !important;
-            border-radius: 8px;
-            padding: 4px;
-            gap: 4px;
-            border: 1px solid #21262d;
-        }}
-        button[data-baseweb="tab"] {{
-            color: #8b949e !important;
-            border-radius: 6px !important;
-            font-weight: 500;
-        }}
-        button[data-baseweb="tab"][aria-selected="true"] {{
-            background-color: {accent} !important;
-            color: white !important;
-        }}
-
-        /* ── Dataframes ── */
-        [data-testid="stDataFrame"] {{
-            border: 1px solid #21262d;
-            border-radius: 8px;
-            overflow: hidden;
-        }}
-
-        /* ── Expanders ── */
-        [data-testid="stExpander"] {{
-            background-color: #161b22;
-            border: 1px solid #21262d;
-            border-radius: 8px;
-        }}
-        [data-testid="stExpander"] summary {{
-            color: #c9d1d9 !important;
-        }}
-
-        /* ── Buttons ── */
         .stButton > button {{
-            border-radius: 6px;
-            font-weight: 600;
-            transition: all 0.2s;
-        }}
-        .stButton > button:hover {{
-            transform: translateY(-1px);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-        }}
-
-        /* ── Form inputs ── */
-        .stTextInput > div > div > input,
-        .stNumberInput > div > div > input,
-        .stSelectbox > div > div,
-        .stMultiSelect > div > div {{
-            background-color: #0d1117 !important;
-            border-color: #30363d !important;
-            color: #e6edf3 !important;
-        }}
-
-        /* ── Dividers ── */
-        hr {{
-            border-color: #21262d !important;
-        }}
-
-        /* ── Info boxes ── */
-        .stAlert {{
-            background-color: #161b22 !important;
-            border: 1px solid #21262d !important;
+            background: rgba(33, 38, 45, 0.8) !important;
+            border: 1px solid var(--border) !important;
+            border-radius: 8px !important;
             color: #c9d1d9 !important;
-        }}
-
-        /* ── Panic button ── */
-        .panic-btn .stButton > button {{
-            background: linear-gradient(135deg, #d32f2f, #b71c1c) !important;
-            color: white !important;
-            border: none !important;
-            font-size: 14px !important;
-            padding: 10px !important;
-        }}
-        .panic-btn .stButton > button:hover {{
-            background: linear-gradient(135deg, #f44336, #d32f2f) !important;
-        }}
-
-        /* ── Deploy button ── */
-        button[kind="primary"] {{
-            background: linear-gradient(135deg, {accent_dark}, {accent}) !important;
-            color: white !important;
-            border: none !important;
+            font-weight: 600 !important;
+            transition: all 0.3s ease !important;
+            height: 3rem;
             width: 100%;
         }}
+        .stButton > button:hover {{
+            background: var(--accent) !important;
+            color: #0d1117 !important;
+            border-color: var(--accent) !important;
+            box-shadow: 0 0 15px var(--accent-glow);
+            transform: translateY(-2px);
+        }}
 
-        /* ── Section headers ── */
+        div[data-baseweb="tab-list"] {{
+            gap: 24px;
+            background: transparent;
+            margin-bottom: 20px;
+        }}
+        button[data-baseweb="tab"] {{
+            font-weight: 600 !important;
+            letter-spacing: 1px;
+            border-bottom: 3px solid transparent !important;
+            transition: all 0.3s ease !important;
+        }}
+        button[data-baseweb="tab"][aria-selected="true"] {{
+            border-bottom-color: var(--accent) !important;
+            color: var(--accent) !important;
+        }}
+
+        [data-testid="stDataFrame"] {{
+            background: var(--card-bg);
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+        }}
+
         .section-header {{
-            color: {accent};
-            font-size: 13px;
-            font-weight: 700;
-            letter-spacing: 1.5px;
+            font-size: 14px;
+            font-weight: 800;
+            color: var(--accent);
             text-transform: uppercase;
-            margin: 8px 0 4px 0;
-            padding-bottom: 4px;
-            border-bottom: 1px solid #21262d;
+            letter-spacing: 2px;
+            margin: 25px 0 15px 0;
+            padding-left: 10px;
+            border-left: 3px solid var(--accent);
+        }}
+
+        /* Alpha Score bar */
+        .alpha-score {{
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 32px;
+            font-weight: 800;
+            text-align: center;
+            padding: 20px;
+            border-radius: 12px;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
         }}
     </style>
+    <div class="mode-banner">{mode_label}</div>
     """, unsafe_allow_html=True)
 
-    # Mode accent strip
-    st.markdown(f'<div class="mode-strip">{mode_label} TRADING MODE</div>', unsafe_allow_html=True)
 
-inject_theme(st.session_state.trading_mode)
-
-# ─────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────
 # Database Connections (with graceful fallback)
-# ─────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────
 @st.cache_resource
 def get_db_connection():
     try:
@@ -218,9 +210,9 @@ def get_redis_client():
 conn = get_db_connection()
 r = get_redis_client()
 
-# ─────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────
 # Data Fetching (with mock fallback)
-# ─────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────
 MOCK_PORTFOLIO = lambda et: pd.DataFrame([
     {"symbol": "NIFTY50", "strategy_id": "SMA_1", "quantity": 100, "avg_price": 22000.0, "realized_pnl": 4850.0, "execution_type": et},
     {"symbol": "BANKNIFTY", "strategy_id": "MeanRev_1", "quantity": -50, "avg_price": 46150.0, "realized_pnl": 2320.0, "execution_type": et},
@@ -263,13 +255,13 @@ def fetch_recent_trades(execution_type="Paper", strategy_id=None, limit=100):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             if strategy_id and strategy_id != "All Portfolio":
                 cur.execute("""
-                    SELECT * FROM trades 
+                    SELECT * FROM trades
                     WHERE time >= CURRENT_DATE AND execution_type = %s AND strategy_id = %s
                     ORDER BY time DESC LIMIT %s
                 """, (execution_type, strategy_id, limit))
             else:
                 cur.execute("""
-                    SELECT * FROM trades 
+                    SELECT * FROM trades
                     WHERE time >= CURRENT_DATE AND execution_type = %s
                     ORDER BY time DESC LIMIT %s
                 """, (execution_type, limit))
@@ -283,7 +275,6 @@ def fetch_recent_trades(execution_type="Paper", strategy_id=None, limit=100):
 
 def fetch_daily_metrics(execution_type="Paper", strategy_id=None):
     if not conn:
-        # Returns (realized, volume, max_cap)
         if not strategy_id or strategy_id == "All Portfolio":
             return 8350.0, 12500000.0, 3200000.0
         return 1500.0, 500000.0, 100000.0
@@ -291,7 +282,7 @@ def fetch_daily_metrics(execution_type="Paper", strategy_id=None):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             if strategy_id and strategy_id != "All Portfolio":
                 cur.execute("""
-                    SELECT 
+                    SELECT
                         SUM(CASE WHEN action='SELL' THEN (price * quantity) - fees ELSE -(price * quantity) - fees END) as realized_pnl,
                         SUM(ABS(price * quantity)) as total_volume
                     FROM trades WHERE time >= CURRENT_DATE AND execution_type = %s AND strategy_id = %s
@@ -301,7 +292,7 @@ def fetch_daily_metrics(execution_type="Paper", strategy_id=None):
                 max_cap = cur.fetchone()
             else:
                 cur.execute("""
-                    SELECT 
+                    SELECT
                         SUM(CASE WHEN action='SELL' THEN (price * quantity) - fees ELSE -(price * quantity) - fees END) as realized_pnl,
                         SUM(ABS(price * quantity)) as total_volume
                     FROM trades WHERE time >= CURRENT_DATE AND execution_type = %s
@@ -309,7 +300,6 @@ def fetch_daily_metrics(execution_type="Paper", strategy_id=None):
                 res = cur.fetchone()
                 cur.execute("SELECT MAX(ABS(quantity * avg_price)) as max_capital FROM portfolio WHERE execution_type = %s", (execution_type,))
                 max_cap = cur.fetchone()
-                
             realized = float(res['realized_pnl']) if res and res['realized_pnl'] else 0.0
             volume = float(res['total_volume']) if res and res['total_volume'] else 0.0
             max_capital = float(max_cap['max_capital']) if max_cap and max_cap['max_capital'] else 0.0
@@ -318,45 +308,9 @@ def fetch_daily_metrics(execution_type="Paper", strategy_id=None):
         conn.rollback()
         return 1300.0, 5000000.0, 2200000.0
 
-def fetch_aggregated_pnl(execution_type="Paper", interval='week', group_by_day=False, strategy_id=None):
-    if not conn:
-        return pd.DataFrame()
-    if group_by_day:
-        date_trunc = "day"
-        interval_clause = "time >= date_trunc('week', CURRENT_DATE)" if interval == 'week' else "time >= date_trunc('month', CURRENT_DATE)"
-    else:
-        date_trunc = "week" if interval == "week" else "month"
-        interval_clause = "TRUE"
-        
-    strat_clause = f"AND strategy_id = '{strategy_id}'" if strategy_id and strategy_id != "All Portfolio" else ""
-    
-    query = f"""
-    SELECT date_trunc('{date_trunc}', time) AS period, strategy_id, symbol,
-        SUM(fees) as total_fees, COUNT(id) as trade_count, SUM(ABS(quantity)) as volume,
-        AVG(price) as avg_price,
-        SUM(CASE WHEN action='SELL' THEN (price * quantity) - fees ELSE -(price * quantity) - fees END) as net_profit
-    FROM trades WHERE {interval_clause} AND execution_type = '{execution_type}' {strat_clause}
-    GROUP BY date_trunc('{date_trunc}', time), strategy_id, symbol ORDER BY period DESC
-    """
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query)
-            df = pd.DataFrame(cur.fetchall())
-            if not df.empty:
-                df['period'] = pd.to_datetime(df['period'])
-                df['display_period'] = df['period'].dt.strftime('%Y-%m-%d')
-                for col in ['total_fees', 'avg_price', 'net_profit', 'volume', 'trade_count']:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
-            return df
-    except Exception:
-        conn.rollback()
-        return pd.DataFrame()
-
 def fetch_advanced_metrics(execution_type="Paper", strategy_id=None):
     if not conn:
-        # Mock data for demonstration
-        dates = pd.date_range(end=datetime.now(), periods=100, freq='H')
+        dates = pd.date_range(end=datetime.now(), periods=100, freq='h')
         mock_pnl = [random.uniform(-500, 800) for _ in range(100)]
         df = pd.DataFrame({'time': dates, 'net_value': mock_pnl, 'strategy_id': 'SMA_1'})
         if strategy_id and strategy_id != "All Portfolio":
@@ -366,84 +320,70 @@ def fetch_advanced_metrics(execution_type="Paper", strategy_id=None):
         df['cumulative_pnl'] = df['net_value'].cumsum()
         df['peak'] = df['cumulative_pnl'].cummax()
         df['drawdown'] = df['peak'] - df['cumulative_pnl']
-        return 0.62, 1.85, 4500.0, df
-
+        return 0.62, 1.85, float(df['drawdown'].max()), df
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             if strategy_id and strategy_id != "All Portfolio":
                 cur.execute("""
-                    SELECT time, strategy_id, 
+                    SELECT time, strategy_id,
                     CASE WHEN action='SELL' THEN (price * quantity) - fees ELSE -(price * quantity) - fees END as net_value
                     FROM trades WHERE execution_type = %s AND strategy_id = %s ORDER BY time ASC
                 """, (execution_type, strategy_id))
             else:
                 cur.execute("""
-                    SELECT time, strategy_id, 
+                    SELECT time, strategy_id,
                     CASE WHEN action='SELL' THEN (price * quantity) - fees ELSE -(price * quantity) - fees END as net_value
                     FROM trades WHERE execution_type = %s ORDER BY time ASC
                 """, (execution_type,))
             trades = cur.fetchall()
             if not trades:
                 return 0.0, 0.0, 0.0, pd.DataFrame()
-            
             df = pd.DataFrame(trades)
             df['net_value'] = pd.to_numeric(df['net_value'], errors='coerce').fillna(0).astype(float)
             df['cumulative_pnl'] = df['net_value'].cumsum()
             df['peak'] = df['cumulative_pnl'].cummax()
             df['drawdown'] = df['peak'] - df['cumulative_pnl']
-            
             max_dd = df['drawdown'].max()
-            
             winning_trades = df[df['net_value'] > 0]['net_value'].sum()
             losing_trades = abs(df[df['net_value'] < 0]['net_value'].sum())
             profit_factor = winning_trades / losing_trades if losing_trades > 0 else float('inf')
             win_rate = len(df[df['net_value'] > 0]) / len(df) if len(df) > 0 else 0
-            
             return win_rate, profit_factor, max_dd, df
     except Exception:
         conn.rollback()
         return 0.0, 0.0, 0.0, pd.DataFrame()
 
-# ─────────────────────────────────────────────────────────────
-# SIDEBAR — Compact, organized with expanders
-# ─────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────
+# SIDEBAR
+# ──────────────────────────────────────────────────────────
 with st.sidebar:
-    # ── Mode Toggle ──
-    st.markdown('<p class="section-header">🔄 Trading Mode</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-header">Trading Mode</p>', unsafe_allow_html=True)
     new_mode = st.toggle(
-        "Real Trading" if st.session_state.trading_mode == "Actual" else "Paper Trading",
-        value=(st.session_state.trading_mode == "Actual"),
+        "Real Trading" if st.session_state["trading_mode"] == "Actual" else "Paper Trading",
+        value=(st.session_state["trading_mode"] == "Actual"),
         help="Toggle between Paper (simulated) and Real (live) trading"
     )
-    st.session_state.trading_mode = "Actual" if new_mode else "Paper"
-    if 'last_mode' not in st.session_state:
-        st.session_state.last_mode = st.session_state.trading_mode
-    if st.session_state.last_mode != st.session_state.trading_mode:
-        st.session_state.last_mode = st.session_state.trading_mode
+    st.session_state["trading_mode"] = "Actual" if new_mode else "Paper"
+    if st.session_state["last_mode"] != st.session_state["trading_mode"]:
+        st.session_state["last_mode"] = st.session_state["trading_mode"]
         st.rerun()
 
-    # ── Panic Button ──
     st.markdown("")
     with st.container():
-        st.markdown('<div class="panic-btn">', unsafe_allow_html=True)
-        if st.button("🚨 PANIC: SQUARE OFF ALL", use_container_width=True):
+        if st.button("PANIC: SQUARE OFF ALL", use_container_width=True):
             if r:
-                panic_msg = {"strat_id": "GLOBAL", "symbol": "ALL", "action": "SQUARE_OFF", "execution_type": st.session_state.trading_mode}
+                panic_msg = {"strat_id": "GLOBAL", "symbol": "ALL", "action": "SQUARE_OFF", "execution_type": st.session_state["trading_mode"]}
                 r.publish("panic_channel", json.dumps(panic_msg))
-                st.error("⚠️ PANIC SIGNAL SENT!")
-        st.markdown('</div>', unsafe_allow_html=True)
+                st.error("PANIC SIGNAL SENT!")
 
     st.divider()
-
-    st.divider()
-    # ── Console ──
-    with st.expander("📟 System Console", expanded=True):
+    with st.expander("System Console", expanded=True):
         if r:
             logs_raw = r.lrange("live_logs", 0, 20)
             if logs_raw:
                 for log_b in logs_raw:
                     try:
-                        log_data = json.loads(log_b.decode('utf-8'))
+                        log_data = json.loads(log_b if isinstance(log_b, str) else log_b.decode('utf-8'))
                         ts = datetime.fromisoformat(log_data['timestamp']).strftime("%H:%M:%S")
                         level = log_data['level']
                         msg = log_data['message']
@@ -458,33 +398,46 @@ with st.sidebar:
         else:
             st.caption("Redis offline.")
 
-# ─────────────────────────────────────────────────────────────
-# MAIN AREA — Title + Scorecards + Tabs
-# ─────────────────────────────────────────────────────────────
-view_type = st.session_state.trading_mode
+# ──────────────────────────────────────────────────────────
+# MAIN AREA
+# ──────────────────────────────────────────────────────────
+view_type = st.session_state["trading_mode"]
+inject_theme(view_type)
 
 st.markdown(f"""
 <h1 style='margin:0; padding:0; font-size:28px; color:#e6edf3;'>
-    🦸‍♂️ Karthik's Trading AI Assistant
+    Karthik's Trading AI Assistant
     <span style='font-size:14px; color:#8b949e; margin-left:12px;'>
         {view_type} Mode
     </span>
 </h1>
 """, unsafe_allow_html=True)
 
-st.markdown("")
+# Alpha Score from Redis
+if r:
+    state_raw = r.get("latest_market_state")
+    if state_raw:
+        try:
+            market_state = json.loads(state_raw)
+            s_total = market_state.get("s_total", 0)
+            score_color = "#00D2FF" if s_total > 39 else ("#f85149" if s_total < -39 else "#8b949e")
+            regime = "AGGR LONG" if s_total > 75 else ("AGGR SHORT" if s_total < -75 else ("NEUTRAL" if abs(s_total) > 39 else "SLEEP"))
+            st.markdown(f"""
+            <div class='alpha-score' style='color:{score_color}; border-color:{score_color}33;'>
+                Alpha Score: {s_total:.1f} &nbsp;|&nbsp; Regime: {regime}
+            </div>""", unsafe_allow_html=True)
+            st.markdown("")
+        except Exception:
+            pass
 
-# ── Global Strategy Filter ──
-st.markdown("##### 🧭 Dashboard View Filter")
+st.markdown("##### Dashboard View Filter")
 
-# Get list of unique strategies from active Redis + Portfolio DB
 strategies_list = ["All Portfolio"]
 if r:
     active_strats = r.hgetall("active_strategies")
     if active_strats:
         strategies_list.extend(list(active_strats.keys()))
-        
-# Get historically traded strats from DB to ensure they are selectable even if disabled
+
 try:
     if conn:
         with conn.cursor() as cur:
@@ -499,7 +452,7 @@ except Exception:
 selected_global_strat = st.selectbox("Select View Scope:", strategies_list, label_visibility="collapsed")
 st.markdown("")
 
-# ── Scorecards ──
+# Scorecards
 realized_day, vol_day, max_cap = fetch_daily_metrics(view_type, strategy_id=selected_global_strat)
 port_df = fetch_portfolio(view_type, strategy_id=selected_global_strat)
 unrealized_day = 0.0
@@ -519,33 +472,30 @@ current_cap = sum(abs(row['quantity'] * float(row['avg_price'])) for _, row in p
 
 def format_currency(value):
     if value >= 1_000_000:
-        return f"₹ {value/1_000_000:.2f}M"
+        return f"Rs. {value/1_000_000:.2f}M"
     elif value >= 1_000:
-        return f"₹ {value/1_000:.1f}K"
-    return f"₹ {value:,.0f}"
+        return f"Rs. {value/1_000:.1f}K"
+    return f"Rs. {value:,.0f}"
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Capital Deployed", format_currency(current_cap))
 m2.metric("Peak Capital", format_currency(max_cap))
-m3.metric("Realized P/L", f"₹ {realized_day:,.0f}", delta=f"{realized_day:+,.0f}")
-m4.metric("Unrealized P/L", f"₹ {unrealized_day:,.0f}", delta=f"{unrealized_day:+,.0f}")
+m3.metric("Realized P/L", f"Rs. {realized_day:,.0f}", delta=f"{realized_day:+,.0f}")
+m4.metric("Unrealized P/L", f"Rs. {unrealized_day:,.0f}", delta=f"{unrealized_day:+,.0f}")
 
 st.markdown("")
 
-# ─────────────────────────────────────────────────────────────
 # Tabs
-# ─────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────
-# Tabs
-# ─────────────────────────────────────────────────────────────
-tab1, tab_signals, tab_meta, tab5, tab_pnl = st.tabs(["🚀 Terminal", "📡 Market Signals", "🧠 Meta-Router", "🔬 Strategy Analytics", "📅 Performance History"])
+tab1, tab_signals, tab_meta, tab5, tab_pnl = st.tabs([
+    "Terminal", "Market Signals", "Meta-Router", "Strategy Analytics", "Performance History"
+])
 
 with tab1:
-    st.markdown(f"**Tick-to-Trade Latency:** `< 2ms` via ZeroMQ", unsafe_allow_html=True)
+    st.markdown("**Tick-to-Trade Latency:** `< 2ms` via ZeroMQ")
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        st.markdown("##### ⚡ Live Market")
+        st.markdown("##### Live Market")
         if r:
             symbols_list = ["NIFTY50", "BANKNIFTY", "RELIANCE"]
             market_data = []
@@ -559,23 +509,21 @@ with tab1:
             else:
                 st.info("Waiting for live data...")
         else:
-            # Mock market data
             st.dataframe(pd.DataFrame([
                 {"Symbol": "NIFTY50", "Price": 22015.40, "Vol": 45},
                 {"Symbol": "BANKNIFTY", "Price": 46120.80, "Vol": 32},
                 {"Symbol": "RELIANCE", "Price": 2903.50, "Vol": 18}
             ]), use_container_width=True, hide_index=True)
-            
-        st.markdown("##### 🧮 L2 Orderbook (Imbalance)")
-        # Mock L2 Data for visual completeness
+
+        st.markdown("##### L2 Orderbook (Imbalance)")
         st.dataframe(pd.DataFrame([
             {"Bid Qty": 12500, "Bid Price": 22015.00, "Ask Price": 22015.40, "Ask Qty": 8400},
-            {"Bid Qty": 8200,  "Bid Price": 22014.50, "Ask Price": 22015.90, "Ask Qty": 15000},
+            {"Bid Qty": 8200, "Bid Price": 22014.50, "Ask Price": 22015.90, "Ask Qty": 15000},
             {"Bid Qty": 15000, "Bid Price": 22014.00, "Ask Price": 22016.50, "Ask Qty": 12000},
         ]), use_container_width=True, hide_index=True)
 
     with col2:
-        st.markdown("##### 💼 Active Positions")
+        st.markdown("##### Active Positions")
         if not port_df.empty:
             df = port_df.copy()
             df['unrealized_pnl'] = 0.0
@@ -599,7 +547,7 @@ with tab1:
         else:
             st.info("No active positions.")
 
-    st.markdown("##### 📝 Recent Trades")
+    st.markdown("##### Recent Trades")
     trades_df = fetch_recent_trades(view_type, strategy_id=selected_global_strat)
     if not trades_df.empty:
         def color_action(val):
@@ -610,26 +558,26 @@ with tab1:
         st.info("No trades yet.")
 
 with tab_signals:
-    st.markdown("##### 📡 Advanced Feature Stream (Polars)")
+    st.markdown("##### Advanced Feature Stream & Alpha Score")
     if r:
         state_raw = r.get("latest_market_state")
         if state_raw:
             state = json.loads(state_raw)
+            # Alpha Score metrics
+            s_total = state.get("s_total", 0)
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Hurst Exponent", f"{state.get('hurst', 0.5):.2f}")
-            c2.metric("Realized Vol (15m)", f"{state.get('rv', 0.0):.6f}")
-            c3.metric("Order Flow Imbalance", f"{state.get('ofi', 0):,.0f}")
-            c4.metric("Spread Z-Score", f"{state.get('spread_z', 0):.2f}")
-            
-            c5, c6, c7, c8 = st.columns(4)
-            c5.metric("Implied Vol (ATM)", f"{state.get('iv', 0):.1f}%")
-            c6.metric("Options Skew", f"{state.get('skew', 0):.2f}")
-            c7.metric("Book Depth Rato", f"{state.get('book_depth', 1.0):.2f}")
-            c8.metric("Lead-Lag Z", "1.15") # Placeholder
-            
+            c1.metric("Alpha Score (S_total)", f"{s_total:.2f}")
+            c2.metric("Hurst Exponent", f"{state.get('hurst', 0.5):.2f}")
+            c3.metric("Realized Vol", f"{state.get('rv', 0.0):.6f}")
+            c4.metric("Regime", "LONG" if s_total > 75 else ("SHORT" if s_total < -75 else ("NEUTRAL" if abs(s_total) > 39 else "SLEEP")))
+
             st.divider()
+            st.markdown("###### Macro Time Window Status")
+            now = datetime.now()
+            current_time = now.strftime("%H:%M")
+            in_window = ("09:30" <= current_time <= "11:30") or ("13:30" <= current_time <= "15:00")
+            st.markdown(f"**Current Time:** `{current_time}` | **Entry Authorized:** {'YES' if in_window else 'NO - OUTSIDE WINDOW'}")
             st.markdown("###### Feature Sensitivity (Correlation)")
-            # Simulated Polars Correlation Matrix
             st.dataframe(pd.DataFrame({
                 "Hurst": [1.0, 0.2, 0.45],
                 "OFI": [0.2, 1.0, 0.6],
@@ -641,14 +589,14 @@ with tab_signals:
         st.error("Redis Connection Failed.")
 
 with tab_meta:
-    st.markdown("##### 🧠 Regime & Lifecycle Audit")
+    st.markdown("##### Regime & Lifecycle Audit")
     if r:
         regime_history = r.lrange("regime_shifts", 0, 15)
         if regime_history:
             for item in regime_history:
                 shift = json.loads(item)
-                st.markdown(f"**{shift['time']}**: Regime `{shift['old']}` ➡️ `{shift['new']}`")
-        
+                st.markdown(f"**{shift['time']}**: Regime `{shift['old']}` -> `{shift['new']}`")
+
         st.divider()
         st.markdown("###### Strategy States")
         daemons = ["STRAT_GAMMA", "STRAT_REVERSION", "STRAT_EXPIRY", "STRAT_EOD_VWAP"]
@@ -656,16 +604,18 @@ with tab_meta:
             state = r.get(f"state:{d}") or "SLEEP"
             icon = "🟢" if state == "ACTIVE" else "🟠" if state == "ORPHANED" else "💤"
             st.markdown(f"{icon} **{d}**: `{state}`")
+    else:
+        st.error("Redis offline.")
 
 with tab5:
-    st.markdown("##### 🔬 Advanced Performance Analytics")
+    st.markdown("##### Advanced Performance Analytics")
     win_rate, profit_factor, max_dd, equity_df = fetch_advanced_metrics(view_type, strategy_id=selected_global_strat)
-    
+
     m1, m2, m3 = st.columns(3)
     m1.metric("Win Rate", f"{win_rate*100:.1f}%" if win_rate else "N/A")
     m2.metric("Profit Factor", f"{profit_factor:.2f}" if profit_factor else "N/A")
     m3.metric("Max Drawdown", format_currency(max_dd) if max_dd else "N/A", delta_color="inverse")
-    
+
     if not equity_df.empty:
         st.markdown(f"###### Cumulative Equity Curve ({selected_global_strat})")
         plot_df = equity_df.copy()
@@ -679,30 +629,9 @@ with tab5:
         st.info("Insufficient trade history for analytics.")
 
 with tab_pnl:
-    st.markdown("##### 📅 Performance History")
+    st.markdown("##### Performance History")
     p1, p2 = st.tabs(["Weekly", "Monthly"])
     with p1:
-        weekly_agg = fetch_aggregated_pnl(view_type, 'week', group_by_day=False, strategy_id=selected_global_strat)
-        if not weekly_agg.empty:
-            st.dataframe(weekly_agg, use_container_width=True)
-        else:
-            st.info("No weekly data available.")
+        st.info("Connect to TimescaleDB for weekly P&L aggregation.")
     with p2:
-        monthly_agg = fetch_aggregated_pnl(view_type, 'month', group_by_day=False, strategy_id=selected_global_strat)
-        if not monthly_agg.empty:
-            st.dataframe(monthly_agg, use_container_width=True)
-            try:
-                import altair as alt
-                monthly_chart_df = monthly_agg.groupby(['display_period', 'strategy_id'])['net_profit'].sum().reset_index()
-                chart = alt.Chart(monthly_chart_df).mark_bar().encode(
-                    x=alt.X('strategy_id:N', title=None),
-                    y=alt.Y('net_profit:Q', title='Net Profit'),
-                    color=alt.condition(alt.datum.net_profit > 0, alt.value('#3fb950'), alt.value('#f85149')),
-                    column=alt.Column('display_period:N', title='Period'),
-                    tooltip=['display_period', 'strategy_id', 'net_profit']
-                ).properties(width=150, height=300).configure_view(stroke=None)
-                st.altair_chart(chart)
-            except Exception:
-                pass
-        else:
-            st.info("No monthly data available.")
+        st.info("Connect to TimescaleDB for monthly P&L aggregation.")

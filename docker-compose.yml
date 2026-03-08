@@ -7,6 +7,11 @@ services:
     ports:
       - "6379:6379"
     restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   timescaledb:
     image: timescale/timescaledb:latest-pg14
@@ -20,14 +25,21 @@ services:
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
     restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading_user -d trading_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   market_sensor:
     build: .
     container_name: market_sensor
     command: python -m daemons.market_sensor
     depends_on:
-      - redis
-      - timescaledb
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
     restart: always
     env_file: .env
 
@@ -36,7 +48,30 @@ services:
     container_name: meta_router
     command: python -m daemons.meta_router
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    restart: always
+    env_file: .env
+
+  strategy_engine:
+    build: .
+    container_name: strategy_engine
+    command: python -m daemons.strategy_engine
+    depends_on:
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    restart: always
+    env_file: .env
+
+  liquidation_daemon:
+    build: .
+    container_name: liquidation_daemon
+    command: python -m daemons.liquidation_daemon
+    depends_on:
+      redis:
+        condition: service_healthy
     restart: always
     env_file: .env
 
@@ -45,20 +80,24 @@ services:
     container_name: paper_bridge
     command: python -m daemons.paper_bridge
     depends_on:
-      - redis
-      - timescaledb
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
     restart: always
     env_file: .env
 
   dashboard:
     build: .
     container_name: trading_dashboard
-    command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
     ports:
       - "8501:8501"
     depends_on:
-      - redis
-      - timescaledb
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
     restart: always
     env_file: .env
 

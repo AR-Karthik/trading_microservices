@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import logging
 import uuid
 import collections
@@ -324,7 +324,7 @@ async def config_subscriber(redis_client):
 
 async def warmup_engine(active_strategies, num_ticks=1000):
     """Primes the engine with synthetic data to trigger JIT optimization."""
-    logger.info(f"🚀 Starting Pre-Flight Warmup ({num_ticks} synthetic ticks)...")
+    logger.info(f"ðŸš€ Starting Pre-Flight Warmup ({num_ticks} synthetic ticks)...")
     
     # Representative tickers for warmup
     symbols = ["NIFTY50", "BANKNIFTY", "RELIANCE"]
@@ -347,7 +347,7 @@ async def warmup_engine(active_strategies, num_ticks=1000):
                 except Exception:
                     pass
                     
-    logger.info("✅ Warmup Complete. Bytecode is primed.")
+    logger.info("âœ… Warmup Complete. Bytecode is primed.")
 
 async def run_strategies(sub_socket, push_socket, mq_manager, redis_client, shm):
     """Subscribes to market data and runs strategies using SHM for zero-copy lookups."""
@@ -391,7 +391,12 @@ async def run_strategies(sub_socket, push_socket, mq_manager, redis_client, shm)
                 
                 if signal:
                     action = signal
-                    qty = 100
+                    # --- Dynamic Sizing based on DTE ---
+                    now_dt = datetime.now()
+                    # DTE 0/1 (Wed/Thu) = 100%, Others = 50%
+                    is_expiry = now_dt.strftime("%A") in ["Wednesday", "Thursday"]
+                    base_qty = 100
+                    qty = base_qty if is_expiry else int(base_qty * 0.5)
                     if "QTY" in signal:
                         parts = signal.split("_")
                         action = parts[0]
