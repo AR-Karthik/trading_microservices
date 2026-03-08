@@ -7,6 +7,7 @@ import json
 import random
 from datetime import datetime
 import time
+import os
 
 st.set_page_config(
     page_title="Karthik's Trading AI Assistant",
@@ -81,10 +82,10 @@ def inject_theme(mode):
 # ─────────────────────────────────────────────────────────────────────────────
 # Connections
 # ─────────────────────────────────────────────────────────────────────────────
-@st.cache_resource
 def get_db_connection():
     try:
-        conn = psycopg2.connect(dbname="trading_db", user="trading_user", password="trading_pass", host="localhost", port="5432")
+        db_host = os.getenv("DB_HOST", "localhost")
+        conn = psycopg2.connect(dbname="trading_db", user="trading_user", password="trading_pass", host=db_host, port="5432")
         return conn
     except Exception:
         return None
@@ -92,7 +93,8 @@ def get_db_connection():
 @st.cache_resource
 def get_redis_client():
     try:
-        r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+        redis_host = os.getenv("REDIS_HOST", "localhost")
+        r = redis.Redis(host=redis_host, port=6379, db=0, decode_responses=True)
         r.ping()
         return r
     except Exception:

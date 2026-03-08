@@ -59,11 +59,12 @@ class TelegramAlerter:
         self,
         bot_token: str | None = None,
         chat_id: str | None = None,
-        redis_url: str = "redis://localhost:6379"
+        redis_url: str | None = None
     ):
         self.bot_token = bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
-        self.redis_url = redis_url
+        self.redis_host = os.getenv("REDIS_HOST", "localhost")
+        self.redis_url = redis_url or f"redis://{self.redis_host}:6379"
         self._redis: redis.Redis | None = None
         self._enabled = bool(self.bot_token and self.chat_id)
 

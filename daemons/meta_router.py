@@ -25,9 +25,10 @@ import sys
 import time
 from datetime import datetime
 from typing import Any
+import os
 
 import numpy as np
-import redis
+import redis.asyncio as redis
 
 from core.mq import MQManager, Ports, Topics
 
@@ -157,7 +158,8 @@ class MetaRouter:
 
         if not test_mode:
             self.cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD)
-            self._redis = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+            redis_host = os.getenv("REDIS_HOST", "localhost")
+            self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
 
         self.current_regime: str = "RANGING"
         self._orphaned_lunch = False
@@ -200,26 +202,27 @@ class MetaRouter:
 
     # ── Veto Checks ───────────────────────────────────────────────────────────
 
-    def _check_dispersion_veto(self) -> tuple[bool, bool]:
+    async def _check_dispersion_veto(self) -> tuple[bool, bool]:
         """
         Returns (momentum_vetoed, mr_restricted_to_1lot).
         True if dispersion_coeff < 0.30 (correlated market = momentum strategies unreliable).
         """
         try:
-            disp = float(self._redis.get("dispersion_coeff") or 0.5)
+            disp_val = await self._redis.get("dispersion_coeff")
+            disp = float(disp_val or 0.5)
         except Exception:
             disp = 0.5
         if disp < 0.30:
             return True, True
         return False, False
 
-    def _check_oi_wall_veto(self, spot: float) -> bool:
+    async def _check_oi_wall_veto(self, spot: float) -> bool:
         """
         Returns True if spot is < 15pts from any top-3 Call/Put OI wall.
         Blocks fresh buy entries near OI walls.
         """
         try:
-            walls_raw = self._redis.get("oi_walls")
+            walls_raw = await self._redis.get("oi_walls")
             if not walls_raw:
                 return False
             walls: list[float] = json.loads(walls_raw)
@@ -231,17 +234,17 @@ class MetaRouter:
             pass
         return False
 
-    def _check_macro_lockdown(self) -> bool:
+    async def _check_macro_lockdown(self) -> bool:
         """Returns True if MACRO_EVENT_LOCKDOWN is active in Redis."""
         try:
-            val = self._redis.get("MACRO_EVENT_LOCKDOWN")
+            val = await self._redis.get("MACRO_EVENT_LOCKDOWN")
             return str(val).lower() == "true"
         except Exception:
             return False
 
     # ── HMM Output Drain ─────────────────────────────────────────────────────
 
-    def _drain_hmm_output(self):
+    async def _drain_hmm_output(self):
         """Non-blocking drain of HMM output queue."""
         while True:
             try:
@@ -258,7 +261,7 @@ class MetaRouter:
                     logger.info(f"Regime transition: {self.current_regime} → {raw_regime}")
                     self.current_regime = raw_regime
                     if not self.test_mode:
-                        self._redis.set("hmm_regime", raw_regime)
+                        await self._redis.set("hmm_regime", raw_regime)
             except mp.queues.Empty:
                 break
 
@@ -349,7 +352,7 @@ class MetaRouter:
 
                     # Drain HMM results (non-blocking — doesn't block I/O loop)
                     if not self.test_mode:
-                        self._drain_hmm_output()
+                        await self._drain_hmm_output()
 
                     # Feed features to HMM process every 10 states
                     if tick_count % 10 == 0 and not self.test_mode:
@@ -368,8 +371,8 @@ class MetaRouter:
                     spot = state.get("spot", 22000.0)
                     momentum_vetoed, mr_1lot, oi_wall_veto = False, False, False
                     if not self.test_mode:
-                        momentum_vetoed, mr_1lot = self._check_dispersion_veto()
-                        oi_wall_veto = self._check_oi_wall_veto(spot)
+                        momentum_vetoed, mr_1lot = await self._check_dispersion_veto()
+                        oi_wall_veto = await self._check_oi_wall_veto(spot)
 
                     # Macro window check
                     is_entry_allowed, should_orphan = self.check_macro_windows()

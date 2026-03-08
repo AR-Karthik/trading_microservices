@@ -70,7 +70,8 @@ ZONE                = "asia-south1-a"
 INSTANCE_NAME       = "trading-engine-spot"
 MACHINE_TYPE        = f"zones/{ZONE}/machineTypes/c2-standard-4"
 TAILSCALE_AUTH_KEY  = os.getenv("TAILSCALE_AUTH_KEY", "")
-REPO_URL            = "https://github.com/AR-Karthik/trading_microservices.git"
+GITHUB_PAT          = os.getenv("GITHUB_PAT_TOKEN", "")
+REPO_URL            = f"https://{GITHUB_PAT}@github.com/AR-Karthik/trading_microservices.git" if GITHUB_PAT else "https://github.com/AR-Karthik/trading_microservices.git"
 REPO_DIR            = "/opt/trading"
 
 # Build .env content from environment (loaded from local .env via dotenv)
@@ -111,7 +112,7 @@ chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
 # 2. Tailscale
 curl -fsSL https://tailscale.com/install.sh | sh
-tailscale up --authkey={TAILSCALE_AUTH_KEY} --hostname=trading-engine --accept-routes
+tailscale up --authkey={TAILSCALE_AUTH_KEY} --hostname=trading-engine --accept-routes || echo "Tailscale up failed, continuing..."
 
 # 3. Clone repository
 git clone {REPO_URL} {REPO_DIR}
@@ -169,7 +170,7 @@ def create_spot_instance():
 
     # Spot VM scheduling
     instance.scheduling = compute_v1.Scheduling(
-        provisioning_model=compute_v1.Scheduling.ProvisioningModel.SPOT,
+        provisioning_model="SPOT",
         instance_termination_action="STOP",
         on_host_maintenance="TERMINATE",
         automatic_restart=False
@@ -189,7 +190,7 @@ def create_spot_instance():
 
     # Network with external IP
     access_config = compute_v1.AccessConfig(
-        type_=compute_v1.AccessConfig.Type.ONE_TO_ONE_NAT,
+        type_="ONE_TO_ONE_NAT",
         name="External NAT"
     )
     network_interface = compute_v1.NetworkInterface(

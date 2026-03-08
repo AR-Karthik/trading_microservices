@@ -31,6 +31,16 @@ services:
       timeout: 5s
       retries: 10
 
+  data_gateway:
+    build: .
+    container_name: data_gateway
+    command: python -m daemons.data_gateway
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+    env_file: .env
+
   market_sensor:
     build: .
     container_name: market_sensor
@@ -40,6 +50,8 @@ services:
         condition: service_healthy
       timescaledb:
         condition: service_healthy
+      data_gateway:
+        condition: service_started
     restart: always
     env_file: .env
 
@@ -62,6 +74,8 @@ services:
         condition: service_healthy
       timescaledb:
         condition: service_healthy
+      data_gateway:
+        condition: service_started
     restart: always
     env_file: .env
 
@@ -97,6 +111,16 @@ services:
       redis:
         condition: service_healthy
       timescaledb:
+        condition: service_healthy
+    restart: always
+    env_file: .env
+
+  telegram_alerter:
+    build: .
+    container_name: telegram_alerter
+    command: python -m utils.telegram_bot
+    depends_on:
+      redis:
         condition: service_healthy
     restart: always
     env_file: .env

@@ -9,6 +9,7 @@ from redis import asyncio as redis
 import json
 import time
 from collections import deque
+import os
 
 try:
     import uvloop
@@ -18,7 +19,8 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("PaperBridge")
 
-DB_DSN = "postgres://trading_user:trading_pass@localhost:5432/trading_db"
+db_host = os.getenv("DB_HOST", "localhost")
+DB_DSN = f"postgres://trading_user:trading_pass@{db_host}:5432/trading_db"
 
 async def init_db(pool):
     """Initializes the TimescaleDB hypertable for ultra-fast historical P&L logging."""
@@ -298,7 +300,8 @@ async def start_bridge():
     pull_socket = mq.create_subscriber(Ports.ORDERS, topics=[Topics.ORDER_INTENT], bind=True)
     
     # Initialize Redis for config fetching
-    r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+    redis_host = os.getenv("REDIS_HOST", "localhost")
+    r = redis.Redis(host=redis_host, port=6379, db=0, decode_responses=True)
     
     pool = None # Initialize pool to None
     try:

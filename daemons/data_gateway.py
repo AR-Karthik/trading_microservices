@@ -17,6 +17,7 @@ import random
 import sys
 from datetime import datetime, timezone, time as dt_time
 from zoneinfo import ZoneInfo
+import os
 
 import redis.asyncio as redis
 from core.mq import MQManager, Ports, Topics
@@ -54,8 +55,11 @@ CIRCUIT_BREAKER_MATRIX = {
 
 
 class DataGateway:
-    def __init__(self, redis_url: str = "redis://localhost:6379"):
+    def __init__(self, redis_url: str | None = None):
         self.mq = MQManager()
+        if redis_url is None:
+            redis_host = os.getenv("REDIS_HOST", "localhost")
+            redis_url = f"redis://{redis_host}:6379"
         self.redis_url = redis_url
         self.redis_client: redis.Redis | None = None
         self.pub_socket = self.mq.create_publisher(Ports.MARKET_DATA)

@@ -2,6 +2,26 @@ import zmq
 import zmq.asyncio
 import json
 import logging
+import os
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        # Using strings for type names to avoid direct numpy dependency in core if possible,
+        # but since we already use numpy in most daemons, a soft check is safer.
+        try:
+            import numpy as np
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+            if isinstance(obj, np.bool_):
+                return bool(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+        except ImportError:
+            pass
+        return super().default(obj)
+
 
 class MQManager:
     """Wrapper around ZeroMQ for async pub/sub and push/pull messaging."""
@@ -9,13 +29,40 @@ class MQManager:
     def __init__(self):
         self.context = zmq.asyncio.Context()
         self.logger = logging.getLogger("MQ")
-        # Ensure we bind to local interfaces
-        self.host = "127.0.0.1"
+        # In Docker, bind to 0.0.0.0 to be reachable from other containers
+        self.host = "0.0.0.0"
+        self.mq_hosts = {
+            "market_data": os.getenv("MQ_MARKET_DATA_HOST", "127.0.0.1"),
+            "orders": os.getenv("MQ_ORDERS_HOST", "127.0.0.1"),
+            "trade_events": os.getenv("MQ_TRADE_EVENTS_HOST", "127.0.0.1"),
+            "market_state": os.getenv("MQ_MARKET_STATE_HOST", "127.0.0.1"),
+            "system_cmd": os.getenv("MQ_SYSTEM_CMD_HOST", "127.0.0.1"),
+            "logging": os.getenv("MQ_LOGGING_HOST", "127.0.0.1"),
+            "reconciler": os.getenv("MQ_RECONCILER_HOST", "127.0.0.1"),
+            "system_ctrl": os.getenv("MQ_SYSTEM_CTRL_HOST", "127.0.0.1"),
+        }
+
+    def _get_host(self, port, bind):
+        if bind:
+            return self.host # 0.0.0.0
+        # Map ports to hosts for connections
+        port_to_host = {
+            Ports.MARKET_DATA: self.mq_hosts["market_data"],
+            Ports.ORDERS: self.mq_hosts["orders"],
+            Ports.TRADE_EVENTS: self.mq_hosts["trade_events"],
+            Ports.MARKET_STATE: self.mq_hosts["market_state"],
+            Ports.SYSTEM_CMD: self.mq_hosts["system_cmd"],
+            Ports.LOGGING: self.mq_hosts["logging"],
+            Ports.RECONCILER: self.mq_hosts["reconciler"],
+            Ports.SYSTEM_CTRL: self.mq_hosts["system_ctrl"],
+        }
+        return port_to_host.get(port, "127.0.0.1")
 
     def create_publisher(self, port: int, bind: bool = True):
         """Creates an async Publisher socket."""
         socket = self.context.socket(zmq.PUB)
-        addr = f"tcp://{self.host}:{port}"
+        host = self._get_host(port, bind)
+        addr = f"tcp://{host}:{port}"
         if bind:
             socket.bind(addr)
             self.logger.info(f"Publisher bound to {addr}")
@@ -27,7 +74,8 @@ class MQManager:
     def create_subscriber(self, port: int, topics: list = [""], bind: bool = False):
         """Creates an async Subscriber socket."""
         socket = self.context.socket(zmq.SUB)
-        addr = f"tcp://{self.host}:{port}"
+        host = self._get_host(port, bind)
+        addr = f"tcp://{host}:{port}"
         if bind:
             socket.bind(addr)
             self.logger.info(f"Subscriber bound to {addr}")
@@ -45,7 +93,8 @@ class MQManager:
     def create_push(self, port: int, bind: bool = True):
         """Creates an async Push socket."""
         socket = self.context.socket(zmq.PUSH)
-        addr = f"tcp://{self.host}:{port}"
+        host = self._get_host(port, bind)
+        addr = f"tcp://{host}:{port}"
         if bind:
             socket.bind(addr)
             self.logger.info(f"Push socket bound to {addr}")
@@ -57,7 +106,8 @@ class MQManager:
     def create_pull(self, port: int, bind: bool = False):
         """Creates an async Pull socket."""
         socket = self.context.socket(zmq.PULL)
-        addr = f"tcp://{self.host}:{port}"
+        host = self._get_host(port, bind)
+        addr = f"tcp://{host}:{port}"
         if bind:
             socket.bind(addr)
             self.logger.info(f"Pull socket bound to {addr}")
@@ -71,7 +121,8 @@ class MQManager:
         socket = self.context.socket(zmq.DEALER)
         if identity:
             socket.identity = identity
-        addr = f"tcp://{self.host}:{port}"
+        host = self._get_host(port, bind)
+        addr = f"tcp://{host}:{port}"
         if bind:
             socket.bind(addr)
             self.logger.info(f"Dealer socket bound to {addr}")
@@ -83,7 +134,8 @@ class MQManager:
     def create_router(self, port: int, bind: bool = True):
         """Creates an async ROUTER socket (accepts DEALER connections for decoupled dispatch)."""
         socket = self.context.socket(zmq.ROUTER)
-        addr = f"tcp://{self.host}:{port}"
+        host = self._get_host(port, bind)
+        addr = f"tcp://{host}:{port}"
         if bind:
             socket.bind(addr)
             self.logger.info(f"Router socket bound to {addr}")
@@ -94,7 +146,7 @@ class MQManager:
 
     async def send_dealer(self, socket, data: dict, topic: str = None):
         """Send via DEALER socket (prepends empty delimiter frame for ROUTER compat)."""
-        payload = json.dumps(data)
+        payload = json.dumps(data, cls=NumpyEncoder)
         msg = f"{topic} {payload}" if topic else payload
         await socket.send_multipart([b"", msg.encode()])
 
@@ -117,7 +169,7 @@ class MQManager:
 
     async def send_json(self, socket, data: dict, topic: str = None):
         """Helper to send JSON payloads, optionally with a topic prefix for Pub/Sub."""
-        payload = json.dumps(data)
+        payload = json.dumps(data, cls=NumpyEncoder)
         if topic:
             await socket.send_string(f"{topic} {payload}")
         else:
@@ -170,7 +222,10 @@ class Topics:
 
 class RedisLogger:
     """Streams logs to Redis for dashboard visibility."""
-    def __init__(self, redis_url="redis://localhost:6379", key="live_logs", max_len=100):
+    def __init__(self, redis_url=None, key="live_logs", max_len=100):
+        if redis_url is None:
+            host = os.getenv("REDIS_HOST", "localhost")
+            redis_url = f"redis://{host}:6379"
         self.redis = redis.from_url(redis_url)
         self.key = key
         self.max_len = max_len

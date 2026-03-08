@@ -7,6 +7,7 @@ import random
 import time
 import sys
 import pandas as pd
+import os
 from redis import asyncio as redis
 from datetime import datetime, timezone
 from core.mq import MQManager, Ports, RedisLogger
@@ -373,7 +374,7 @@ async def run_strategies(sub_socket, push_socket, mq_manager, redis_client, shm)
             # --- Recommendation 1: Zero-Copy Shared Memory Access ---
             # Instead of just using tick_msg, we pull from SHM for the latest state
             tick = tick_msg
-            if symbol in shm_slots:
+            if shm and symbol in shm_slots:
                 shm_tick = shm.read_tick(shm_slots[symbol])
                 if shm_tick:
                     tick = shm_tick  # Use the SHM data which is potentially newer/faster to read
@@ -431,7 +432,7 @@ async def run_strategies(sub_socket, push_socket, mq_manager, redis_client, shm)
                     dispatch_meta["dispatch_time_epoch"] = time.time()
                     dispatch_meta["broker_order_id"] = None
                     
-                    push_socket.send_json(order)
+                    await mq.send_json(push_socket, order)
                     await redis_client.hset("pending_orders", order["order_id"], json.dumps(dispatch_meta))
                     
                     logger.info(f"DISPATCHED {action} {qty} {symbol} @ {price}")
@@ -444,8 +445,13 @@ async def run_strategies(sub_socket, push_socket, mq_manager, redis_client, shm)
 
 async def start_engine():
     mq = MQManager()
-    redis_client = redis.Redis(host='localhost', port=6379, db=0)
-    shm = TickSharedMemory(create=False) # Read-only access
+    redis_host = os.getenv("REDIS_HOST", "localhost")
+    redis_client = redis.Redis(host=redis_host, port=6379, db=0)
+    try:
+        shm = TickSharedMemory(create=False) # Read-only access
+    except Exception as e:
+        logger.warning(f"⚠️ Shared Memory not found: {e}. Falling back to MQ only.")
+        shm = None
     
     sub_socket = mq.create_subscriber(Ports.MARKET_DATA, topics=["TICK."])
     push_socket = mq.create_push(Ports.ORDERS)

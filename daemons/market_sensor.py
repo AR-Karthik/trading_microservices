@@ -32,9 +32,10 @@ from typing import Any
 
 import numpy as np
 import polars as pl
-import redis
+import redis.asyncio as redis
 
-from core.mq import MQManager, Ports, Topics
+import os
+from core.mq import MQManager, Ports, Topics, NumpyEncoder
 
 logging.basicConfig(
     level=logging.INFO,
@@ -172,7 +173,7 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         result["charm"] = float(charm_val)
         result["vanna"] = float(vanna_val)
         # Flag toxic if charm < -0.05 (severe delta bleed per time decay)
-        result["toxic_option"] = charm_val < -0.05
+        result["toxic_option"] = bool(charm_val < -0.05)
 
         # ── ATR (20-tick) ──────────────────────────────────────────────────
         prices = np.array(snapshot.get("price_series", [spot]))
@@ -203,7 +204,7 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
             mu_b, s_b = np.mean(basis_series), np.std(basis_series)
             z = (basis_series[-1] - mu_b) / s_b if s_b > 0 else 0.0
             result["basis_zscore"] = float(z)
-            result["price_dislocation"] = abs(z) > 3.0
+            result["price_dislocation"] = bool(abs(z) > 3.0)
         else:
             result["basis_zscore"] = 0.0
             result["price_dislocation"] = False
@@ -288,7 +289,8 @@ class MarketSensor:
 
         if not test_mode:
             self.pub = self.mq.create_publisher(Ports.MARKET_STATE)
-            self._redis = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+            redis_host = os.getenv("REDIS_HOST", "localhost")
+            self._redis = redis.Redis(host=redis_host, port=6379, db=0, decode_responses=True)
 
         # Tick buffers (main process — lightweight)
         self.tick_store: dict[str, collections.deque] = collections.defaultdict(
@@ -443,7 +445,8 @@ class MarketSensor:
 
         # Retrieve FII bias from Redis
         try:
-            fii_bias = float(self._redis.get("fii_bias") or 0)
+            fii_bias_val = await self._redis.get("fii_bias")
+            fii_bias = float(fii_bias_val or 0)
         except Exception:
             fii_bias = 0.0
 
@@ -483,15 +486,15 @@ class MarketSensor:
 
         if not self.test_mode:
             await self.mq.send_json(self.pub, state, topic=Topics.MARKET_STATE)
-            self._redis.set("latest_market_state", json.dumps(state))
+            await self._redis.set("latest_market_state", json.dumps(state, cls=NumpyEncoder))
             # Publish individual signals for strategy guards
-            self._redis.set("dispersion_coeff", str(state["dispersion_coeff"]))
-            self._redis.set("log_ofi_zscore", str(state["log_ofi_zscore"]))
-            self._redis.set("cvd_absorption", "1" if state["cvd_absorption"] else "0")
-            self._redis.set("cvd_flip_ticks", str(state["cvd_flip_ticks"]))
-            self._redis.set("price_dislocation", "1" if state["price_dislocation"] else "0")
-            self._redis.set("gex_sign", state["gex_sign"])
-            self._redis.set("atr", str(state["atr"]))
+            await self._redis.set("dispersion_coeff", str(state["dispersion_coeff"]))
+            await self._redis.set("log_ofi_zscore", str(state["log_ofi_zscore"]))
+            await self._redis.set("cvd_absorption", "1" if state["cvd_absorption"] else "0")
+            await self._redis.set("cvd_flip_ticks", str(state["cvd_flip_ticks"]))
+            await self._redis.set("price_dislocation", "1" if state["price_dislocation"] else "0")
+            await self._redis.set("gex_sign", state["gex_sign"])
+            await self._redis.set("atr", str(state["atr"]))
 
         logger.info(
             f"STATE: α={s_total:.1f} | OFI-Z={state['log_ofi_zscore']:.2f} | "

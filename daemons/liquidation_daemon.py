@@ -17,6 +17,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
+import os
 
 import redis.asyncio as redis
 
@@ -55,7 +56,8 @@ class LiquidationDaemon:
     # ── Startup ──────────────────────────────────────────────────────────────
 
     async def run(self):
-        self._redis = redis.from_url("redis://localhost:6379", decode_responses=True)
+        redis_host = os.getenv("REDIS_HOST", "localhost")
+        self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
         logger.info("LiquidationDaemon active. Three-barrier system armed.")
 
         await asyncio.gather(
