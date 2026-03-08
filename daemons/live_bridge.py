@@ -45,8 +45,9 @@ class LiveExecutionEngine:
         self.is_kill_switch_triggered = False
         self.total_realized_pnl = 0.0
         self.multileg_executor = MultiLegExecutor(self)
-        self.order_timestamps = deque()
-        
+        self.order_timestamps = deque()         # Layer 1: 10 OPS token bucket
+        self.minute_timestamps = deque()        # Layer 2: 190req/60s rolling window
+
         ws_url = self.host.replace('https', 'wss').replace('NorenWClientTP', 'NorenWSTP')
         if not ws_url.endswith('/'): ws_url += '/'
         
@@ -151,17 +152,28 @@ class LiveExecutionEngine:
         symbol = order['symbol']
         action = action_map.get(order['action'], 'B')
         
-        # --- Rate Limiting Compliance (10 OPS) ---
+        # --- Dual-Layer Rate Limiting (SRS §5) ---
+        # Layer 1: 10 OPS Token Bucket (SEBI Algo Rule)
         while True:
             now = time.time()
             while self.order_timestamps and self.order_timestamps[0] <= now - 1.0:
                 self.order_timestamps.popleft()
-            
             if len(self.order_timestamps) < 10:
                 self.order_timestamps.append(now)
                 break
-            
             wait_time = self.order_timestamps[0] + 1.001 - now
+            await asyncio.sleep(max(0, wait_time))
+
+        # Layer 2: 190req/60s Rolling Window (prevents Shoonya 200/min lockout)
+        while True:
+            now = time.time()
+            while self.minute_timestamps and self.minute_timestamps[0] <= now - 60.0:
+                self.minute_timestamps.popleft()
+            if len(self.minute_timestamps) < 190:
+                self.minute_timestamps.append(now)
+                break
+            wait_time = self.minute_timestamps[0] + 60.001 - now
+            logger.warning(f"Rate limiter L2: 190req/60s reached. Waiting {wait_time:.2f}s")
             await asyncio.sleep(max(0, wait_time))
 
         logger.warning(f"🚀 SENDING LIVE MKT ORDER: {action} {order['quantity']} {symbol}")
@@ -180,26 +192,32 @@ class LiveExecutionEngine:
         ))
         
         if res and res.get('stat') == 'Ok':
-            # Broker accepted the order. 
-            # In a robust system, we would query the orderbook or wait for WS execution callback before logging to DB.
-            # Assuming immediate fill at current LTP for this implementation.
-            logger.info(f"✅ Live Order Accepted. Shoonya ID: {res['norenordno']}")
-            
-            # Fetch latest tick from local Redis cache to simulate execution price
-            # In absolute production we'd rely solely on the order-book fill payload
+            broker_oid = res['norenordno']
+            logger.info(f"✅ Live Order Accepted. Shoonya ID: {broker_oid}")
+
+            # Update pending_orders with broker_order_id so reconciler can poll it
+            local_oid = order.get('order_id')
+            if local_oid:
+                import json as _json
+                existing_raw = await self.redis.hget('pending_orders', local_oid)
+                if existing_raw:
+                    existing = _json.loads(existing_raw)
+                    existing['broker_order_id'] = broker_oid
+                    await self.redis.hset('pending_orders', local_oid, _json.dumps(existing))
+
             tick_str = await self.redis.get(f"latest_tick:{symbol}")
             exec_price = float(order['price'])
             if tick_str:
                 exec_price = float(json.loads(tick_str)['price'])
-                
+
             return {
-                "id": res['norenordno'], 
+                "id": broker_oid,
                 "time": datetime.now(timezone.utc),
                 "symbol": symbol,
                 "action": order['action'],
                 "quantity": order['quantity'],
-                "price": exec_price, 
-                "fees": 20.0, # Approximate Shoonya MTF
+                "price": exec_price,
+                "fees": 20.0,
                 "strategy_id": order['strategy_id'],
                 "execution_type": "Actual"
             }

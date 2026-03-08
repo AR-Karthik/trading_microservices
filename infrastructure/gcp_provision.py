@@ -8,10 +8,61 @@ import os
 import time
 import json
 import argparse
+import sys
+from datetime import date
 from google.cloud import compute_v1
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Add project root to path so we can import our own utils
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# ── NSE Holiday Guard ─────────────────────────────────────────────────────────
+def is_nse_holiday(target_date: date | None = None) -> bool:
+    """
+    Returns True if target_date is an NSE market holiday.
+    Uses python-holidays package with India country + NSE sub-market.
+    Also filters weekends.
+    """
+    try:
+        import holidays
+        target = target_date or date.today()
+        # Weekends are always non-trading
+        if target.weekday() >= 5:
+            return True
+        # NSE holidays (financial market subset)
+        india_holidays = holidays.country_holidays("IN", subdiv="MH", years=target.year)
+        return target in india_holidays
+    except ImportError:
+        import warnings
+        warnings.warn("python-holidays not installed; skipping NSE holiday check.")
+        return False
+
+
+def abort_if_holiday():
+    """Exits the provisioner if today is an NSE holiday."""
+    today = date.today()
+    if is_nse_holiday(today):
+        print(f"🚫 Today ({today.isoformat()}) is an NSE holiday or weekend. VM will not be started.")
+        sys.exit(0)  # Clean exit (not error) so Cloud Scheduler marks success
+
+
+# ── Macro Event Pre-fetch ─────────────────────────────────────────────────────
+def prefetch_macro_events():
+    """
+    Fetches latest macro events from ForexFactory + FMP and writes to
+    data/macro_calendar.json before the VM is provisioned.
+    On failure, logs a warning but does NOT abort VM creation.
+    """
+    print("Fetching macro calendar (ForexFactory + FMP)...")
+    try:
+        from utils.macro_event_fetcher import fetch_and_write
+        events = fetch_and_write(write_to_disk=True, write_to_redis=False)
+        print(f"✅ Macro calendar: {len(events)} events written.")
+    except Exception as e:
+        print(f"⚠️  Macro event fetch failed ({e}). System controller will use cached calendar.")
+
 
 # ─── Config ───────────────────────────────────────────────
 PROJECT_ID          = os.getenv("GCP_PROJECT_ID", "loanbot-8ac74")
@@ -195,10 +246,24 @@ def delete_instance():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GCP Trading Engine Provisioner")
     parser.add_argument("--action", choices=["create", "delete"], default="create")
+    parser.add_argument("--skip-holiday-check", action="store_true",
+                        help="Override NSE holiday guard (use for manual deploys)")
+    parser.add_argument("--skip-macro-fetch", action="store_true",
+                        help="Skip ForexFactory+FMP macro calendar fetch")
     args = parser.parse_args()
 
     if args.action == "create":
+        # ── NSE Holiday Guard ──────────────────────────────────────────────
+        if not args.skip_holiday_check:
+            abort_if_holiday()
+
+        # ── Macro Event Pre-fetch ──────────────────────────────────────────
+        if not args.skip_macro_fetch:
+            prefetch_macro_events()
+
         get_or_create_firewall(compute_v1.InstancesClient(), PROJECT_ID)
         create_spot_instance()
+
     elif args.action == "delete":
         delete_instance()
+

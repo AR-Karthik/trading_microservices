@@ -66,6 +66,55 @@ class MQManager:
             self.logger.info(f"Pull socket connected to {addr}")
         return socket
 
+    def create_dealer(self, port: int, identity: bytes | None = None, bind: bool = False):
+        """Creates an async DEALER socket (pairs with ROUTER for decoupled async IPC)."""
+        socket = self.context.socket(zmq.DEALER)
+        if identity:
+            socket.identity = identity
+        addr = f"tcp://{self.host}:{port}"
+        if bind:
+            socket.bind(addr)
+            self.logger.info(f"Dealer socket bound to {addr}")
+        else:
+            socket.connect(addr)
+            self.logger.info(f"Dealer socket connected to {addr}")
+        return socket
+
+    def create_router(self, port: int, bind: bool = True):
+        """Creates an async ROUTER socket (accepts DEALER connections for decoupled dispatch)."""
+        socket = self.context.socket(zmq.ROUTER)
+        addr = f"tcp://{self.host}:{port}"
+        if bind:
+            socket.bind(addr)
+            self.logger.info(f"Router socket bound to {addr}")
+        else:
+            socket.connect(addr)
+            self.logger.info(f"Router socket connected to {addr}")
+        return socket
+
+    async def send_dealer(self, socket, data: dict, topic: str = None):
+        """Send via DEALER socket (prepends empty delimiter frame for ROUTER compat)."""
+        payload = json.dumps(data)
+        msg = f"{topic} {payload}" if topic else payload
+        await socket.send_multipart([b"", msg.encode()])
+
+    async def recv_router(self, socket):
+        """Receive via ROUTER socket. Returns (identity, topic, data)."""
+        frames = await socket.recv_multipart()
+        # Frames: [identity, empty_delimiter, payload]
+        identity = frames[0]
+        payload_raw = frames[-1].decode()
+        if " " in payload_raw:
+            parts = payload_raw.split(" ", 1)
+            try:
+                return identity, parts[0], json.loads(parts[1])
+            except json.JSONDecodeError:
+                return identity, parts[0], parts[1]
+        try:
+            return identity, None, json.loads(payload_raw)
+        except json.JSONDecodeError:
+            return identity, None, payload_raw
+
     async def send_json(self, socket, data: dict, topic: str = None):
         """Helper to send JSON payloads, optionally with a topic prefix for Pub/Sub."""
         payload = json.dumps(data)
@@ -109,6 +158,8 @@ class Ports:
     MARKET_STATE = 5558   # Market Sensor publishes MARKET_STATE vector
     SYSTEM_CMD = 5559     # Meta Router publishes SYSTEM_CMD
     LOGGING = 5560        # Centralized logging
+    RECONCILER = 5561     # Order Reconciler ROUTER (receives DEALER intents)
+    SYSTEM_CTRL = 5562    # System Controller broadcasts (lifecycle events)
 
 class Topics:
     TICK_DATA = "TICK"

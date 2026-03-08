@@ -202,6 +202,7 @@ Position Accepted via ORPHAN/HANDOFF command
 - **Market Signals Tab** — Real-time Alpha Score, Hurst, RV, OFI metrics.
 - **Meta-Router Tab** — Regime history and live strategy state (ACTIVE / ORPHANED / SLEEP).
 - **Analytics Tab** — Equity curve, underwater drawdown chart, win rate, and profit factor.
+- **Budget Tracking** — Monitors Global Capital Limit, Available Margin, and Budget Utilization percentage.
 
 ---
 
@@ -270,6 +271,7 @@ Dashboard: `http://localhost:8501`
 | **Kill Switch** | Global PANIC button → instant `SQUARE_OFF_ALL` via Redis pub |
 | **Graceful Exit** | Liquidation Daemon uses optimal stopping, not market dumps |
 | **Signal Barrier** | Immediate exit if CVD/OFI flips against an active position |
+| **Global Budget** | `MAX_ALLOCATED_CAPITAL_INR` physical constraint prevents over-allocation |
 
 ---
 

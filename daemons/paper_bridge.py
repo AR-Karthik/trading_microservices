@@ -67,26 +67,23 @@ async def init_db(pool):
 
 async def calculate_slippage_and_fees(order):
     """
-    Simulates real-world execution costs.
-    --- Recommendation 8: Dynamic Slippage Model ---
-    Buy Price = LTP + (Spread * 0.5)
-    Sell Price = LTP - (Spread * 0.5)
+    Simulates real-world options execution costs.
+    SRS §5: Paper bridge enforces randomized 0.3–0.5 point slippage on simulated fills.
+    This replaces the previous percentage-spread model which was inappropriate for options.
     """
-    # Base broker fee (e.g., 20 INR per order)
-    fees = 20.0
-    
-    # Calculate a dynamic mock spread (0.05% of LTP)
+    import random
+    fees = 20.0  # Shoonya flat fee per order leg
+
+    # Fixed 0.3–0.5 pt slippage (options tick size granularity)
+    slippage = random.uniform(0.3, 0.5)
+
     price = float(order['price'])
-    mock_spread = price * 0.0005 # 5 basis points
-    penalty = mock_spread * 0.5
-    
-    # Adjust execution price
-    if order['action'] == "BUY":
-        execution_price = price + penalty
+    if order['action'] == 'BUY':
+        execution_price = price + slippage   # Pay up
     else:
-        execution_price = price - penalty
-        
-    return execution_price, fees
+        execution_price = price - slippage   # Receive less
+
+    return round(execution_price, 2), fees
 
 async def update_portfolio(conn, execution, fees):
     """Maintains the running portfolio state based on executions."""
