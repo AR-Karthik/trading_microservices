@@ -21,5 +21,46 @@ services:
       - timescaledb_data:/var/lib/postgresql/data
     restart: always
 
+  market_sensor:
+    build: .
+    container_name: market_sensor
+    command: python -m daemons.market_sensor
+    depends_on:
+      - redis
+      - timescaledb
+    restart: always
+    env_file: .env
+
+  meta_router:
+    build: .
+    container_name: meta_router
+    command: python -m daemons.meta_router
+    depends_on:
+      - redis
+    restart: always
+    env_file: .env
+
+  paper_bridge:
+    build: .
+    container_name: paper_bridge
+    command: python -m daemons.paper_bridge
+    depends_on:
+      - redis
+      - timescaledb
+    restart: always
+    env_file: .env
+
+  dashboard:
+    build: .
+    container_name: trading_dashboard
+    command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    depends_on:
+      - redis
+      - timescaledb
+    restart: always
+    env_file: .env
+
 volumes:
   timescaledb_data:

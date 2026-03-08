@@ -4,7 +4,7 @@ import random
 import uuid
 from datetime import datetime, timezone
 import asyncpg
-from core.mq import MQManager, Ports
+from core.mq import MQManager, Ports, Topics
 from redis import asyncio as redis
 import json
 import time
@@ -297,8 +297,8 @@ async def start_bridge():
     # Initialize ZeroMQ Messaging
     mq = MQManager()
     
-    # Receive orders from Strategy Engines
-    pull_socket = mq.create_pull(Ports.ORDERS)
+    # Receive orders from Strategy Engines via SUB
+    pull_socket = mq.create_subscriber(Ports.ORDERS, topics=[Topics.ORDER_INTENT], bind=True)
     
     # Initialize Redis for config fetching
     r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)

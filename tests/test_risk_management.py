@@ -1,18 +1,17 @@
 import pytest
 import asyncio
+import json
 from unittest.mock import AsyncMock, patch, MagicMock
 from daemons.live_bridge import LiveExecutionEngine
 
 @pytest.mark.asyncio
-async def test_kill_switch_trigger(mock_mq, mock_shoonya):
+async def test_kill_switch_trigger(mock_mq, mock_pool, mock_redis, mock_shoonya):
     """
     Validates that the Daily Loss Kill Switch triggers once the loss limit is hit.
     """
     # Initialize engine with a -1000 limit
     with patch('daemons.live_bridge.NorenApi', return_value=mock_shoonya):
-        engine = LiveExecutionEngine()
-        engine.mq = mock_mq
-        engine.redis = AsyncMock()
+        engine = LiveExecutionEngine(mock_mq, mock_pool, mock_redis)
         engine.daily_loss_limit = -1000.0
         
         # Simulating realized P&L drops to -1500
@@ -21,19 +20,21 @@ async def test_kill_switch_trigger(mock_mq, mock_shoonya):
         await engine.check_kill_switch()
         
         assert engine.is_kill_switch_triggered is True
-        # Verify panic signal was published
-        mock_mq.publish.assert_called()
-        args = mock_mq.publish.call_args[0]
-        assert args[1] == "PANIC"
-        assert "KILL_SWITCH" in args[2]["reason"]
+        # Verify panic signal was published to Redis
+        mock_redis.publish.assert_called()
+        args = mock_redis.publish.call_args[0]
+        assert args[0] == "panic_channel"
+        payload = json.loads(args[1])
+        assert payload["action"] == "SQUARE_OFF"
+        assert payload["reason"] == "KILL_SWITCH"
 
 @pytest.mark.asyncio
-async def test_order_blocked_by_kill_switch(mock_mq, mock_shoonya):
+async def test_order_blocked_by_kill_switch(mock_mq, mock_pool, mock_redis, mock_shoonya):
     """
     Ensures that no orders are handled once the kill switch is triggered.
     """
     with patch('daemons.live_bridge.NorenApi', return_value=mock_shoonya):
-        engine = LiveExecutionEngine()
+        engine = LiveExecutionEngine(mock_mq, mock_pool, mock_redis)
         engine.is_kill_switch_triggered = True
         
         order = {"action": "BUY", "quantity": 100, "symbol": "NIFTY"}

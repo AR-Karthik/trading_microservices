@@ -4,7 +4,7 @@ import random
 import logging
 from datetime import datetime, timezone
 import redis.asyncio as redis
-from core.mq import MQManager, Ports
+from core.mq import MQManager, Ports, Topics
 
 try:
     import uvloop

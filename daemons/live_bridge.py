@@ -311,7 +311,7 @@ async def main():
     logger.info("Initializing Live Bridge...")
     
     mq = MQManager()
-    pull_socket = mq.create_pull(Ports.ORDERS)
+    pull_socket = mq.create_subscriber(Ports.ORDERS, topics=[Topics.ORDER_INTENT], bind=True)
     redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
     
     pool = await asyncpg.create_pool(DB_DSN)

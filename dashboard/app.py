@@ -435,114 +435,11 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Deploy Strategy (compact form) ──
-    st.markdown('<p class="section-header">🚀 Deploy Strategy</p>', unsafe_allow_html=True)
-    strat_type = st.selectbox("Strategy Type", ["SMA", "MeanReversion", "OIPulse", "GammaScalping", "Custom"], label_visibility="collapsed")
-
-    # Row 1: ID + Symbols
-    c1, c2 = st.columns(2)
-    strat_id = c1.text_input("Strategy ID", f"MY_{strat_type}_1")
-    symbols = c2.multiselect("Symbols", ["NIFTY50", "BANKNIFTY", "RELIANCE"], default=["NIFTY50"])
-
-    # Row 2: Capital (full width, no Mode radio)
-    max_capital = st.number_input("Max Capital ₹", min_value=1000, value=1000000, step=10000)
-
-    # Strategy Parameters (collapsible)
-    params = {}
-    with st.expander("⚙️ Strategy Parameters", expanded=False):
-        if strat_type == "SMA":
-            params['period'] = st.number_input("SMA Period", min_value=1, value=10)
-        elif strat_type == "MeanReversion":
-            p1, p2 = st.columns(2)
-            params['period'] = p1.number_input("Window", min_value=1, value=5)
-            params['threshold'] = p2.number_input("Threshold", value=0.001, format="%.4f")
-        elif strat_type == "OIPulse":
-            params['oi_threshold'] = st.number_input("OI Surge %", value=2.0, step=0.1)
-        elif strat_type == "GammaScalping":
-            g1, g2 = st.columns(2)
-            params['strike'] = g1.number_input("Strike", value=22000.0, step=50.0)
-            params['expiry_days'] = g2.number_input("Expiry Days", min_value=1.0, value=30.0)
-            g3, g4 = st.columns(2)
-            params['iv'] = g3.number_input("IV", value=0.15, step=0.01, format="%.2f")
-            params['r'] = g4.number_input("R-free", value=0.07, step=0.01, format="%.2f")
-            params['hedge_threshold'] = st.number_input("Hedge Threshold", value=0.10, step=0.01)
-        elif strat_type == "Custom":
-            code_str = st.text_area("Python Code", "def on_tick(symbol, history, position, price):\n    return None", height=120)
-            params['code'] = code_str
-
-    # Scheduling — multiple time slots per day
-    with st.expander("🕒 Schedule", expanded=False):
-        exec_days = st.multiselect("Active Days", ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], default=["Mon", "Tue", "Wed", "Thu", "Fri"])
-        day_map = {"Mon": "Monday", "Tue": "Tuesday", "Wed": "Wednesday", "Thu": "Thursday", "Fri": "Friday", "Sat": "Saturday", "Sun": "Sunday"}
-
-        num_slots = st.number_input("Number of time slots", min_value=1, max_value=5, value=1, step=1)
-        time_slots = []
-        for i in range(int(num_slots)):
-            st.caption(f"Slot {i+1}")
-            s1, s2 = st.columns(2)
-            default_starts = ["09:15", "14:00", "10:30", "15:00", "11:00"]
-            default_ends   = ["11:30", "15:30", "12:00", "15:30", "12:30"]
-            slot_start = s1.time_input(f"Start #{i+1}", value=datetime.strptime(default_starts[i], "%H:%M").time(), key=f"slot_start_{i}")
-            slot_end   = s2.time_input(f"End #{i+1}", value=datetime.strptime(default_ends[i], "%H:%M").time(), key=f"slot_end_{i}")
-            time_slots.append({"start": slot_start.strftime("%H:%M"), "end": slot_end.strftime("%H:%M")})
-
-    enabled = st.checkbox("Strategy Enabled", value=True)
-    submitted = st.button("🚀 Deploy Strategy", use_container_width=True, type="primary")
-
-    if submitted:
-        config = {
-            "id": strat_id, "type": strat_type, "symbols": symbols,
-            "max_capital": max_capital, "enabled": enabled,
-            "execution_type": st.session_state.trading_mode,
-            "schedule": {
-                "days": [day_map.get(d, d) for d in exec_days],
-                "slots": time_slots
-            },
-            **params
-        }
+    st.divider()
+    # ── Console ──
+    with st.expander("📟 System Console", expanded=True):
         if r:
-            r.hset("active_strategies", strat_id, json.dumps(config))
-            st.success(f"✅ {strat_id} deployed!")
-        else:
-            st.info(f"✅ {strat_id} configured (Redis offline)")
-
-    # ── Active Strategies ──
-    with st.expander("📋 Active Strategies", expanded=False):
-        if r:
-            active_strats = r.hgetall("active_strategies")
-            if active_strats:
-                for strat, config_raw in active_strats.items():
-                    config = json.loads(config_raw)
-                    is_active = config.get('enabled', True)
-                    icon = "🟢" if is_active else "🔴"
-                    st.markdown(f"{icon} **{strat}** · `{config['type']}`")
-                    c1, c2 = st.columns(2)
-                    if c1.button("🗑️", key=f"del_{strat}", help="Delete"):
-                        r.hdel("active_strategies", strat)
-                        st.rerun()
-                    if c2.button("🛑" if is_active else "▶️", key=f"tog_{strat}", help="Toggle"):
-                        config['enabled'] = not is_active
-                        r.hset("active_strategies", strat, json.dumps(config))
-                        st.rerun()
-            else:
-                st.caption("No strategies deployed.")
-        else:
-            st.caption("Redis offline.")
-
-    # ── Risk Controls ──
-    with st.expander("🛡️ Risk Controls", expanded=False):
-        with st.form("risk_form"):
-            stop_day_loss = st.number_input("Stop Day Loss ₹", min_value=0.0, value=50000.0, step=5000.0)
-            if st.form_submit_button("Update Risk", use_container_width=True):
-                risk_config = {"stop_day_loss": stop_day_loss}
-                if r:
-                    r.set("global_risk_settings", json.dumps(risk_config))
-                    st.success("Risk settings updated!")
-
-    # ── System Console ──
-    with st.expander("📟 Console", expanded=False):
-        if r:
-            logs_raw = r.lrange("live_logs", 0, 10)
+            logs_raw = r.lrange("live_logs", 0, 20)
             if logs_raw:
                 for log_b in logs_raw:
                     try:
@@ -638,7 +535,10 @@ st.markdown("")
 # ─────────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────────
-tab1, tab2, tab5, tab3, tab4 = st.tabs(["📈 Terminal", "🛡️ Risk Monitor", "🔬 Performance Analytics", "📅 Weekly P&L", "📆 Monthly P&L"])
+# ─────────────────────────────────────────────────────────────
+# Tabs
+# ─────────────────────────────────────────────────────────────
+tab1, tab_signals, tab_meta, tab5, tab_pnl = st.tabs(["🚀 Terminal", "📡 Market Signals", "🧠 Meta-Router", "🔬 Strategy Analytics", "📅 Performance History"])
 
 with tab1:
     st.markdown(f"**Tick-to-Trade Latency:** `< 2ms` via ZeroMQ", unsafe_allow_html=True)
@@ -709,48 +609,53 @@ with tab1:
     else:
         st.info("No trades yet.")
 
-with tab2:
-    st.markdown("##### ⚡ Greeks & Risk")
-    
-    # We no longer need the local selectbox since we have a global one, 
-    # but we can preserve the logic using selected_global_strat or just show it for the selected strat directly
-    if selected_global_strat == "All Portfolio":
-        st.markdown("*Showing aggregated portfolio risk metrics.*")
+with tab_signals:
+    st.markdown("##### 📡 Advanced Feature Stream (Polars)")
+    if r:
+        state_raw = r.get("latest_market_state")
+        if state_raw:
+            state = json.loads(state_raw)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Hurst Exponent", f"{state.get('hurst', 0.5):.2f}")
+            c2.metric("Realized Vol (15m)", f"{state.get('rv', 0.0):.6f}")
+            c3.metric("Order Flow Imbalance", f"{state.get('ofi', 0):,.0f}")
+            c4.metric("Spread Z-Score", f"{state.get('spread_z', 0):.2f}")
+            
+            c5, c6, c7, c8 = st.columns(4)
+            c5.metric("Implied Vol (ATM)", f"{state.get('iv', 0):.1f}%")
+            c6.metric("Options Skew", f"{state.get('skew', 0):.2f}")
+            c7.metric("Book Depth Rato", f"{state.get('book_depth', 1.0):.2f}")
+            c8.metric("Lead-Lag Z", "1.15") # Placeholder
+            
+            st.divider()
+            st.markdown("###### Feature Sensitivity (Correlation)")
+            # Simulated Polars Correlation Matrix
+            st.dataframe(pd.DataFrame({
+                "Hurst": [1.0, 0.2, 0.45],
+                "OFI": [0.2, 1.0, 0.6],
+                "RV": [0.45, 0.6, 1.0]
+            }, index=["Hurst", "OFI", "RV"]), use_container_width=True)
+        else:
+            st.info("Market Sensor offline. No signals detected.")
     else:
-        st.markdown(f"*Showing risk metrics for **{selected_global_strat}**.*")
+        st.error("Redis Connection Failed.")
+
+with tab_meta:
+    st.markdown("##### 🧠 Regime & Lifecycle Audit")
+    if r:
+        regime_history = r.lrange("regime_shifts", 0, 15)
+        if regime_history:
+            for item in regime_history:
+                shift = json.loads(item)
+                st.markdown(f"**{shift['time']}**: Regime `{shift['old']}` ➡️ `{shift['new']}`")
         
-    filtered_port = port_df.copy() # Already filtered globally
-
-    g1, g2, g3, g4 = st.columns(4)
-    if selected_global_strat == "All Portfolio":
-        g1.metric("Portfolio Delta", "-0.45", delta="0.02")
-        g2.metric("Portfolio Gamma", "12.8")
-        g3.metric("Portfolio Vega", "₹ 4,250")
-        g4.metric("Portfolio Theta", "-₹ 1,200", delta_color="inverse")
-    else:
-        g1.metric(f"{selected_global_strat} Delta", "0.15", delta="-0.01")
-        g2.metric(f"{selected_global_strat} Gamma", "4.2")
-        g3.metric(f"{selected_global_strat} Vega", "₹ 1,100")
-        g4.metric(f"{selected_global_strat} Theta", "-₹ 350", delta_color="inverse")
-
-    st.markdown("")
-    if not filtered_port.empty:
-        st.markdown(f"##### 📊 Capital Allocation ({selected_global_strat})")
-        cap_data = filtered_port.copy()
-        cap_data['abs_value'] = abs(cap_data['quantity'] * cap_data['avg_price'].astype(float))
-        try:
-            import altair as alt
-            chart = alt.Chart(cap_data).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
-                x=alt.X('abs_value:Q', title="Capital (₹)"),
-                y=alt.Y('symbol:N', sort='-x', title=""),
-                color=alt.Color('abs_value:Q', scale=alt.Scale(scheme='viridis'), legend=None),
-                tooltip=['symbol', 'abs_value']
-            ).properties(height=200).configure_view(stroke=None).configure_axis(
-                labelColor='#8b949e', titleColor='#8b949e'
-            )
-            st.altair_chart(chart, use_container_width=True)
-        except Exception:
-            st.bar_chart(cap_data.set_index('symbol')['abs_value'])
+        st.divider()
+        st.markdown("###### Strategy States")
+        daemons = ["STRAT_GAMMA", "STRAT_REVERSION", "STRAT_EXPIRY", "STRAT_EOD_VWAP"]
+        for d in daemons:
+            state = r.get(f"state:{d}") or "SLEEP"
+            icon = "🟢" if state == "ACTIVE" else "🟠" if state == "ORPHANED" else "💤"
+            st.markdown(f"{icon} **{d}**: `{state}`")
 
 with tab5:
     st.markdown("##### 🔬 Advanced Performance Analytics")
@@ -773,40 +678,31 @@ with tab5:
     else:
         st.info("Insufficient trade history for analytics.")
 
-with tab3:
-    st.markdown("##### Weekly Performance")
-    weekly_agg = fetch_aggregated_pnl(view_type, 'week', group_by_day=False, strategy_id=selected_global_strat)
-    weekly_daily = fetch_aggregated_pnl(view_type, 'week', group_by_day=True, strategy_id=selected_global_strat)
-    if not weekly_agg.empty:
-        import altair as alt
-        weekly_chart_df = weekly_agg.groupby(['display_period', 'strategy_id'])['net_profit'].sum().reset_index()
-        chart = alt.Chart(weekly_chart_df).mark_bar().encode(
-            x=alt.X('strategy_id:N', title=None),
-            y=alt.Y('net_profit:Q', title='Net Profit'),
-            color=alt.condition(alt.datum.net_profit > 0, alt.value('#3fb950'), alt.value('#f85149')),
-            column=alt.Column('display_period:N', title='Period'),
-            tooltip=['display_period', 'strategy_id', 'net_profit']
-        ).properties(width=150, height=300).configure_view(stroke=None)
-        st.altair_chart(chart)
-        st.dataframe(weekly_daily.style.format({"total_fees": "{:.2f}", "avg_price": "{:.2f}", "net_profit": "{:.2f}"}), use_container_width=True, hide_index=True)
-    else:
-        st.info("No weekly data available.")
-
-with tab4:
-    st.markdown("##### Monthly Performance")
-    monthly_agg = fetch_aggregated_pnl(view_type, 'month', group_by_day=False, strategy_id=selected_global_strat)
-    monthly_daily = fetch_aggregated_pnl(view_type, 'month', group_by_day=True, strategy_id=selected_global_strat)
-    if not monthly_agg.empty:
-        import altair as alt
-        monthly_chart_df = monthly_agg.groupby(['display_period', 'strategy_id'])['net_profit'].sum().reset_index()
-        chart = alt.Chart(monthly_chart_df).mark_bar().encode(
-            x=alt.X('strategy_id:N', title=None),
-            y=alt.Y('net_profit:Q', title='Net Profit'),
-            color=alt.condition(alt.datum.net_profit > 0, alt.value('#3fb950'), alt.value('#f85149')),
-            column=alt.Column('display_period:N', title='Period'),
-            tooltip=['display_period', 'strategy_id', 'net_profit']
-        ).properties(width=150, height=300).configure_view(stroke=None)
-        st.altair_chart(chart)
-        st.dataframe(monthly_daily.style.format({"total_fees": "{:.2f}", "avg_price": "{:.2f}", "net_profit": "{:.2f}"}), use_container_width=True, hide_index=True)
-    else:
-        st.info("No monthly data available.")
+with tab_pnl:
+    st.markdown("##### 📅 Performance History")
+    p1, p2 = st.tabs(["Weekly", "Monthly"])
+    with p1:
+        weekly_agg = fetch_aggregated_pnl(view_type, 'week', group_by_day=False, strategy_id=selected_global_strat)
+        if not weekly_agg.empty:
+            st.dataframe(weekly_agg, use_container_width=True)
+        else:
+            st.info("No weekly data available.")
+    with p2:
+        monthly_agg = fetch_aggregated_pnl(view_type, 'month', group_by_day=False, strategy_id=selected_global_strat)
+        if not monthly_agg.empty:
+            st.dataframe(monthly_agg, use_container_width=True)
+            try:
+                import altair as alt
+                monthly_chart_df = monthly_agg.groupby(['display_period', 'strategy_id'])['net_profit'].sum().reset_index()
+                chart = alt.Chart(monthly_chart_df).mark_bar().encode(
+                    x=alt.X('strategy_id:N', title=None),
+                    y=alt.Y('net_profit:Q', title='Net Profit'),
+                    color=alt.condition(alt.datum.net_profit > 0, alt.value('#3fb950'), alt.value('#f85149')),
+                    column=alt.Column('display_period:N', title='Period'),
+                    tooltip=['display_period', 'strategy_id', 'net_profit']
+                ).properties(width=150, height=300).configure_view(stroke=None)
+                st.altair_chart(chart)
+            except Exception:
+                pass
+        else:
+            st.info("No monthly data available.")

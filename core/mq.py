@@ -12,37 +12,58 @@ class MQManager:
         # Ensure we bind to local interfaces
         self.host = "127.0.0.1"
 
-    def create_publisher(self, port: int):
-        """Creates an async Publisher socket bound to the given port."""
+    def create_publisher(self, port: int, bind: bool = True):
+        """Creates an async Publisher socket."""
         socket = self.context.socket(zmq.PUB)
-        socket.bind(f"tcp://{self.host}:{port}")
-        self.logger.info(f"Publisher bound to port {port}")
+        addr = f"tcp://{self.host}:{port}"
+        if bind:
+            socket.bind(addr)
+            self.logger.info(f"Publisher bound to {addr}")
+        else:
+            socket.connect(addr)
+            self.logger.info(f"Publisher connected to {addr}")
         return socket
 
-    def create_subscriber(self, port: int, topics: list = [""]):
-        """Creates an async Subscriber socket connected to the given port."""
+    def create_subscriber(self, port: int, topics: list = [""], bind: bool = False):
+        """Creates an async Subscriber socket."""
         socket = self.context.socket(zmq.SUB)
-        socket.connect(f"tcp://{self.host}:{port}")
+        addr = f"tcp://{self.host}:{port}"
+        if bind:
+            socket.bind(addr)
+            self.logger.info(f"Subscriber bound to {addr}")
+        else:
+            socket.connect(addr)
+            self.logger.info(f"Subscriber connected to {addr}")
+            
         for topic in topics:
             if isinstance(topic, str):
                 socket.setsockopt_string(zmq.SUBSCRIBE, topic)
             else:
                 socket.setsockopt(zmq.SUBSCRIBE, topic)
-        self.logger.info(f"Subscriber connected to port {port} with topics {topics}")
         return socket
 
-    def create_push(self, port: int):
-        """Creates an async Push socket for specific task execution commands."""
+    def create_push(self, port: int, bind: bool = True):
+        """Creates an async Push socket."""
         socket = self.context.socket(zmq.PUSH)
-        socket.bind(f"tcp://{self.host}:{port}")
-        self.logger.info(f"Push socket bound to port {port}")
+        addr = f"tcp://{self.host}:{port}"
+        if bind:
+            socket.bind(addr)
+            self.logger.info(f"Push socket bound to {addr}")
+        else:
+            socket.connect(addr)
+            self.logger.info(f"Push socket connected to {addr}")
         return socket
 
-    def create_pull(self, port: int):
-        """Creates an async Pull socket to receive task execution commands."""
+    def create_pull(self, port: int, bind: bool = False):
+        """Creates an async Pull socket."""
         socket = self.context.socket(zmq.PULL)
-        socket.connect(f"tcp://{self.host}:{port}")
-        self.logger.info(f"Pull socket connected to port {port}")
+        addr = f"tcp://{self.host}:{port}"
+        if bind:
+            socket.bind(addr)
+            self.logger.info(f"Pull socket bound to {addr}")
+        else:
+            socket.connect(addr)
+            self.logger.info(f"Pull socket connected to {addr}")
         return socket
 
     async def send_json(self, socket, data: dict, topic: str = None):
@@ -82,9 +103,19 @@ import redis.asyncio as redis
 
 # Common Ports Configuration
 class Ports:
-    MARKET_DATA = 5555  # Data Gateway publishes here
-    ORDERS = 5556       # Strategy Engine pushes orders here, Paper Bridge pulls
-    TRADE_EVENTS = 5557 # Paper Bridge publishes executions here
+    MARKET_DATA = 5555    # Data Gateway publishes TICK_DATA
+    ORDERS = 5556         # Strategy Engine pushes ORDER_INTENT
+    TRADE_EVENTS = 5557   # Execution Bridge publishes FILL_RECEIPT
+    MARKET_STATE = 5558   # Market Sensor publishes MARKET_STATE vector
+    SYSTEM_CMD = 5559     # Meta Router publishes SYSTEM_CMD
+    LOGGING = 5560        # Centralized logging
+
+class Topics:
+    TICK_DATA = "TICK"
+    MARKET_STATE = "STATE"
+    SYSTEM_CMD = "CMD"
+    ORDER_INTENT = "INTENT"
+    FILL_RECEIPT = "FILL"
 
 class RedisLogger:
     """Streams logs to Redis for dashboard visibility."""

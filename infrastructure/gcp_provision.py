@@ -18,7 +18,7 @@ def create_spot_instance():
     # Startup script to install Docker and Tailscale
     startup_script = f"""#!/bin/bash
     sudo apt-get update
-    sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+    sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common git
     curl -fsSL https://download.docker.com/linux/debian/gpg | sudo apt-key add -
     sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/debian $(lsb_release -cs) stable"
     sudo apt-get update
@@ -30,9 +30,13 @@ def create_spot_instance():
     curl -fsSL https://tailscale.com/install.sh | sh
     sudo tailscale up --authkey={TAILSCALE_AUTH_KEY}
     
-    # Clone repo and start docker-compose (Assuming repo will be pulled)
-    # git clone https://github.com/AR-Karthik/trading_microservices.git /opt/trading_microservices
-    # cd /opt/trading_microservices && sudo docker-compose up -d
+    # Clone repo and start docker-compose
+    git clone https://github.com/AR-Karthik/trading_microservices.git /opt/trading_microservices
+    cd /opt/trading_microservices
+    
+    # Note: In a real scenario, you'd securely inject the .env file here
+    # For now, we assume it's part of the repo or provided via another secure channel
+    sudo docker-compose up -d
     """
 
     instance = compute_v1.Instance()

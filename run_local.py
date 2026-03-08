@@ -14,38 +14,49 @@ def start_services():
     print("Waiting for databases to initialize...")
     time.sleep(5)
 
-    print("Starting Python microservices...")
+    print("Starting Resilient Python Microservices...")
     
+    # Base services (Resilience & Logic)
     processes = [
-        ("Strategy Engine", f"{sys.executable} -m daemons.strategy_engine"),
+        ("Market Sensor", f"{sys.executable} -m daemons.market_sensor"),
+        ("Meta Router", f"{sys.executable} -m daemons.meta_router"),
+        ("Liquidation Daemon", f"{sys.executable} -m daemons.liquidation_daemon"),
         ("Paper Bridge", f"{sys.executable} -m daemons.paper_bridge"),
-        ("Dashboard", f"{sys.executable} -m streamlit run dashboard/app.py --server.headless true")
+        ("Dashboard", f"{sys.executable} -m streamlit run dashboard/app.py")
     ]
     
-    if len(sys.argv) > 1 and sys.argv[1] == '--live':
-        print("🟢 Live Mode Requested: Adding Shoonya Gateway and Live execution bridge...")
-        processes.insert(0, ("Shoonya Gateway", f"{sys.executable} -m daemons.shoonya_gateway"))
-        processes.insert(3, ("Live Bridge", f"{sys.executable} -m daemons.live_bridge"))
-    else:
-        print("📄 Paper Mode: Using Mock Data Gateway.")
-        processes.insert(0, ("Mock Data Gateway", f"{sys.executable} -m daemons.data_gateway"))
+    # Strategy Daemons
+    strategies = [
+        ("Strat Gamma", f"{sys.executable} -m daemons.strat_gamma"),
+        ("Strat Reversion", f"{sys.executable} -m daemons.strat_reversion"),
+        ("Strat Expiry", f"{sys.executable} -m daemons.strat_expiry"),
+        ("Strat EOD", f"{sys.executable} -m daemons.strat_eod_vwap")
+    ]
+    processes.extend(strategies)
     
-    if '--shadow' in sys.argv:
-        print("👤 Shadow Mode Requested: Launching an experimental Shadow Strategy Engine...")
-        processes.append(("Shadow Strategy Engine", f"{sys.executable} -m daemons.strategy_engine --shadow"))
+    # Data Ingestion
+    if len(sys.argv) > 1 and sys.argv[1] == '--live':
+        print("Live Mode: Adding Shoonya Gateway...")
+        processes.insert(0, ("Shoonya Gateway", f"{sys.executable} -m daemons.shoonya_gateway"))
+    else:
+        print("Paper Mode: Using Mock Data Gateway.")
+        processes.insert(0, ("Mock Data Gateway", f"{sys.executable} -m daemons.data_gateway"))
     
     running_procs = []
     
     try:
         for name, cmd in processes:
             print(f"Starting {name}...")
-            # Using Popen to run asynchronously
-            p = subprocess.Popen(cmd.split(), env=os.environ.copy())
+            # Ensure current directory is in PYTHONPATH for module discovery
+            env = os.environ.copy()
+            env["PYTHONPATH"] = f".{os.pathsep}{env.get('PYTHONPATH', '')}"
+            
+            p = subprocess.Popen(cmd.split(), env=env)
             running_procs.append((name, p))
             
-        print("\nAll services started! Press Ctrl+C to stop.")
+        print("\nAll resilient services started! View Dashboard for monitoring.")
+        print("Press Ctrl+C to stop.\n")
         
-        # Keep main thread alive
         while True:
             time.sleep(1)
             
