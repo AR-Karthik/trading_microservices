@@ -11068,3 +11068,248 @@ $16
 latest_tick:HDFC
 $234
 {"symbol": "HDFC", "price": 1667.26, "prev_price": 1668.56, "volume": 5, "oi": 1343927, "prev_oi": 1342599, "bid": 1667.09, "ask": 1667.6, "bid_vol": 243, "ask_vol": 62, "timestamp": "2026-03-08T18:36:27.013241+00:00", "type": "TICK"}
+*3
+$3
+SET
+$21
+latest_tick:BANKNIFTY
+$245
+{"symbol": "BANKNIFTY", "price": 46888.44, "prev_price": 46859.04, "volume": 114, "oi": 1378552, "prev_oi": 1376848, "bid": 46888.11, "ask": 46888.6, "bid_vol": 58, "ask_vol": 280, "timestamp": "2026-03-08T18:36:27.180728+00:00", "type": "TICK"}
+*3
+$3
+SET
+$20
+latest_tick:RELIANCE
+$241
+{"symbol": "RELIANCE", "price": 1475.58, "prev_price": 1477.41, "volume": 141, "oi": 1103838, "prev_oi": 1104770, "bid": 1475.1, "ask": 1475.96, "bid_vol": 368, "ask_vol": 319, "timestamp": "2026-03-08T18:36:27.363047+00:00", "type": "TICK"}
+*3
+$3
+SET
+$21
+latest_tick:BANKNIFTY
+$246
+{"symbol": "BANKNIFTY", "price": 46896.96, "prev_price": 46888.44, "volume": 42, "oi": 1377914, "prev_oi": 1378552, "bid": 46896.73, "ask": 46897.24, "bid_vol": 291, "ask_vol": 366, "timestamp": "2026-03-08T18:36:27.447595+00:00", "type": "TICK"}
+*3
+$3
+SET
+$16
+latest_tick:INFY
+$237
+{"symbol": "INFY", "price": 1795.47, "prev_price": 1794.61, "volume": 33, "oi": 1490813, "prev_oi": 1489416, "bid": 1795.02, "ask": 1795.78, "bid_vol": 209, "ask_vol": 277, "timestamp": "2026-03-08T18:36:27.607474+00:00", "type": "TICK"}
+*3
+$3
+SET
+$20
+latest_tick:RELIANCE
+$241
+{"symbol": "RELIANCE", "price": 1476.71, "prev_price": 1475.58, "volume": 161, "oi": 1103391, "prev_oi": 1103838, "bid": 1476.36, "ask": 1476.86, "bid_vol": 135, "ask_vol": 67, "timestamp": "2026-03-08T18:36:27.713222+00:00", "type": "TICK"}
+*3
+$3
+SET
+$19
+latest_tick:NIFTY50
+$244
+{"symbol": "NIFTY50", "price": 22206.91, "prev_price": 22222.68, "volume": 45, "oi": 1254006, "prev_oi": 1254107, "bid": 22206.74, "ask": 22207.07, "bid_vol": 419, "ask_vol": 281, "timestamp": "2026-03-08T18:36:27.861504+00:00", "type": "TICK"}
+*3
+$3
+SET
+$20
+latest_tick:RELIANCE
+$241
+{"symbol": "RELIANCE", "price": 1475.85, "prev_price": 1476.71, "volume": 13, "oi": 1102647, "prev_oi": 1103391, "bid": 1475.47, "ask": 1476.05, "bid_vol": 143, "ask_vol": 380, "timestamp": "2026-03-08T18:36:27.968410+00:00", "type": "TICK"}
+*3
+$3
+SET
+$20
+latest_tick:RELIANCE
+$240
+{"symbol": "RELIANCE", "price": 1474.71, "prev_price": 1475.85, "volume": 76, "oi": 1102944, "prev_oi": 1102647, "bid": 1474.3, "ask": 1475.07, "bid_vol": 167, "ask_vol": 201, "timestamp": "2026-03-08T18:36:28.096431+00:00", "type": "TICK"}
+*3
+$3
+SET
+$15
+latest_tick:TCS
+$235
+{"symbol": "TCS", "price": 3997.09, "prev_price": 3999.9, "volume": 29, "oi": 1191367, "prev_oi": 1191799, "bid": 3996.62, "ask": 3997.26, "bid_vol": 122, "ask_vol": 327, "timestamp": "2026-03-08T18:36:28.189081+00:00", "type": "TICK"}
+*3
+$3
+SET
+$19
+latest_tick:NIFTY50
+$244
+{"symbol": "NIFTY50", "price": 22199.31, "prev_price": 22206.91, "volume": 13, "oi": 1252876, "prev_oi": 1254006, "bid": 22199.11, "ask": 22199.73, "bid_vol": 481, "ask_vol": 391, "timestamp": "2026-03-08T18:36:28.339257+00:00", "type": "TICK"}
+*3
+$3
+SET
+$15
+latest_tick:TCS
+$236
+{"symbol": "TCS", "price": 4000.89, "prev_price": 3997.09, "volume": 35, "oi": 1190559, "prev_oi": 1191367, "bid": 4000.75, "ask": 4001.38, "bid_vol": 149, "ask_vol": 398, "timestamp": "2026-03-08T18:36:28.401413+00:00", "type": "TICK"}
+*3
+$3
+SET
+$21
+latest_tick:ICICIBANK
+$239
+{"symbol": "ICICIBANK", "price": 1215.39, "prev_price": 1214.5, "volume": 54, "oi": 924639, "prev_oi": 924448, "bid": 1214.98, "ask": 1215.84, "bid_vol": 293, "ask_vol": 256, "timestamp": "2026-03-08T18:36:28.485309+00:00", "type": "TICK"}
+*3
+$3
+SET
+$16
+latest_tick:INFY
+$238
+{"symbol": "INFY", "price": 1795.03, "prev_price": 1795.47, "volume": 103, "oi": 1491325, "prev_oi": 1490813, "bid": 1794.57, "ask": 1795.15, "bid_vol": 252, "ask_vol": 228, "timestamp": "2026-03-08T18:36:28.602914+00:00", "type": "TICK"}
+*3
+$3
+SET
+$16
+latest_tick:HDFC
+$237
+{"symbol": "HDFC", "price": 1665.42, "prev_price": 1667.26, "volume": 43, "oi": 1345236, "prev_oi": 1343927, "bid": 1665.29, "ask": 1665.82, "bid_vol": 128, "ask_vol": 223, "timestamp": "2026-03-08T18:36:28.680624+00:00", "type": "TICK"}
+*3
+$3
+SET
+$21
+latest_tick:BANKNIFTY
+$246
+{"symbol": "BANKNIFTY", "price": 46909.58, "prev_price": 46896.96, "volume": 20, "oi": 1376775, "prev_oi": 1377914, "bid": 46909.13, "ask": 46909.74, "bid_vol": 318, "ask_vol": 165, "timestamp": "2026-03-08T18:36:28.803918+00:00", "type": "TICK"}
+*3
+$3
+SET
+$19
+latest_tick:NIFTY50
+$244
+{"symbol": "NIFTY50", "price": 22207.53, "prev_price": 22199.31, "volume": 22, "oi": 1253376, "prev_oi": 1252876, "bid": 22207.29, "ask": 22208.03, "bid_vol": 248, "ask_vol": 391, "timestamp": "2026-03-08T18:36:28.882380+00:00", "type": "TICK"}
+*3
+$3
+SET
+$21
+latest_tick:BANKNIFTY
+$244
+{"symbol": "BANKNIFTY", "price": 46920.51, "prev_price": 46909.58, "volume": 56, "oi": 1377653, "prev_oi": 1376775, "bid": 46920.3, "ask": 46921.0, "bid_vol": 190, "ask_vol": 453, "timestamp": "2026-03-08T18:36:29.052498+00:00", "type": "TICK"}
+*3
+$3
+SET
+$15
+latest_tick:TCS
+$236
+{"symbol": "TCS", "price": 4005.33, "prev_price": 4000.89, "volume": 80, "oi": 1190069, "prev_oi": 1190559, "bid": 4004.93, "ask": 4005.47, "bid_vol": 393, "ask_vol": 440, "timestamp": "2026-03-08T18:36:29.144216+00:00", "type": "TICK"}
+*3
+$3
+SET
+$16
+latest_tick:INFY
+$238
+{"symbol": "INFY", "price": 1795.63, "prev_price": 1795.03, "volume": 114, "oi": 1490164, "prev_oi": 1491325, "bid": 1795.17, "ask": 1796.02, "bid_vol": 246, "ask_vol": 348, "timestamp": "2026-03-08T18:36:29.191978+00:00", "type": "TICK"}
+*3
+$3
+SET
+$21
+latest_tick:ICICIBANK
+$241
+{"symbol": "ICICIBANK", "price": 1215.21, "prev_price": 1215.39, "volume": 117, "oi": 924103, "prev_oi": 924639, "bid": 1214.78, "ask": 1215.32, "bid_vol": 115, "ask_vol": 457, "timestamp": "2026-03-08T18:36:29.238712+00:00", "type": "TICK"}
+*3
+$3
+SET
+$20
+latest_tick:RELIANCE
+$240
+{"symbol": "RELIANCE", "price": 1475.5, "prev_price": 1474.71, "volume": 72, "oi": 1103683, "prev_oi": 1102944, "bid": 1475.14, "ask": 1475.92, "bid_vol": 421, "ask_vol": 206, "timestamp": "2026-03-08T18:36:29.361373+00:00", "type": "TICK"}
+*3
+$3
+SET
+$16
+latest_tick:HDFC
+$238
+{"symbol": "HDFC", "price": 1663.95, "prev_price": 1665.42, "volume": 153, "oi": 1345664, "prev_oi": 1345236, "bid": 1663.69, "ask": 1664.41, "bid_vol": 191, "ask_vol": 301, "timestamp": "2026-03-08T18:36:29.423286+00:00", "type": "TICK"}
+*3
+$3
+SET
+$15
+latest_tick:TCS
+$236
+{"symbol": "TCS", "price": 4009.24, "prev_price": 4005.33, "volume": 33, "oi": 1191466, "prev_oi": 1190069, "bid": 4009.13, "ask": 4009.58, "bid_vol": 500, "ask_vol": 128, "timestamp": "2026-03-08T18:36:29.642966+00:00", "type": "TICK"}
+*3
+$3
+SET
+$16
+latest_tick:INFY
+$237
+{"symbol": "INFY", "price": 1795.53, "prev_price": 1795.63, "volume": 87, "oi": 1491802, "prev_oi": 1490164, "bid": 1795.14, "ask": 1795.67, "bid_vol": 346, "ask_vol": 478, "timestamp": "2026-03-08T18:36:29.830223+00:00", "type": "TICK"}
+*3
+$3
+SET
+$19
+latest_tick:NIFTY50
+$244
+{"symbol": "NIFTY50", "price": 22222.33, "prev_price": 22207.53, "volume": 129, "oi": 1254131, "prev_oi": 1253376, "bid": 22221.9, "ask": 22222.66, "bid_vol": 424, "ask_vol": 318, "timestamp": "2026-03-08T18:36:29.891856+00:00", "type": "TICK"}
+*3
+$3
+SET
+$16
+latest_tick:INFY
+$238
+{"symbol": "INFY", "price": 1795.61, "prev_price": 1795.53, "volume": 158, "oi": 1490373, "prev_oi": 1491802, "bid": 1795.34, "ask": 1795.91, "bid_vol": 377, "ask_vol": 478, "timestamp": "2026-03-08T18:36:29.938822+00:00", "type": "TICK"}
+*3
+$3
+SET
+$19
+latest_tick:NIFTY50
+$245
+{"symbol": "NIFTY50", "price": 22225.11, "prev_price": 22222.33, "volume": 172, "oi": 1254138, "prev_oi": 1254131, "bid": 22224.99, "ask": 22225.37, "bid_vol": 395, "ask_vol": 383, "timestamp": "2026-03-08T18:36:30.094917+00:00", "type": "TICK"}
+*3
+$3
+SET
+$19
+latest_tick:NIFTY50
+$244
+{"symbol": "NIFTY50", "price": 22225.57, "prev_price": 22225.11, "volume": 56, "oi": 1253292, "prev_oi": 1254138, "bid": 22225.18, "ask": 22225.75, "bid_vol": 201, "ask_vol": 437, "timestamp": "2026-03-08T18:36:30.246794+00:00", "type": "TICK"}
+*3
+$3
+SET
+$21
+latest_tick:BANKNIFTY
+$247
+{"symbol": "BANKNIFTY", "price": 46914.57, "prev_price": 46920.51, "volume": 108, "oi": 1378345, "prev_oi": 1377653, "bid": 46914.29, "ask": 46914.77, "bid_vol": 114, "ask_vol": 268, "timestamp": "2026-03-08T18:36:30.310575+00:00", "type": "TICK"}
+*3
+$3
+SET
+$21
+latest_tick:BANKNIFTY
+$245
+{"symbol": "BANKNIFTY", "price": 46933.82, "prev_price": 46914.57, "volume": 8, "oi": 1377406, "prev_oi": 1378345, "bid": 46933.45, "ask": 46934.27, "bid_vol": 484, "ask_vol": 182, "timestamp": "2026-03-08T18:36:30.431233+00:00", "type": "TICK"}
+*3
+$3
+SET
+$21
+latest_tick:BANKNIFTY
+$247
+{"symbol": "BANKNIFTY", "price": 46936.24, "prev_price": 46933.82, "volume": 183, "oi": 1378905, "prev_oi": 1377406, "bid": 46935.83, "ask": 46936.44, "bid_vol": 133, "ask_vol": 297, "timestamp": "2026-03-08T18:36:30.488290+00:00", "type": "TICK"}
+*3
+$3
+SET
+$21
+latest_tick:BANKNIFTY
+$247
+{"symbol": "BANKNIFTY", "price": 46963.31, "prev_price": 46936.24, "volume": 171, "oi": 1380939, "prev_oi": 1378905, "bid": 46962.88, "ask": 46963.53, "bid_vol": 394, "ask_vol": 304, "timestamp": "2026-03-08T18:36:30.672694+00:00", "type": "TICK"}
+*3
+$3
+SET
+$21
+latest_tick:BANKNIFTY
+$246
+{"symbol": "BANKNIFTY", "price": 46998.34, "prev_price": 46963.31, "volume": 131, "oi": 1381173, "prev_oi": 1380939, "bid": 46998.2, "ask": 46998.72, "bid_vol": 489, "ask_vol": 124, "timestamp": "2026-03-08T18:36:30.813061+00:00", "type": "TICK"}
+*3
+$3
+SET
+$15
+latest_tick:TCS
+$236
+{"symbol": "TCS", "price": 4007.49, "prev_price": 4009.24, "volume": 79, "oi": 1190838, "prev_oi": 1191466, "bid": 4007.05, "ask": 4007.78, "bid_vol": 251, "ask_vol": 389, "timestamp": "2026-03-08T18:36:30.945860+00:00", "type": "TICK"}
+*3
+$3
+SET
+$20
+latest_tick:RELIANCE
+$240
+{"symbol": "RELIANCE", "price": 1475.03, "prev_price": 1475.5, "volume": 87, "oi": 1102634, "prev_oi": 1103683, "bid": 1474.81, "ask": 1475.28, "bid_vol": 124, "ask_vol": 204, "timestamp": "2026-03-08T18:36:31.048685+00:00", "type": "TICK"}
