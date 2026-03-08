@@ -59,9 +59,9 @@ def prefetch_macro_events():
     try:
         from utils.macro_event_fetcher import fetch_and_write
         events = fetch_and_write(write_to_disk=True, write_to_redis=False)
-        print(f"✅ Macro calendar: {len(events)} events written.")
+        print(f"[SUCCESS] Macro calendar: {len(events)} events written.")
     except Exception as e:
-        print(f"⚠️  Macro event fetch failed ({e}). System controller will use cached calendar.")
+        print(f"[WARNING] Macro event fetch failed ({e}). System controller will use cached calendar.")
 
 
 # ─── Config ───────────────────────────────────────────────

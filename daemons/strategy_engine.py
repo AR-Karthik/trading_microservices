@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import logging
 import uuid
 import collections
@@ -402,6 +402,18 @@ async def run_strategies(sub_socket, push_socket, mq_manager, redis_client, shm)
                         action = parts[0]
                         qty = int(parts[3])
                         
+                    # --- Hard Global Budget Check ---
+                    required_margin = price * qty
+                    # Create generic temporary margin manager or import it at top?
+                    # We should use an instance created outside the loop, but for now we'll import here if needed.
+                    # Wait, we need to import MarginManager. I will update the top of the file separately, or use a passed-in margin_manager.
+                    if action == "BUY":
+                        from core.margin import AsyncMarginManager
+                        margin_manager = AsyncMarginManager(redis_client)
+                        if not await margin_manager.reserve(required_margin, strategy.execution_type):
+                            logger.error(f"❌ MARGIN REJECTED: {symbol} needs ₹{required_margin:,.2f} but {strategy.execution_type} budget is exhausted.")
+                            continue # Skip dispatch
+
                     order = {
                         "order_id": str(uuid.uuid4()),
                         "symbol": symbol,
@@ -413,14 +425,22 @@ async def run_strategies(sub_socket, push_socket, mq_manager, redis_client, shm)
                         "strategy_id": strategy.strategy_id,
                         "execution_type": strategy.execution_type
                     }
-                    await mq_manager.send_json(push_socket, order)
-                    logger.info(f"Signal: {strategy.strategy_id} -> {action} {qty} {symbol}")
-
-        except asyncio.CancelledError:
-            break
+                    
+                    # Track dispatch time for phantom detection
+                    dispatch_meta = order.copy()
+                    dispatch_meta["dispatch_time_epoch"] = time.time()
+                    dispatch_meta["broker_order_id"] = None
+                    
+                    push_socket.send_json(order)
+                    await redis_client.hset("pending_orders", order["order_id"], json.dumps(dispatch_meta))
+                    
+                    logger.info(f"DISPATCHED {action} {qty} {symbol} @ {price}")
+                    
         except Exception as e:
-            logger.error(f"Error in strategy loop: {e}")
-            await asyncio.sleep(1)
+            if "Resource temporarily unavailable" in str(e):
+                continue
+            logger.error(f"Engine Loop Error: {e}")
+            await asyncio.sleep(0.1)
 
 async def start_engine():
     mq = MQManager()

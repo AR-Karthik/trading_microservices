@@ -12,7 +12,7 @@ logger = logging.getLogger("MarginManager")
 
 # ── Lua Scripts ──────────────────────────────────────────────────────────────
 
-# Reserve: subtracts `amount` from `AVAILABLE_MARGIN` only if the resulting
+# Reserve: subtracts `amount` from `AVAILABLE_MARGIN_[TYPE]` only if the resulting
 # margin would be >= 0. Returns 1 if successful, 0 if insufficient margin.
 LUA_RESERVE = """
 local available = tonumber(redis.call('get', KEYS[1]) or '0')
@@ -26,7 +26,7 @@ else
 end
 """
 
-# Release: adds `amount` back to `AVAILABLE_MARGIN`.
+# Release: adds `amount` back to `AVAILABLE_MARGIN_[TYPE]`.
 # Used when closing a position (margin + pnl) or refunding a phantom order.
 LUA_RELEASE = """
 local available = tonumber(redis.call('get', KEYS[1]) or '0')
@@ -34,9 +34,8 @@ local amount = tonumber(ARGV[1])
 local global_limit = tonumber(redis.call('get', KEYS[2]) or '0')
 
 local new_available = available + amount
--- Optional: Cap available margin at global_limit, or let profits grow it?
+-- Optional: Cap available margin at global_limit or let profits grow it?
 -- Decided to let profits grow the available margin pool. 
--- However, you could cap it here if explicitly required.
 redis.call('set', KEYS[1], new_available)
 return tostring(new_available)
 """
@@ -49,14 +48,19 @@ class MarginManager:
         self._reserve_script = self.r.register_script(LUA_RESERVE)
         self._release_script = self.r.register_script(LUA_RELEASE)
 
-    def reserve(self, required_margin: float) -> bool:
+    def _get_keys(self, execution_type: str) -> list[str]:
+        suffix = "LIVE" if execution_type.upper() == "ACTUAL" else "PAPER"
+        return [f"AVAILABLE_MARGIN_{suffix}", f"GLOBAL_CAPITAL_LIMIT_{suffix}"]
+
+    def reserve(self, required_margin: float, execution_type: str = "Paper") -> bool:
         """
-        Atomically attempts to reserve margin. 
+        Atomically attempts to reserve margin for the specific execution type. 
         Returns True if successful, False if breached.
         """
         try:
+            keys = self._get_keys(execution_type)
             result = self._reserve_script(
-                keys=["AVAILABLE_MARGIN"],
+                keys=[keys[0]],
                 args=[required_margin]
             )
             return bool(result)
@@ -64,14 +68,14 @@ class MarginManager:
             logger.error(f"Error executing LUA_RESERVE script: {e}")
             return False
 
-    def release(self, amount: float) -> float:
+    def release(self, amount: float, execution_type: str = "Paper") -> float:
         """
-        Atomically releases margin back into the pool.
-        Amount should be the original margin reserved, plus any realized P&L.
+        Atomically releases margin back into the pool for the specific execution type.
         """
         try:
+            keys = self._get_keys(execution_type)
             new_available = self._release_script(
-                keys=["AVAILABLE_MARGIN", "GLOBAL_CAPITAL_LIMIT"],
+                keys=keys,
                 args=[amount]
             )
             return float(new_available)
@@ -79,10 +83,11 @@ class MarginManager:
             logger.error(f"Error executing LUA_RELEASE script: {e}")
             return 0.0
 
-    def get_available(self) -> float:
+    def get_available(self, execution_type: str = "Paper") -> float:
         """Fetches the current available margin in real-time."""
         try:
-            return float(self.r.get("AVAILABLE_MARGIN") or 0.0)
+            keys = self._get_keys(execution_type)
+            return float(self.r.get(keys[0]) or 0.0)
         except Exception:
             return 0.0
 
@@ -95,10 +100,15 @@ class AsyncMarginManager:
         self._reserve_script = self.r.register_script(LUA_RESERVE)
         self._release_script = self.r.register_script(LUA_RELEASE)
 
-    async def reserve(self, required_margin: float) -> bool:
+    def _get_keys(self, execution_type: str) -> list[str]:
+        suffix = "LIVE" if execution_type.upper() == "ACTUAL" else "PAPER"
+        return [f"AVAILABLE_MARGIN_{suffix}", f"GLOBAL_CAPITAL_LIMIT_{suffix}"]
+
+    async def reserve(self, required_margin: float, execution_type: str = "Paper") -> bool:
         try:
+            keys = self._get_keys(execution_type)
             result = await self._reserve_script(
-                keys=["AVAILABLE_MARGIN"],
+                keys=[keys[0]],
                 args=[required_margin]
             )
             return bool(result)
@@ -106,10 +116,11 @@ class AsyncMarginManager:
             logger.error(f"Error executing LUA_RESERVE script: {e}")
             return False
 
-    async def release(self, amount: float) -> float:
+    async def release(self, amount: float, execution_type: str = "Paper") -> float:
         try:
+            keys = self._get_keys(execution_type)
             new_available = await self._release_script(
-                keys=["AVAILABLE_MARGIN", "GLOBAL_CAPITAL_LIMIT"],
+                keys=keys,
                 args=[amount]
             )
             return float(new_available)
@@ -117,9 +128,10 @@ class AsyncMarginManager:
             logger.error(f"Error executing LUA_RELEASE script: {e}")
             return 0.0
 
-    async def get_available(self) -> float:
+    async def get_available(self, execution_type: str = "Paper") -> float:
         try:
-            val = await self.r.get("AVAILABLE_MARGIN")
+            keys = self._get_keys(execution_type)
+            val = await self.r.get(keys[0])
             return float(val or 0.0)
         except Exception:
             return 0.0

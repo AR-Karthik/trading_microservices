@@ -43,11 +43,12 @@ class LongGammaMomentumStrategy:
     CORR_THRESHOLD = 0.50
     BREAKOUT_WINDOW = 5 * 60  # 5-minute high/low window in seconds
 
-    def __init__(self, redis_client: redis.Redis, mq: MQManager):
+    def __init__(self, redis_client: redis.Redis, mq: MQManager, execution_type: str = "Paper"):
         self._redis = redis_client
         self._mq = mq
         self._push = mq.create_push(Ports.ORDERS, bind=False)
         self._margin = MarginManager(self._redis)
+        self.execution_type = execution_type
         self._active = False
         self._position = 0  # number of lots currently held
         self._entry_price: float = 0.0
@@ -145,8 +146,8 @@ class LongGammaMomentumStrategy:
         
         # --- Hard Global Budget Check ---
         required_margin = spot * lot_size
-        if not self._margin.reserve(required_margin):
-            logger.error(f"❌ MARGIN REJECTED: {symbol} needs ₹{required_margin:,.2f} but budget is exhausted.")
+        if not self._margin.reserve(required_margin, self.execution_type):
+            logger.error(f"❌ MARGIN REJECTED: {symbol} needs ₹{required_margin:,.2f} but {self.execution_type} budget is exhausted.")
             # Veto the trade, do not dispatch
             return None
 
@@ -159,7 +160,7 @@ class LongGammaMomentumStrategy:
             "quantity": lot_size,
             "order_type": "MARKET",
             "strategy_id": self.STRATEGY_ID,
-            "execution_type": "Paper",  # overridden by live_bridge filter
+            "execution_type": self.execution_type,
             "price": spot,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "dispatch_time_epoch": time.time(),

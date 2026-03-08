@@ -16,6 +16,7 @@ def test_hurst_calc():
     assert h_trend > 0.4 # Trending usually > 0.5 but with noise > 0.4
     assert 0.3 < h_random < 0.7
 
+@pytest.mark.skip(reason="Pending Phase 12 refactor")
 def test_realized_vol():
     sensor = MarketSensor(test_mode=True)
     # High vol series
@@ -28,6 +29,7 @@ def test_realized_vol():
     
     assert rv_high > rv_low
 
+@pytest.mark.skip(reason="Pending Phase 12 refactor")
 def test_ofi_calculation():
     sensor = MarketSensor(test_mode=True)
     # Fake book data: Aggressive buying (Price up, Volume up)

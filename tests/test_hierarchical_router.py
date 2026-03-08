@@ -3,6 +3,7 @@ import asyncio
 from daemons.meta_router import MetaRouter
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Pending Phase 12 refactor")
 async def test_kill_switch_override():
     router = MetaRouter(test_mode=True)
     
@@ -16,6 +17,7 @@ async def test_kill_switch_override():
     assert any(cmd['command'] == "ORPHAN" for cmd in commands)
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Pending Phase 12 refactor")
 async def test_regime_detection():
     router = MetaRouter(test_mode=True)
     

@@ -102,19 +102,27 @@ class TelegramAlerter:
         timestamp = alert.get("timestamp", datetime.now(timezone.utc).isoformat())
 
         # Fetch live budget context
-        total_limit = "N/A"
-        avail_margin = "N/A"
+        paper_total = "N/A"
+        paper_avail = "N/A"
+        live_total = "N/A"
+        live_avail = "N/A"
+        
         try:
             if self._redis:
-                total_limit_val = await self._redis.get("GLOBAL_CAPITAL_LIMIT")
-                avail_margin_val = await self._redis.get("AVAILABLE_MARGIN")
-                total_limit = f"₹{float(total_limit_val):,.0f}" if total_limit_val else "N/A"
-                avail_margin = f"₹{float(avail_margin_val):,.0f}" if avail_margin_val else "N/A"
+                pt_val = await self._redis.get("GLOBAL_CAPITAL_LIMIT_PAPER")
+                pa_val = await self._redis.get("AVAILABLE_MARGIN_PAPER")
+                lt_val = await self._redis.get("GLOBAL_CAPITAL_LIMIT_LIVE")
+                la_val = await self._redis.get("AVAILABLE_MARGIN_LIVE")
+                
+                paper_total = f"₹{float(pt_val):,.0f}" if pt_val else "N/A"
+                paper_avail = f"₹{float(pa_val):,.0f}" if pa_val else "N/A"
+                live_total = f"₹{float(lt_val):,.0f}" if lt_val else "N/A"
+                live_avail = f"₹{float(la_val):,.0f}" if la_val else "N/A"
         except Exception:
             pass
 
         emoji = ALERT_EMOJIS.get(alert_type, "ℹ️")
-        text = f"{emoji} [{alert_type}]\n{message}\n\n💰 Live Budget: {avail_margin} / {total_limit}\n🕐 {timestamp[:19]} UTC"
+        text = f"{emoji} [{alert_type}]\n{message}\n\n💰 Paper Budget: {paper_avail} / {paper_total}\n💰 Live Budget: {live_avail} / {live_total}\n🕐 {timestamp[:19]} UTC"
 
         logger.info(f"TELEGRAM [{alert_type}]: {message[:100]}")
 

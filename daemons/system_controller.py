@@ -74,16 +74,25 @@ class SystemController:
         self._macro_events = self._load_macro_calendar()
 
         # ── Setup Hard Global Budget Constraint ──
-        max_capital = int(os.getenv("MAX_ALLOCATED_CAPITAL_INR", "50000"))
+        # Capital limits are now configured via the UI and stored in Redis.
+        paper_limit = float(await self.redis.get("PAPER_CAPITAL_LIMIT") or 50000.0)
+        live_limit = float(await self.redis.get("LIVE_CAPITAL_LIMIT") or 0.0)
+        
         # Set base limit (overwrite safe)
-        await self.redis.set("GLOBAL_CAPITAL_LIMIT", max_capital)
+        await self.redis.set("GLOBAL_CAPITAL_LIMIT_PAPER", paper_limit)
+        await self.redis.set("GLOBAL_CAPITAL_LIMIT_LIVE", live_limit)
+        
         # Set available margin ONLY if it doesn't exist (to avoid blowing away mid-day state)
-        if not await self.redis.exists("AVAILABLE_MARGIN"):
-            await self.redis.set("AVAILABLE_MARGIN", max_capital)
-            logger.info(f"Initialized AVAILABLE_MARGIN pool: ₹{max_capital:,.2f}")
+        if not await self.redis.exists("AVAILABLE_MARGIN_PAPER"):
+            await self.redis.set("AVAILABLE_MARGIN_PAPER", paper_limit)
+            logger.info(f"Initialized AVAILABLE_MARGIN_PAPER pool: ₹{paper_limit:,.2f}")
+            
+        if not await self.redis.exists("AVAILABLE_MARGIN_LIVE"):
+            await self.redis.set("AVAILABLE_MARGIN_LIVE", live_limit)
+            logger.info(f"Initialized AVAILABLE_MARGIN_LIVE pool: ₹{live_limit:,.2f}")
 
         logger.info("SystemController started. Monitoring lifecycle events.")
-        await self._telegram_alert(f"🟢 SYSTEM BOOT: Controller active. Budget: ₹{max_capital:,.2f}")
+        await self._telegram_alert(f"🟢 SYSTEM BOOT: Controller active. Paper Budget: ₹{paper_limit:,.2f} | Live Budget: ₹{live_limit:,.2f}")
 
         try:
             await asyncio.gather(

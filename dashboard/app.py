@@ -240,6 +240,42 @@ with st.sidebar:
             st.error("Redis offline — cannot send panic signal!")
 
     st.divider()
+    st.markdown('<p class="section-header">Capital Budgets</p>', unsafe_allow_html=True)
+    
+    if r:
+        if "paper_budget" not in st.session_state:
+            st.session_state["paper_budget"] = float(r.get("PAPER_CAPITAL_LIMIT") or r.get("GLOBAL_CAPITAL_LIMIT_PAPER") or 500000.0)
+        if "live_budget" not in st.session_state:
+            st.session_state["live_budget"] = float(r.get("LIVE_CAPITAL_LIMIT") or r.get("GLOBAL_CAPITAL_LIMIT_LIVE") or 0.0)
+    else:
+        st.session_state["paper_budget"] = 500000.0
+        st.session_state["live_budget"] = 0.0
+
+    new_paper_budget = st.number_input("Paper Trading Capital (₹)", value=st.session_state["paper_budget"], step=10000.0)
+    new_live_budget = st.number_input("Live Trading Capital (₹)", value=st.session_state["live_budget"], step=10000.0, help="Must be > 0 to enable live trading.")
+
+    if st.button("💾 Save Budgets", use_container_width=True):
+        st.session_state["paper_budget"] = new_paper_budget
+        st.session_state["live_budget"] = new_live_budget
+        if r:
+            # Save configuration limits
+            r.set("PAPER_CAPITAL_LIMIT", str(new_paper_budget))
+            r.set("LIVE_CAPITAL_LIMIT", str(new_live_budget))
+            
+            # If the global limit is changing, we should ideally adjust available margin,
+            # but for simplicity, we update the global limit and let the user handle margin if manual adjustment is needed.
+            r.set("GLOBAL_CAPITAL_LIMIT_PAPER", str(new_paper_budget))
+            r.set("GLOBAL_CAPITAL_LIMIT_LIVE", str(new_live_budget))
+            
+            # Initialize available margins if they don't exist
+            if not r.exists("AVAILABLE_MARGIN_PAPER"):
+                r.set("AVAILABLE_MARGIN_PAPER", str(new_paper_budget))
+            if not r.exists("AVAILABLE_MARGIN_LIVE"):
+                r.set("AVAILABLE_MARGIN_LIVE", str(new_live_budget))
+                
+            st.success("Budgets saved successfully!")
+        else:
+            st.error("Redis offline!")
 
     # ── System Health ──────────────────────────────────────────────────────
     st.markdown('<p class="section-header">System Health</p>', unsafe_allow_html=True)
@@ -349,8 +385,14 @@ current_cap = sum(abs(row['quantity'] * float(row['avg_price'])) for _, row in p
 
 st.markdown('<p class="section-header">Live Capital & Hard Budget</p>', unsafe_allow_html=True)
 c1, c2, c3, c4 = st.columns(4)
-budget_limit = float(r.get("GLOBAL_CAPITAL_LIMIT") or 0.0) if r else 0.0
-avail_margin = float(r.get("AVAILABLE_MARGIN") or 0.0) if r else 0.0
+
+if view_type == "Paper":
+    budget_limit = float(r.get("GLOBAL_CAPITAL_LIMIT_PAPER") or r.get("PAPER_CAPITAL_LIMIT") or 0.0) if r else 0.0
+    avail_margin = float(r.get("AVAILABLE_MARGIN_PAPER") or budget_limit) if r else 0.0
+else:
+    budget_limit = float(r.get("GLOBAL_CAPITAL_LIMIT_LIVE") or r.get("LIVE_CAPITAL_LIMIT") or 0.0) if r else 0.0
+    avail_margin = float(r.get("AVAILABLE_MARGIN_LIVE") or budget_limit) if r else 0.0
+
 utilization = ((budget_limit - avail_margin) / budget_limit * 100) if budget_limit > 0 else 0.0
 
 c1.metric("Global Budget Limit", format_currency(budget_limit))

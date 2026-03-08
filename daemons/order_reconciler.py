@@ -242,8 +242,9 @@ class OrderReconciler:
         if meta.get("action") == "SELL":
             refund_amount = fill_price * abs(meta.get("quantity", 0))
             if refund_amount > 0:
-                await self._margin.release(refund_amount)
-                logger.info(f"Released ₹{refund_amount:.2f} margin after SELL execution.")
+                execution_type = meta.get("execution_type", "Paper")
+                await self._margin.release(refund_amount, execution_type)
+                logger.info(f"Released ₹{refund_amount:.2f} {execution_type} margin after SELL execution.")
 
     async def _mark_order_failed(self, order_id: str, meta: dict, status: str):
         """Clean up a rejected/cancelled order."""
@@ -292,8 +293,9 @@ class OrderReconciler:
         if meta.get("action") == "BUY":
             refund_amount = meta.get("price", 0.0) * meta.get("quantity", 0)
             if refund_amount > 0:
-                await self._margin.release(refund_amount)
-                logger.info(f"Refunded ₹{refund_amount:.2f} margin for phantom BUY order {order_id}.")
+                execution_type = meta.get("execution_type", "Paper")
+                await self._margin.release(refund_amount, execution_type)
+                logger.info(f"Refunded ₹{refund_amount:.2f} {execution_type} margin for phantom BUY order {order_id}.")
 
     # ── Telegram Alert Helper ────────────────────────────────────────────────
 

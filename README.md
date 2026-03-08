@@ -271,7 +271,7 @@ Dashboard: `http://localhost:8501`
 | **Kill Switch** | Global PANIC button → instant `SQUARE_OFF_ALL` via Redis pub |
 | **Graceful Exit** | Liquidation Daemon uses optimal stopping, not market dumps |
 | **Signal Barrier** | Immediate exit if CVD/OFI flips against an active position |
-| **Global Budget** | `MAX_ALLOCATED_CAPITAL_INR` physical constraint prevents over-allocation |
+| **Dual Budgets** | Strict live and paper trading budgets configurable via Dashboard UI |
 
 ---
 
