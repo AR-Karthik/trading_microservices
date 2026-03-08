@@ -6,10 +6,12 @@ import os
 def start_services():
     print("Starting local Data Vault (Redis & TimescaleDB)...")
     try:
-        subprocess.run(["docker-compose", "up", "-d"], check=True)
-    except FileNotFoundError:
-        print("docker-compose not found. Please ensure Docker is installed and running.")
-        sys.exit(1)
+        # We only start the DBs in Docker; the daemons run as local processes
+        subprocess.run(["docker-compose", "up", "-d", "redis", "timescaledb"], check=True)
+    except Exception as e:
+        print(f"Warning: Docker databases failed to start ({e}).")
+        print("Continuing with local microservices (they may fail to connect to DB).")
+        print("Please ensure Docker is installed and running if you need persistence.")
         
     print("Waiting for databases to initialize...")
     time.sleep(5)
@@ -22,7 +24,8 @@ def start_services():
         ("Meta Router", f"{sys.executable} -m daemons.meta_router"),
         ("Liquidation Daemon", f"{sys.executable} -m daemons.liquidation_daemon"),
         ("Paper Bridge", f"{sys.executable} -m daemons.paper_bridge"),
-        ("Dashboard", f"{sys.executable} -m streamlit run dashboard/app.py")
+        ("Dashboard API", f"{sys.executable} -m uvicorn dashboard.api.main:app --host 0.0.0.0 --port 8000"),
+        ("Dashboard Frontend", f"{sys.executable} -m http.server 8501 --directory dashboard/frontend")
     ]
     
     # Strategy Daemons

@@ -44,9 +44,13 @@
                   └─────────┬──────────┘
                             │
               ┌─────────────▼─────────────┐
-              │   DASHBOARD (app.py)       │
-              │   Streamlit · Real-time    │
-              │   Alpha Score · P&L        │
+              │   DASHBOARD API (FastAPI)  │
+              │   Redis/DB Bridge · Panic  │
+              └─────────────┬─────────────┘
+                            │
+              ┌─────────────▼─────────────┐
+              │   DASHBOARD UI (React)     │
+              │   Premium · Mobile-First   │
               └────────────────────────────┘
 ```
 
@@ -189,20 +193,17 @@ Position Accepted via ORPHAN/HANDOFF command
 
 ---
 
-### 8. `dashboard/app.py` — The Control Room
+### 8. `dashboard/` — The Premium Control Room
 
-**Purpose:** Streamlit dashboard providing real-time visibility into all system components.
+**Purpose:** A modern, mobile-first React dashboard providing real-time visibility and control.
 
 **Features:**
-- **Alpha Score Banner** — Live $S_{total}$ with regime label (AGGR LONG / SLEEP / AGGR SHORT) and color-coded glassmorphism banner.
-- **Macro Window Status** — Shows if the current time is within an authorized entry window.
-- **Paper/Live Toggle** — Instantly switch dashboard view between paper and live execution modes.
-- **PANIC Button** — Publishes a `SQUARE_OFF_ALL` command to Redis for instant global exit.
-- **Terminal Tab** — Live market prices, L2 order book, and active positions.
-- **Market Signals Tab** — Real-time Alpha Score, Hurst, RV, OFI metrics.
-- **Meta-Router Tab** — Regime history and live strategy state (ACTIVE / ORPHANED / SLEEP).
-- **Analytics Tab** — Equity curve, underwater drawdown chart, win rate, and profit factor.
-- **Budget Tracking** — Monitors Global Capital Limit, Available Margin, and Budget Utilization percentage.
+- **High-Performance API (FastAPI)** — Bridges Redis/TimescaleDB with sub-50ms latency.
+- **Glassmorphism UI** — Premium, responsive dark-mode design optimized for mobile thumbs.
+- **Alpha Score Master** — Live $S_{total}$ with regime-colored glow and HMM/GEX status.
+- **Dynamic Portfolio** — Swipeable position cards with real-time unrealized P&L updates.
+- **Panic Control** — Large, accessible "SQUARE OFF ALL" switch for crisis management.
+- **Paper/Live Switch** — Instantly toggle view modes across the entire interface.
 
 ---
 
@@ -211,9 +212,10 @@ Position Accepted via ORPHAN/HANDOFF command
 ### Local (Docker Compose)
 Services: `redis`, `timescaledb`, `market_sensor`, `meta_router`, `strategy_engine`, `liquidation_daemon`, `paper_bridge`, `dashboard`.
 
-```bash
-docker compose up -d
+docker compose up -d --build
 ```
+
+Dashboard: `http://localhost:8501` (React UI) | `http://localhost:8000/docs` (API Docs)
 
 ### Cloud (GCP Spot VM)
 Cost-optimized `c2-standard-4` Spot VM in `asia-south1-a` with Tailscale for secure private access.
@@ -278,7 +280,7 @@ Dashboard: `http://localhost:8501`
 ## 📦 Dependencies
 
 ```
-streamlit · pandas · polars · psycopg2-binary · redis
+fastapi · uvicorn · tailwind · react · pandas · polars · psycopg2-binary · redis
 pyzmq · numpy · google-cloud-compute · python-dotenv · httpx
 ```
 

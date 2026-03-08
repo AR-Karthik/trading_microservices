@@ -126,6 +126,7 @@ ENVEOF
 echo ".env written."
 
 # 5. Launch all services
+mkdir -p {REPO_DIR}/data/redis {REPO_DIR}/data/db
 docker compose up -d --build
 
 echo "=== All services started: $(date) ==="
@@ -158,7 +159,7 @@ def create_spot_instance():
     try:
         existing = instance_client.get(project=PROJECT_ID, zone=ZONE, instance=INSTANCE_NAME)
         print(f"Instance '{INSTANCE_NAME}' already exists (status: {existing.status}). Skipping creation.")
-        print(f"  → Dashboard should be at http://<tailscale-IP>:8501")
+        print(f"  → React Dashboard should be at http://<tailscale-IP>:8501")
         return
     except Exception:
         pass  # Doesn't exist, proceed
@@ -176,9 +177,8 @@ def create_spot_instance():
         automatic_restart=False
     )
 
-    # Boot Disk: 50GB pd-ssd
     disk = compute_v1.AttachedDisk(
-        auto_delete=True,
+        auto_delete=False,
         boot=True,
         initialize_params=compute_v1.AttachedDiskInitializeParams(
             disk_size_gb=50,
@@ -229,7 +229,7 @@ def create_spot_instance():
         else:
             print(f"\nInstance '{INSTANCE_NAME}' created successfully!")
             print(f"  → Startup script is installing Docker + Tailscale (~3-5 minutes)")
-            print(f"  → Dashboard will be available at http://<tailscale-IP>:8501")
+            print(f"  → React Dashboard will be available at http://<tailscale-IP>:8501")
             print(f"  → Check logs: gcloud compute ssh {INSTANCE_NAME} --zone={ZONE} -- 'tail -f /var/log/trading-startup.log'")
 
     except Exception as e:

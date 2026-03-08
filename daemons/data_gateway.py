@@ -183,7 +183,7 @@ class DataGateway:
             # In production: call Shoonya get_contracts() or search_scrip()
             # For now use known 2026 values as per SRS
             lot_sizes = {"NIFTY50": 65, "BANKNIFTY": 30}
-            logger.info(f"✅ Lot sizes fetched: {lot_sizes}")
+            logger.info(f"Lot sizes fetched: {lot_sizes}")
         except Exception as e:
             logger.warning(f"Lot size fetch failed ({e}). Using defaults: {lot_sizes}")
 
@@ -208,7 +208,7 @@ class DataGateway:
                     age_ms = (now - last_ts) * 1000
                     if age_ms > STALENESS_THRESHOLD_MS:
                         logger.warning(
-                            f"⚠️ STALE FEED: {symbol} last tick {age_ms:.0f}ms ago. "
+                            f"STALE FEED: {symbol} last tick {age_ms:.0f}ms ago. "
                             f"Triggering socket reset..."
                         )
                         await self._force_socket_reset(symbol)
@@ -221,7 +221,7 @@ class DataGateway:
         Simulates a TCP socket reset for a stale feed.
         In production: disconnect/reconnect the Shoonya WebSocket.
         """
-        logger.warning(f"🔄 Socket reset triggered for {symbol}.")
+        logger.warning(f"Socket reset triggered for {symbol}.")
         # Reset the last tick timestamp to avoid repeated triggers
         self._last_tick_ts[symbol] = datetime.now(timezone.utc).timestamp()
 
@@ -257,7 +257,7 @@ class DataGateway:
                 if halt_level and not self._system_halted:
                     halt_mins = self._get_halt_duration(halt_level)
                     logger.critical(
-                        f"🚨 CIRCUIT BREAKER L{halt_level}%: Market moved {max_chg:.2f}%. "
+                        f"CIRCUIT BREAKER L{halt_level}%: Market moved {max_chg:.2f}%. "
                         f"Halting for {halt_mins} minutes."
                     )
                     await self._broadcast_halt(halt_level, halt_mins)
@@ -272,7 +272,7 @@ class DataGateway:
                         logger.info("Circuit breaker halt lifted. Resuming tick stream.")
                     else:
                         # >2:30 PM or 20% → Day halt
-                        logger.critical("🚫 DAY HALT: Market closed for the session.")
+                        logger.critical("DAY HALT: Market closed for the session.")
                         self._system_halted = True
                         await self.redis_client.set("SYSTEM_HALT", "DAY_HALT")
 
@@ -305,7 +305,7 @@ class DataGateway:
         await self.redis_client.publish("system_events", json.dumps(payload))
         # Also push Telegram alert
         await self.redis_client.lpush("telegram_alerts", json.dumps({
-            "message": f"🚨 CIRCUIT BREAKER L{level}%! Halt: {halt_mins} min.",
+            "message": f"CIRCUIT BREAKER L{level}%! Halt: {halt_mins} min.",
             "type": "CIRCUIT_BREAKER",
             "timestamp": datetime.now(timezone.utc).isoformat()
         }))

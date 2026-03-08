@@ -342,7 +342,7 @@ async def panic_listener(pool, r):
                 if data.get('action') == "SQUARE_OFF":
                     exec_type = data.get('execution_type')
                     mode_str = f"[{exec_type}] " if exec_type else ""
-                    logger.critical(f"🚨 PANIC SIGNAL RECEIVED: SQUARING OFF {mode_str}ALL POSITIONS")
+                    logger.critical(f"PANIC SIGNAL RECEIVED: SQUARING OFF {mode_str}ALL POSITIONS")
                     
                     async with pool.acquire() as conn:
                         query = "SELECT symbol, strategy_id, quantity FROM portfolio WHERE quantity != 0"
