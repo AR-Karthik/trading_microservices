@@ -42,10 +42,8 @@ WORKDIR /build/cpp_gateway
 COPY cpp_gateway .
 RUN protoc -I=proto --cpp_out=proto proto/messages.proto
 RUN ls -R /build/deps/uWebSockets/src && \
-    cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_FLAGS="-I/build/deps/uWebSockets/src -I/build/deps/uWebSockets/uSockets/src -I/build/cpp_gateway/proto" \
-    && cmake --build build -- VERBOSE=1
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build -- VERBOSE=1
 
 # Stage 3: Python Runtime
 FROM python:3.11-slim AS runtime
