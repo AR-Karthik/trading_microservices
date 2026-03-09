@@ -4,3 +4,6 @@ __pycache__/
 venv/
 .venv/
 .DS_Store
+
+# Data and DB volumes
+data/
