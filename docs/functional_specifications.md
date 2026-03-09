@@ -73,7 +73,14 @@ The system is designed for **low capital utilization** and **Buy-only (Long Prem
 - **Barrier 3 (Structural Flip)**: If Order Flow (**CVD flips**) consistently against the position for **>10 ticks**, a market exit is triggered regardless of P&L.
 
 ### Global Safeguards:
-- **Stop Day Loss**: A global hard limit (e.g., ₹5000) on daily realized loss. Once breached, all fresh opening trades are blocked.
+- **Stop Day Loss**: A user-configurable hard limit on cumulative daily realized loss. The full enforcement pipeline is:
+    1. **UI Configuration**: The user sets the limit (e.g., ₹5000 default) via the dashboard sidebar. Saved to Redis key `STOP_DAY_LOSS`.
+    2. **Daily P&L Tracking**: After every trade fill, `paper_bridge.py` recalculates the day's total realized P&L from TimescaleDB and writes it to `DAILY_REALIZED_PNL_PAPER` (or `_LIVE`) in Redis.
+    3. **Breach Detection**: `liquidation_daemon.py` checks `DAILY_REALIZED_PNL_{MODE}` vs `STOP_DAY_LOSS` on every tick. On first breach, it:
+        - Sets `STOP_DAY_LOSS_BREACHED_{MODE} = True` in Redis.
+        - Publishes `SQUARE_OFF_ALL` to `panic_channel` → triggers immediate full liquidation of open positions.
+    4. **Entry Gate**: Before accepting any new order, `paper_bridge.py` checks `STOP_DAY_LOSS_BREACHED_{MODE}`. If `True`, only exit orders (closing existing positions) are allowed through. New opening trades are blocked with a log warning.
+    5. **Dashboard Indicator**: The sidebar displays a live colour-coded buffer bar showing remaining daily loss allowance (green → amber → red as limit approaches).
 - **Double-Tap Guard**: An atomic Redis token lock prevents the system from triggering multiple identical trades on the same strike during high-volatility "Regime: TRENDING" moments.
 - **Journaled Persistence**: Every order is logged to a `Pending_Journal` in Redis before execution, ensuring data integrity for P&L tracking even if a daemon crashes during dispatch.
 - **Panic Button**: A mobile-friendly dashboard switch that instantly liquidates all active positions through the `Liquidation Daemon`.

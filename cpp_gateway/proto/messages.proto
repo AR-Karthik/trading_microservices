@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package trading;
+
+message TickData {
+  string symbol = 1;
+  double price = 2;
+  double bid = 3;
+  double ask = 4;
+  int64 last_volume = 5;
+  int64 total_volume = 6;
+  string timestamp = 7; // ISO format
+  double open_interest = 8;
+  double vwap = 9;
+}
+
+message AlphaSignal {
+  string timestamp = 1;
+  double s_total = 2;
+  double vpin = 3;
+  double ofi_zscore = 4;
+  string hmm_regime = 5;
+  string gex_sign = 6;
+  bool flow_toxicity_veto = 7;
+}
+
+message StrategyConfig {
+  string strategy_id = 1;
+  string state = 2; // ACTIVE, SLEEP, ORPHANED
+  double max_capital = 3;
+  double target_1 = 4;
+  double stop_loss = 5;
+}

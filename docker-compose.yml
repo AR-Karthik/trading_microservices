@@ -13,6 +13,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    cpuset: "3"
 
   timescaledb:
     image: timescale/timescaledb:latest-pg14
@@ -31,6 +32,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    cpuset: "3"
 
   data_gateway:
     build: .
@@ -41,6 +43,9 @@ services:
         condition: service_healthy
     restart: always
     env_file: .env
+    cpuset: "0"
+    volumes:
+      - /ram_disk:/ram_disk
 
   market_sensor:
     build: .
@@ -55,6 +60,9 @@ services:
         condition: service_started
     restart: always
     env_file: .env
+    cpuset: "1"
+    volumes:
+      - /ram_disk:/ram_disk
 
   meta_router:
     build: .
@@ -65,6 +73,9 @@ services:
         condition: service_healthy
     restart: always
     env_file: .env
+    cpuset: "2"
+    volumes:
+      - /ram_disk:/ram_disk
 
   strategy_engine:
     build: .
@@ -79,6 +90,9 @@ services:
         condition: service_started
     restart: always
     env_file: .env
+    cpuset: "2"
+    volumes:
+      - /ram_disk:/ram_disk
 
   liquidation_daemon:
     build: .
@@ -89,6 +103,9 @@ services:
         condition: service_healthy
     restart: always
     env_file: .env
+    cpuset: "3"
+    volumes:
+      - /ram_disk:/ram_disk
 
   paper_bridge:
     build: .

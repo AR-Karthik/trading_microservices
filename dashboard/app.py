@@ -265,35 +265,76 @@ with st.sidebar:
             st.session_state["paper_budget"] = float(r.get("PAPER_CAPITAL_LIMIT") or r.get("GLOBAL_CAPITAL_LIMIT_PAPER") or 500000.0)
         if "live_budget" not in st.session_state:
             st.session_state["live_budget"] = float(r.get("LIVE_CAPITAL_LIMIT") or r.get("GLOBAL_CAPITAL_LIMIT_LIVE") or 0.0)
+        if "stop_day_loss" not in st.session_state:
+            st.session_state["stop_day_loss"] = float(r.get("STOP_DAY_LOSS") or 5000.0)
     else:
         st.session_state["paper_budget"] = 500000.0
         st.session_state["live_budget"] = 0.0
+        st.session_state["stop_day_loss"] = 5000.0
 
     new_paper_budget = st.number_input("Paper Trading Capital (₹)", value=st.session_state["paper_budget"], step=10000.0)
     new_live_budget = st.number_input("Live Trading Capital (₹)", value=st.session_state["live_budget"], step=10000.0, help="Must be > 0 to enable live trading.")
+    new_stop_day_loss = st.number_input(
+        "🛑 Stop Day Loss (₹)",
+        value=st.session_state["stop_day_loss"],
+        step=500.0,
+        min_value=0.0,
+        help="Maximum cumulative realized loss allowed per day. When breached, all new trade entries are blocked and open positions are liquidated."
+    )
 
     if st.button("💾 Save Budgets", use_container_width=True):
         st.session_state["paper_budget"] = new_paper_budget
         st.session_state["live_budget"] = new_live_budget
+        st.session_state["stop_day_loss"] = new_stop_day_loss
         if r:
             # Save configuration limits
             r.set("PAPER_CAPITAL_LIMIT", str(new_paper_budget))
             r.set("LIVE_CAPITAL_LIMIT", str(new_live_budget))
-            
-            # If the global limit is changing, we should ideally adjust available margin,
-            # but for simplicity, we update the global limit and let the user handle margin if manual adjustment is needed.
             r.set("GLOBAL_CAPITAL_LIMIT_PAPER", str(new_paper_budget))
             r.set("GLOBAL_CAPITAL_LIMIT_LIVE", str(new_live_budget))
-            
+            r.set("STOP_DAY_LOSS", str(new_stop_day_loss))
+
             # Initialize available margins if they don't exist
             if not r.exists("AVAILABLE_MARGIN_PAPER"):
                 r.set("AVAILABLE_MARGIN_PAPER", str(new_paper_budget))
             if not r.exists("AVAILABLE_MARGIN_LIVE"):
                 r.set("AVAILABLE_MARGIN_LIVE", str(new_live_budget))
-                
-            st.success("Budgets saved successfully!")
+
+            st.success("Budgets & Stop Day Loss saved!")
         else:
             st.error("Redis offline!")
+
+    # ── Stop Day Loss Live Status ───────────────────────────────────────────
+    if r:
+        try:
+            stop_limit = float(r.get("STOP_DAY_LOSS") or 5000.0)
+            day_loss_raw = r.get(f"DAILY_REALIZED_PNL_{st.session_state['trading_mode'].upper()}")
+            day_pnl = float(day_loss_raw or 0.0)
+            day_loss_breached = day_pnl <= -stop_limit
+            if day_loss_breached:
+                st.markdown(
+                    f"<div style='background:rgba(248,81,73,0.15);border:1px solid #f85149;border-radius:8px;"
+                    f"padding:10px;text-align:center;color:#f85149;font-weight:700;font-size:12px;margin-top:8px;'>"
+                    f"🛑 STOP DAY LOSS HIT — ₹{day_pnl:,.0f} / -₹{stop_limit:,.0f}<br>All new entries BLOCKED"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+            else:
+                remaining = stop_limit + day_pnl  # day_pnl is negative when losing
+                pct_used = ((stop_limit - remaining) / stop_limit * 100) if stop_limit > 0 else 0
+                color = "#f85149" if pct_used > 75 else ("#d2990d" if pct_used > 40 else "#3fb950")
+                st.markdown(
+                    f"<div style='background:rgba(0,0,0,0.3);border:1px solid {color};border-radius:8px;"
+                    f"padding:8px;text-align:center;font-size:11px;margin-top:6px;'>"
+                    f"<span style='color:#8b949e'>Day Loss Buffer:</span> "
+                    f"<span style='color:{color};font-weight:700'>₹{remaining:,.0f}</span> remaining "
+                    f"<span style='color:#8b949e'>({pct_used:.0f}% used)</span>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+        except Exception:
+            pass
+
 
     # ── System Health ──────────────────────────────────────────────────────
     st.markdown('<p class="section-header">System Health</p>', unsafe_allow_html=True)

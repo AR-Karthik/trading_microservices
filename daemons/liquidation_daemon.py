@@ -112,11 +112,61 @@ class LiquidationDaemon:
             try:
                 _, tick = await self.mq.recv_json(market_sub)
                 if tick and self.orphaned_positions:
+                    # Check Stop Day Loss on every tick cycle
+                    await self._check_stop_day_loss()
                     for symbol in list(self.orphaned_positions.keys()):
                         await self._evaluate_barriers(symbol, tick, latest_state)
             except Exception as e:
                 logger.error(f"Market monitor error: {e}")
                 await asyncio.sleep(0.5)
+
+    # ── Stop Day Loss Guard ───────────────────────────────────────────────────
+
+    async def _check_stop_day_loss(self):
+        """
+        Compares today's cumulative realized P&L against the STOP_DAY_LOSS limit.
+        If the daily loss limit is breached:
+          1. Sets STOP_DAY_LOSS_BREACHED = True in Redis (entry gate in execution bridges)
+          2. Publishes a SQUARE_OFF_ALL panic signal to immediately liquidate all open positions
+          3. Logs a critical alert
+        Should be called once per market_monitor tick cycle.
+        """
+        try:
+            # Fetch the user-configured limit (default ₹5000)
+            stop_limit = float(await self._redis.get("STOP_DAY_LOSS") or 5000.0)
+
+            # Check both paper and live daily realized P&L
+            for mode_suffix in ["PAPER", "LIVE"]:
+                day_pnl_raw = await self._redis.get(f"DAILY_REALIZED_PNL_{mode_suffix}")
+                day_pnl = float(day_pnl_raw or 0.0)
+                breach_key = f"STOP_DAY_LOSS_BREACHED_{mode_suffix}"
+
+                if day_pnl <= -stop_limit:
+                    already_breached = await self._redis.get(breach_key) == "True"
+                    if not already_breached:
+                        # Set the breach flag — execution bridges check this before accepting new orders
+                        await self._redis.set(breach_key, "True")
+                        logger.critical(
+                            f"🛑 STOP DAY LOSS BREACHED [{mode_suffix}]: "
+                            f"Daily P&L ₹{day_pnl:,.0f} <= -₹{stop_limit:,.0f}. "
+                            f"Blocking new entries and triggering full liquidation."
+                        )
+                        # Publish panic signal to square off all positions for this mode
+                        import json as _json
+                        await self._redis.publish(
+                            "panic_channel",
+                            _json.dumps({
+                                "action": "SQUARE_OFF_ALL",
+                                "reason": f"STOP_DAY_LOSS_BREACHED_{mode_suffix}",
+                                "execution_type": mode_suffix.capitalize()
+                            })
+                        )
+                else:
+                    # Clear breach flag at start of next day if P&L recovered (shouldn't happen intraday)
+                    await self._redis.set(breach_key, "False")
+
+        except Exception as e:
+            logger.error(f"Stop Day Loss check error: {e}")
 
     # ── Barrier Evaluation ────────────────────────────────────────────────────
 

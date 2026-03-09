@@ -52,11 +52,11 @@ The Capital Allocation logic is physically distributed across the system:
 - **Execution Bridge**: Transforms "Theoretical Lots" into final Order Quantity (`Lots * Lot_Size`).
 - **Liquidation Daemon**: Triggers Redis "Unlock" on exit, updating `AVAILABLE_MARGIN` with realized P&L.
 
-## 8. Polyglot Infrastructure Migration (Phase 3 & Beyond)
-To achieve ultimate low-latency performance and memory safety, the system is architected to transition compute-heavy layers out of Python:
-1.  **C++ Data Gateway**: WebSocket normalization and high-frequency ZeroMQ broadcasting will move to C++ to bypass the Python interpreter overhead.
-2.  **Rust Risk & Greeks**: Black-Scholes calculations (Delta, Gamma, Vega) and the execution of Atomic Margin Locks will transition to Rust for memory-safe thread-level parallelism.
-3.  **Python Native Glue**: The Meta-Router, Market Sensor (via Polars/NumPy), and Dashboard API remain in Python where developer flexibility and ecosystem maturity outstrip microsecond execution requirements. Shared memory and Redis serve as the communication bridge.
+## 8. Polyglot Infrastructure Migration (Institutional Grade)
+To achieve ultimate low-latency performance and memory safety, the system implements a polyglot pipeline:
+1.  **C++ Data Gateway**: Handles high-frequency WebSocket sharding, `simdjson` normalization, and Protobuf broadcasting.
+2.  **Rust Tick Engine (PyO3)**: Performance-critical math including VPIN, OFI, and Black-Scholes Greeks (Delta, Gamma, Vega, Charm, Vanna).
+3.  **Python Orchestration**: The Meta-Router and Market Sensor remain in Python for agility, consuming high-speed signals via **Shared Memory (SHM)**.
 
 ## 9. Quantitative & Strategy Refinements
 - **STT Tax Optimization**: Redefined strategy targets to 20–30 point structural moves to ensure viability after the 2026 hike in Options STT (0.15%).
@@ -65,7 +65,28 @@ To achieve ultimate low-latency performance and memory safety, the system is arc
 - **Kelly Criterion & VPIN Filter**: Strategy bet sizing is dynamically scaled via the Fractional Kelly Criterion based on HMM state probabilities. VPIN (Volume-Synchronized Probability of Informed Trading) > 0.8 triggers a global veto on Long entries to avoid toxic liquidity vacuums.
 - **Dual-Stage Liquidation Protocol**: A 70-30 profit-taking rule. At +1.2x ATR, 70% of the position is market-sold to lock in risk-off profits. The STT-covered 30% "runner" holds until HMM invalidation or a 2.5x ATR hard ceiling is met.
 
-## 10. Infrastructure & Automation
+## 11. C++ Gateway Sharding & SIMD Ingestion
+- **Instrument Sharding**: The Gateway operates three concurrent C++ shards (Index Spot/Futures, Nifty Options, BankNifty Options) to prevent head-of-line blocking.
+- **SIMD-Accelerated Parsing**: Utilizes `simdjson` for sub-microsecond JSON-to-Protobuf normalization, significantly reducing the "Normalization Bottleneck."
+- **Institutional Connectivity**: Designed for uWebSockets (epoll/kqueue) for high-concurrency socket handling with minimal memory footprint.
+
+## 12. Sub-Microsecond Inter-Process Communication (SHM)
+- **Shared Memory Pipeline**: Market signals (Alpha, VPIN, OFI) are written to `/dev/shm` (Linux) or named mmap (Windows) using a 64-byte structured buffer.
+- **Latency reduction**: Bypasses ZeroMQ's internal queueing and context switching, allowing the Meta-Router to read signals in **<1µs** vs ~200µs for ZMQ and ~5ms for Redis.
+- **RAM Disk (tmpfs)**: IPC sockets and SHM files are host-mapped to a virtual RAM disk (`/ram_disk`) to minimize physical I/O latency.
+- **Stale Data Protection**: The SHM reader implementation includes timestamp-based staleness checks (>500ms) and simple CRC integrity verification.
+
+## 13. Institutional Infrastructure (High-Performance Cloud)
+- **CPU Affinity (Core Pinning)**: Leverages `cpuset` to isolate high-frequency processes on dedicated vCPUs.
+    - **Core 0**: C++ Data Gateway (Throughput-heavy I/O).
+    - **Core 1**: Market Sensor (Compute-heavy microstructure math).
+    - **Core 2**: Meta-Router/Strategy Engine (Inference & Routing).
+    - **Core 3**: Shared Services (Redis, DB, OS, Liquidation).
+- **GCP Tier_1 Networking**: Premium Tier networking with `GVNIC` and `TIER_1` egress performance enabled for jitter-free communication with Shoonya.
+- **Regional Data Strategy**: TimescaleDB is backed by Regional Persistent Disks to ensure zero data loss during zonal outages in Mumbai (`asia-south1`).
+- **Kernel Tuning**: OS-level optimizations including expanded `ulimit` (1M open files) and optimized TCP window sizes for high-connection concurrency.
+
+## 14. Infrastructure & Automation
 - **VM Proximity (Mumbai)**: Instances are deployed in **GCP `asia-south1` (Mumbai)** to minimize physical distance to NSE servers, achieving microsecond-scale execution latency.
 - **Ultra-Low Latency Engineering**: Combines `uvloop` (high-performance asyncio event loop substitution) with fire-and-forget execution patterns and Protobuf serialization to ensure the order path is never blocked by I/O.
 - **Serverless Pre-Flight Oracle**: Holiday and news scanning moved to a GCP Cloud Function (using `holidays` and FMP APIs) to decide if the VM should boot.

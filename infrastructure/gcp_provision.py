@@ -125,8 +125,24 @@ ENVEOF
 
 echo ".env written."
 
-# 5. Launch all services
+# 5. OS Hardening & RAM Disk (tmpfs)
+echo "Optimizing Kernel (ulimit, TCP)..."
+cat >> /etc/sysctl.conf << 'EOF'
+fs.file-max = 1000000
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 8000
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+EOF
+sysctl -p
+
+mkdir -p /ram_disk
+mount -t tmpfs -o size=512M tmpfs /ram_disk
+echo "tmpfs /ram_disk tmpfs rw,size=512M 0 0" >> /etc/fstab
+
+# 6. Launch all services
 mkdir -p {REPO_DIR}/data/redis {REPO_DIR}/data/db
+# Note: In a real deploy, data/db would be mounted to the Regional SSD
 docker compose up -d --build
 
 echo "=== All services started: $(date) ==="
@@ -188,16 +204,21 @@ def create_spot_instance():
     )
     instance.disks = [disk]
 
-    # Network with external IP
+    # Network with Premium Tier & Tier_1 Performance
     access_config = compute_v1.AccessConfig(
         type_="ONE_TO_ONE_NAT",
-        name="External NAT"
+        name="External NAT",
+        network_tier="PREMIUM"
     )
     network_interface = compute_v1.NetworkInterface(
         network="global/networks/default",
-        access_configs=[access_config]
+        access_configs=[access_config],
+        nic_type="GVNIC" # Enabled for Tier_1
     )
     instance.network_interfaces = [network_interface]
+    instance.network_performance_config = compute_v1.NetworkPerformanceConfig(
+        total_egress_bandwidth_tier="TIER_1"
+    )
 
     # Startup script via metadata
     metadata = compute_v1.Metadata(

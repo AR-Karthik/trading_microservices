@@ -31,6 +31,7 @@ import numpy as np
 import redis.asyncio as redis
 
 from core.mq import MQManager, Ports, Topics
+from core.shm import ShmManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -166,6 +167,9 @@ class MetaRouter:
             self.cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD)
             redis_host = os.getenv("REDIS_HOST", "localhost")
             self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
+            self.shm = ShmManager(mode='r')
+        else:
+            self.shm = None
 
         self.current_regime: str = "RANGING"
         self.current_state_prob: float = 0.6  # Default confidence
@@ -425,11 +429,21 @@ class MetaRouter:
 
                     # Veto checks
                     spot = state.get("spot", 22000.0)
+                    
+                    # Hot-Path: Override Alpha/VPIN/OFI from Shared Memory if fresh
+                    if self.shm:
+                        shm_data = self.shm.read()
+                        if shm_data:
+                            state["s_total"] = shm_data["s_total"]
+                            state["vpin"] = shm_data["vpin"]
+                            state["log_ofi_zscore"] = shm_data["ofi_zscore"]
+                            state["source"] = "SHM"
+
                     momentum_vetoed, mr_1lot, oi_wall_veto, flow_toxicity_veto = False, False, False, False
                     if not self.test_mode:
                         momentum_vetoed, mr_1lot = await self._check_dispersion_veto()
                         oi_wall_veto = await self._check_oi_wall_veto(spot)
-                        flow_toxicity_veto = (await self._redis.get("flow_toxicity_veto")) == "1"
+                        flow_toxicity_veto = state.get("vpin", 0) > 0.8
 
                     # Macro window check
                     is_entry_allowed, should_orphan = self.check_macro_windows()

@@ -191,38 +191,30 @@ async def execute_orders(pull_socket, pool, mq_manager, redis_client):
             pending_key = f"Pending_Journal:{order['order_id']}"
             await redis_client.set(pending_key, json.dumps(order))
             
-            # 1. RISK CHECK: Fetch global risk settings
-            global_risk_raw = await redis_client.get("global_risk_settings")
-            stop_day_loss = float('inf')
-            if global_risk_raw:
-                global_risk = json.loads(global_risk_raw)
-                stop_day_loss = abs(float(global_risk.get('stop_day_loss', float('inf'))))
-
-            # Fetch current daily realized PnL
+            # 1. RISK CHECK: Stop Day Loss Gate
+            # Reads from the STOP_DAY_LOSS Redis key set by the dashboard UI.
             exec_type = order.get('execution_type', 'Paper')
-            async with pool.acquire() as conn:
-                daily_pnl_record = await conn.fetchrow("""
-                    SELECT SUM(CASE WHEN action='SELL' THEN (price * quantity) - fees ELSE -(price * quantity) - fees END) as realized_pnl
-                    FROM trades
-                    WHERE time >= CURRENT_DATE AND execution_type = $1
-                """, exec_type)
-                daily_pnl = float(daily_pnl_record['realized_pnl']) if daily_pnl_record and daily_pnl_record['realized_pnl'] else 0.0
-
-            # Stop Day Loss Check: If loss > stop_day_loss, block only NEW opening trades
-            is_opening_trade = False
-            async with pool.acquire() as conn:
-                record = await conn.fetchrow(
-                    "SELECT quantity FROM portfolio WHERE symbol = $1 AND strategy_id = $2 AND execution_type = $3", 
-                    order['symbol'], order['strategy_id'], exec_type
-                )
-                current_qty = record['quantity'] if record else 0
-                order_qty = order['quantity'] if order['action'] == 'BUY' else -order['quantity']
-                if abs(current_qty + order_qty) > abs(current_qty):
-                    is_opening_trade = True
-
-            if daily_pnl < -stop_day_loss and is_opening_trade:
-                logger.warning(f"BLOCKING ORDER: Daily Loss (₹{abs(daily_pnl):,.2f}) has breached Stop Loss limit (₹{stop_day_loss:,.2f})")
-                continue
+            mode_suffix = exec_type.upper()
+            try:
+                stop_day_loss = float(await redis_client.get("STOP_DAY_LOSS") or 5000.0)
+                breach_flag = await redis_client.get(f"STOP_DAY_LOSS_BREACHED_{mode_suffix}")
+                if breach_flag == "True":
+                    # Only block opening (new long/short) trades — allow exits
+                    async with pool.acquire() as check_conn:
+                        record = await check_conn.fetchrow(
+                            "SELECT quantity FROM portfolio WHERE symbol=$1 AND strategy_id=$2 AND execution_type=$3",
+                            order['symbol'], order['strategy_id'], exec_type
+                        )
+                        current_qty = record['quantity'] if record else 0
+                    order_qty_signed = order['quantity'] if order['action'] == 'BUY' else -order['quantity']
+                    is_opening = abs(current_qty + order_qty_signed) > abs(current_qty)
+                    if is_opening:
+                        logger.warning(
+                            f"🛑 STOP DAY LOSS BREACHED — Blocking new entry: {order['symbol']}"
+                        )
+                        continue
+            except Exception as e:
+                logger.error(f"Stop Day Loss gate error: {e}")
 
             # 2. STRATEGY RISK CHECK: Fetch strategy config for Max Capital
             strat_config_raw = await redis_client.hget("active_strategies", order['strategy_id'])
@@ -276,6 +268,27 @@ async def execute_orders(pull_socket, pool, mq_manager, redis_client):
             # 3. Clear Pending Journal (DB transaction was successful)
             await redis_client.delete(pending_key)
             # Note: lock:{symbol} is cleared by order_reconciler.py as per spec.
+
+            # 4. Update Daily Realized P&L in Redis (read by liquidation_daemon and dashboard)
+            try:
+                mode_suffix = exec_type.upper()
+                daily_pnl_key = f"DAILY_REALIZED_PNL_{mode_suffix}"
+                # Recalculate from DB for accuracy
+                async with pool.acquire() as pnl_conn:
+                    pnl_rec = await pnl_conn.fetchrow("""
+                        SELECT SUM(CASE WHEN action='SELL' THEN (price * quantity) - fees
+                                        ELSE -(price * quantity) - fees END) as total
+                        FROM trades
+                        WHERE time >= CURRENT_DATE AND execution_type = $1
+                    """, exec_type)
+                    daily_pnl_val = float(pnl_rec['total'] or 0.0) if pnl_rec else 0.0
+                await redis_client.set(daily_pnl_key, str(daily_pnl_val))
+                # Reset breach flag if P&L is above the limit again (safety)
+                stop_limit = float(await redis_client.get("STOP_DAY_LOSS") or 5000.0)
+                if daily_pnl_val > -stop_limit:
+                    await redis_client.set(f"STOP_DAY_LOSS_BREACHED_{mode_suffix}", "False")
+            except Exception as e:
+                logger.error(f"Failed to update DAILY_REALIZED_PNL: {e}")
             
             # Broadcast executed trade
             await mq_manager.send_json(trade_pub_socket, {

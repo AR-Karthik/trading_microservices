@@ -37,7 +37,14 @@ import polars as pl
 import redis.asyncio as redis
 
 import os
-from core.mq import MQManager, Ports, Topics, NumpyEncoder
+from core.shm import ShmManager
+
+# Try to import Rust extension for high-performance math
+try:
+    import tick_engine
+    HAS_RUST_ENGINE = True
+except ImportError:
+    HAS_RUST_ENGINE = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -298,6 +305,20 @@ class MarketSensor:
         if not test_mode:
             self.pub = self.mq.create_publisher(Ports.MARKET_STATE)
             redis_host = os.getenv("REDIS_HOST", "localhost")
+            self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
+            self.shm = ShmManager(mode='w')
+        else:
+            self.shm = None
+            self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
+
+        # High-performance Rust engine integration
+        self.use_rust = os.getenv("USE_RUST_ENGINE", "0") == "1" and HAS_RUST_ENGINE
+        if self.use_rust:
+            logger.info("🚀 Rust Tick Engine ACTIVATED (Bypassing GIL / mp.Process)")
+            self.rust_engine = tick_engine.TickEngine(vpin_bucket_size=100)
+        else:
+            self.rust_engine = None
+            logger.info("🐍 Using standard Python ComputeWorker (Multiprocessing mode)")
             self._redis = redis.Redis(host=redis_host, port=6379, db=0, decode_responses=True)
 
         # Tick buffers (main process — lightweight)
@@ -375,11 +396,15 @@ class MarketSensor:
             return -1.0 # Aggressive Sell
         return 0.0     # Neutral / Mid-quote bounce
 
-    def _ofi(self, tick: dict) -> float:
-        """
-        Order Flow Imbalance (OFI): Based on true market aggression.
-        Uses Lee-Ready classification * tick volume.
-        """
+        if self.use_rust:
+            rt = tick_engine.TickData(
+                tick.get("price", 0.0),
+                tick.get("bid", 0.0),
+                tick.get("ask", 0.0),
+                tick.get("last_volume", 1)
+            )
+            return self.rust_engine.classify_trade(rt) * tick.get("last_volume", 1)
+        
         sign = self._classify_trade(tick)
         volume = tick.get("last_volume", 1)
         return sign * volume
@@ -393,6 +418,18 @@ class MarketSensor:
 
     def _update_vpin(self, tick: dict):
         """Updates VPIN volume buckets and calculates VPIN on bucket completion."""
+        if self.use_rust:
+            rt = tick_engine.TickData(
+                tick.get("price", 0.0),
+                tick.get("bid", 0.0),
+                tick.get("ask", 0.0),
+                tick.get("last_volume", 1)
+            )
+            vpin_val = self.rust_engine.update_vpin(rt)
+            if vpin_val is not None:
+                self.vpin_series.append(vpin_val)
+            return
+
         sign = self._classify_trade(tick)
         volume = tick.get("last_volume", 1)
         
@@ -547,6 +584,8 @@ class MarketSensor:
         }
 
         if not self.test_mode:
+            if self.shm:
+                self.shm.write(s_total, state["vpin"], state["log_ofi_zscore"])
             await self.mq.send_json(self.pub, state, topic=Topics.MARKET_STATE)
             await self._redis.set("latest_market_state", json.dumps(state, cls=NumpyEncoder))
             # Publish individual signals for strategy guards
