@@ -33,9 +33,9 @@ To bypass Python's Global Interpreter Lock (GIL) and achieve true parallel compu
 - **TimescaleDB (Persistence)**: A time-series optimized PostgreSQL extension used to log every trade and equity fluctuation, enabling per-strategy performance analytics and historical audit trails.
 
 ## 6. Resilience & Risk Controls
-- **Atomic UI Budget Lock**: Moved capital limits from hidden `.env` files to the Streamlit HUD. Implemented a Redis Lua Script to atomically check and reserve margin before an order is even sent.
+- **Atomic UI Budget Lock**: Moved capital limits from hidden `.env` files to the React Dashboard. Implemented a Redis Lua Script to atomically check and reserve margin before an order is even sent.
 - **Global Budget Hierarchy**:
-    1. **Master Ceiling**: Set via Streamlit HUD (`GLOBAL_CAPITAL_LIMIT`).
+    1. **Master Ceiling**: Set via React Dashboard (`GLOBAL_CAPITAL_LIMIT`).
     2. **Strategy Partition**: Meta-Router allocates % of available capital based on confidence (e.g., 40% for Trending, 20% for Ranging).
     3. **Lot Normalizer**: Converts allocated ₹ to whole lots based on current premiums.
 - **Dynamic NSE Protection**: Integrated real-time fetching of NSE Circuit Limits and Execution Price Bands. The system "clamps" orders to exchange rules to prevent instant rejections by the broker's RMS.
@@ -46,7 +46,7 @@ To bypass Python's Global Interpreter Lock (GIL) and achieve true parallel compu
 
 ## 7. Distributed Integration Blueprint (V5.2)
 The Capital Allocation logic is physically distributed across the system:
-- **Streamlit UI**: User entry for `GLOBAL_CAPITAL_LIMIT`.
+- **Streamlit UI**: Legacy reference; current user entry is via React `GLOBAL_CAPITAL_LIMIT`.
 - **Meta-Router**: Performs real-time Lot Sizing calculations using Polars.
 - **Strategy Engine**: Executes Atomic Redis Transactions (Lua) to "Lock" the calculated capital.
 - **Execution Bridge**: Transforms "Theoretical Lots" into final Order Quantity (`Lots * Lot_Size`).
@@ -57,6 +57,14 @@ To achieve ultimate low-latency performance and memory safety, the system implem
 1.  **C++ Data Gateway**: Handles high-frequency WebSocket sharding, `simdjson` normalization, and Protobuf broadcasting.
 2.  **Rust Tick Engine (PyO3)**: Performance-critical math including VPIN, OFI, and Black-Scholes Greeks (Delta, Gamma, Vega, Charm, Vanna).
 3.  **Python Orchestration**: The Meta-Router and Market Sensor remain in Python for agility, consuming high-speed signals via **Shared Memory (SHM)**.
+4.  **Macro Event Oracle**: `macro_event_fetcher.py` polls ForexFactory and FMP APIs to populate the system's event horizon.
+5.  **FII Bias Extractor**: `fii_data_extractor.py` performs EOD sentiment analysis on institutional participation.
+
+## 9. News Integration & Macro Lockdown Flow
+The system implements a defensive "Veto" logic for high-impact news:
+1.  **Ingestion**: `macro_event_fetcher.py` merges global economic calendars into `macro_calendar.json`.
+2.  **Monitoring**: `SystemController` watches the calendar and sets `MACRO_EVENT_LOCKDOWN=True` in Redis 30m before/after events.
+3.  **Strategy Veto**: `MetaRouter` suppresses aggressive trade entries (especially "CRASH" regime detection) while the lockdown is active.
 
 ## 9. Quantitative & Strategy Refinements
 - **STT Tax Optimization**: Redefined strategy targets to 20–30 point structural moves to ensure viability after the 2026 hike in Options STT (0.15%).

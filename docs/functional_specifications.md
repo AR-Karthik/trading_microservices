@@ -84,4 +84,11 @@ The system is designed for **low capital utilization** and **Buy-only (Long Prem
 - **Double-Tap Guard**: An atomic Redis token lock prevents the system from triggering multiple identical trades on the same strike during high-volatility "Regime: TRENDING" moments.
 - **Journaled Persistence**: Every order is logged to a `Pending_Journal` in Redis before execution, ensuring data integrity for P&L tracking even if a daemon crashes during dispatch.
 - **Panic Button**: A mobile-friendly dashboard switch that instantly liquidates all active positions through the `Liquidation Daemon`.
-- **Macro Lockdown**: The system automatically "locks down" 30 minutes before high-impact news to avoid "fake out" volatility.
+- **Macro Lockdown**: The system automatically "locks down" 30 minutes before high-impact news (defined in `data/macro_calendar.json` and managed by `SystemController`) to avoid "fake out" volatility by suppressing "CRASH" regime detection in the Meta-Router.
+
+## 6. Macro News Protection Oracle
+To mitigate "Flash Crash" risks during major economic releases, the system maintains an automated Macro Oracle:
+- **Event Sourcing**: `utils/macro_event_fetcher.py` aggregates data from Forex Factory (Global) and FMP (US/India Economic Calendars).
+- **Veto Mechanism**: During a 60-minute window centered on the event time (T-30 to T+30), the `SystemController` sets a global `MACRO_EVENT_LOCKDOWN` flag.
+- **Financial Rationale**: News spikes often cause temporary "Regime: CRASH" prints that are purely noise-driven. By vetoing aggressive entries during these windows, the system preserves capital for structural moves once the "news dust" settles.
+- **Sentiment Layer**: EOD FII/DII data provides a secondary filter on long-term institutional bias, preventing the system from fighting against major flow trends.
