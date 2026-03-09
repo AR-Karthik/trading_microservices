@@ -39,7 +39,23 @@ The Meta Router determines strategy authorization based on Alpha, Regime, and Ve
     - **OI Wall Veto**: If the spot price is within 15 points of the top-3 OI walls, fresh buy entries are vetoed.
 - **Macro Windows**: High-liquidity windows are restricted to **09:30–11:30** and **13:30–15:00**.
 
-## 4. Execution & Risk Management
+## 4. Capital Allocation & Lot Sizing Logic
+The system utilizes a dynamic, weight-based allocation model to manage risk and maximize compounding.
+
+### Mathematical Lot Sizing
+When a strategy triggers, the Meta-Router calculates the number of lots using Polars:
+$$Lots = \lfloor \frac{Available\_Margin \times Strategy\_Weight}{Ask\_Price \times Lot\_Size} \rfloor$$
+- **Available_Margin**: `GLOBAL_CAPITAL_LIMIT` - `CURRENT_MARGIN_UTILIZED` (from Redis).
+- **Strategy_Weight**: Multiplier (0.1 to 0.4) based on HMM regime confidence.
+- **Ask_Price**: Real-time option premium.
+- **Lot_Size**: Fetched at market open (e.g., 65 for Nifty).
+- *The Floor Function* ($\lfloor \rfloor$) ensures zero budget breaches.
+
+### Anti-Overdrive Safeguards
+- **Max Single-Trade Cap**: No single trade can consume >50% of the total `GLOBAL_CAPITAL_LIMIT`, regardless of confidence.
+- **2026 STT Friction Buffer**: Trades on premiums < 50 points with only 1 lot are VETOED. This ensures the mathematical expectancy covers the 0.15% STT and broker fees.
+
+## 5. Execution & Risk Management
 The system is designed for **low capital utilization** and **Buy-only (Long Premium)** strategies, optimized for retail/pro-sumer margin constraints.
 
 ### The Three-Barrier Exit System:
