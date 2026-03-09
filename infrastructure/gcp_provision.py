@@ -86,6 +86,7 @@ ENV_VARS = {
     "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", ""),
     "TELEGRAM_CHAT_ID":   os.getenv("TELEGRAM_CHAT_ID", ""),
     "GCP_PROJECT_ID":     PROJECT_ID,
+    "GCS_MODEL_BUCKET":   os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models"),
 }
 ENV_CONTENT = "\n".join(f"{k}={v}" for k, v in ENV_VARS.items())
 
@@ -125,24 +126,44 @@ ENVEOF
 
 echo ".env written."
 
-# 5. OS Hardening & RAM Disk (tmpfs)
-echo "Optimizing Kernel (ulimit, TCP)..."
+# 5. OS Hardening, Storage Mounts, & Kernel Tuning
+echo "Optimizing Kernel (THP, ulimit, TCP)..."
+# Transparent HugePages
+echo always > /sys/kernel/mm/transparent_hugepage/enabled
+# Kernel flags
 cat >> /etc/sysctl.conf << 'EOF'
 fs.file-max = 1000000
 net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 8000
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
+net.ipv4.tcp_fast_open = 3
 EOF
 sysctl -p
 
+# RAM Disk for IPC
 mkdir -p /ram_disk
 mount -t tmpfs -o size=512M tmpfs /ram_disk
 echo "tmpfs /ram_disk tmpfs rw,size=512M 0 0" >> /etc/fstab
 
+# Mount NVMe (Disk 2) for Hot Storage (Redis/Timescale WAL)
+mkdir -p /mnt/hot_nvme
+mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdb
+mount -o discard,defaults /dev/sdb /mnt/hot_nvme
+echo UUID=$(blkid -s UUID -o value /dev/sdb) /mnt/hot_nvme ext4 discard,defaults,nofail 0 2 >> /etc/fstab
+
+# Mount Regional SSD (Disk 3) for Cold Storage (HMM Data)
+mkdir -p /mnt/cold_ssd
+mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdc
+mount -o discard,defaults /dev/sdc /mnt/cold_ssd
+echo UUID=$(blkid -s UUID -o value /dev/sdc) /mnt/cold_ssd ext4 discard,defaults,nofail 0 2 >> /etc/fstab
+
 # 6. Launch all services
-mkdir -p {REPO_DIR}/data/redis {REPO_DIR}/data/db
-# Note: In a real deploy, data/db would be mounted to the Regional SSD
+# Symlink Docker volumes to the high-performance disks
+mkdir -p /mnt/hot_nvme/redis_data /mnt/hot_nvme/db_data
+ln -s /mnt/hot_nvme/redis_data {REPO_DIR}/data/redis
+ln -s /mnt/hot_nvme/db_data {REPO_DIR}/data/db
+
 docker compose up -d --build
 
 echo "=== All services started: $(date) ==="
@@ -193,7 +214,8 @@ def create_spot_instance():
         automatic_restart=False
     )
 
-    disk = compute_v1.AttachedDisk(
+    # Disk 1: Boot Disk (Standard)
+    disk1 = compute_v1.AttachedDisk(
         auto_delete=False,
         boot=True,
         initialize_params=compute_v1.AttachedDiskInitializeParams(
@@ -202,7 +224,28 @@ def create_spot_instance():
             source_image="projects/debian-cloud/global/images/family/debian-12"
         )
     )
-    instance.disks = [disk]
+    
+    # Disk 2: Extreme NVMe for Hot Path (WAL/Active Ticks)
+    disk2 = compute_v1.AttachedDisk(
+        auto_delete=False,
+        boot=False,
+        initialize_params=compute_v1.AttachedDiskInitializeParams(
+            disk_size_gb=100,
+            disk_type=f"zones/{ZONE}/diskTypes/pd-extreme"
+        )
+    )
+
+    # Disk 3: Regional Persistent SSD for Cold Storage
+    disk3 = compute_v1.AttachedDisk(
+        auto_delete=False,
+        boot=False,
+        initialize_params=compute_v1.AttachedDiskInitializeParams(
+            disk_size_gb=200,
+            disk_type=f"regions/{ZONE[:-2]}/diskTypes/pd-ssd" # Maps asia-south1-a -> asia-south1
+        )
+    )
+
+    instance.disks = [disk1, disk2, disk3]
 
     # Network with Premium Tier & Tier_1 Performance
     access_config = compute_v1.AccessConfig(

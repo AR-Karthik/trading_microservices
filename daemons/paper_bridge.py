@@ -65,6 +65,27 @@ async def init_db(pool):
                 PRIMARY KEY (symbol, strategy_id, execution_type)
             );
         """)
+
+        # 3. Market History (For HMM Auto-Training)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_history (
+                time TIMESTAMPTZ NOT NULL,
+                symbol TEXT NOT NULL,
+                price NUMERIC(15, 2) NOT NULL,
+                log_ofi_zscore NUMERIC(15, 6),
+                cvd NUMERIC(20, 2),
+                vpin NUMERIC(10, 6),
+                basis_zscore NUMERIC(10, 6),
+                vol_term_ratio NUMERIC(10, 6),
+                PRIMARY KEY (time, symbol)
+            );
+        """)
+        try:
+            await conn.execute("SELECT create_hypertable('market_history', 'time', if_not_exists => TRUE);")
+            logger.info("market_history hypertable created.")
+        except Exception:
+            pass
+
         logger.info("Database schema initialized.")
 
 async def calculate_slippage_and_fees(order):

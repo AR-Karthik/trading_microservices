@@ -1,6 +1,6 @@
-# Functional Specifications: Quant Strategy Intelligence
+# Functional Specifications: Project K.A.R.T.H.I.K.
 
-This document details the logic, signal processing, and risk management strategies that drive the efficiency of the quant trading system.
+This document serves as the high-level business logic blueprint for **Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)**, a fully autonomous quant trading engine.
 
 ## 1. Signal Intelligence & Alpha Scoring
 The system identifies opportunities through a **Composite Alpha Scoring Model**, which aggregates disparate market signals into a single normalized value (`s_total`).
@@ -93,3 +93,44 @@ To mitigate "Flash Crash" risks during major economic releases, the system maint
 - **Financial Rationale**: News spikes often cause temporary "Regime: CRASH" prints that are purely noise-driven. By vetoing aggressive entries during these windows, the system preserves capital for structural moves once the "news dust" settles.
 - **Sentiment Layer**: EOD FII/DII data provides a secondary filter on long-term institutional bias, preventing the system from fighting against major flow trends.
 - **Correlation Guard**: Strict requirement for `HMM == TRENDING` AND `Correlation > 0.7` for momentum strategy activation to ensure high-probability leader-led moves.
+
+---
+
+## 11. HMM Auto-Train & Data Lifecycle
+
+The system employs a self-correcting Hidden Markov Model (HMM) that adapts to shifting market microstructures via a persistent data lifecycle.
+
+### 11.1 Data Ingestion (The "Collector")
+- **Mechanism**: The `DataLogger` daemon forks engineered features (Log-OFI, CVD, VPIN) into a TimescaleDB `market_history` table.
+- **Hard Stop (15:25 IST)**: Data collection ceases 5 minutes before market close to prevent "Market on Close" (MOC) volatility and erratic price discovery from polluting the clean intraday dataset.
+
+### 11.2 Nightly Training (The "Nightly Brain")
+- **Schedule**: A training worker (`hmm_trainer.py`) executes at **18:00 IST** daily.
+- **Process**:
+    1.  **Feature-Label Pairing**: Market history is queried to align intraday features with ground-truth forward returns (T+5, T+10, T+30).
+    2.  **EM Optimization**: The Expectation-Maximization algorithm updates the HMM transition matrix and emission parameters.
+    3.  **Validation Gate**: The new model is validated against the previous version using Log-Likelihood scores. Only superior models are promoted to `hmm_v_latest.pkl`.
+
+### 11.3 Market Synchronization
+- **Morning Warm-up (09:00 - 09:15)**: The system "primes" the HMM by feeding pre-open and high-volatility open ticks into the buffer to determine the current hidden state without triggering trade activations (`Regime == WAITING`).
+- **Gap-Factor**: Each market open is treated as a "New Sequence" start, preventing overnight gaps from causing spurious volatility spikes in the regime detection logic.
+
+## 12. Cloud-Native Dashboard & Remote Command
+The dashboard is fully decoupled from the trading VM. The VM **publishes** state to cloud services; the dashboard **reads** from them. This architecture provides:
+
+### 12.1 Real-Time Monitoring (Cloud Run)
+- **Heartbeat Publishing**: The `CloudPublisher` daemon on the VM pushes P&L, Regime, Active Lots, and Greeks to **Google Firestore** every 10 seconds.
+- **Cloud Run UI**: A lightweight web app on GCP Cloud Run reads Firestore for live metrics and GCS for historical analytics.
+- **24/7 Availability**: The dashboard is accessible on any device (phone/desktop) even when the VM is shut down.
+- **IAP Security**: Protected by Google Identity-Aware Proxy — only your Google account can access it.
+
+### 12.2 EOD Data Lifecycle
+- **Tick History Export**: At 15:35 IST, the full day's tick data is exported as `.parquet` to GCS (`tick_history/` folder).
+- **Model Persistence**: The latest HMM model is uploaded to GCS at EOD to survive VM reclamation.
+- **BigQuery Integration** (Optional): Point BigQuery at the GCS `tick_history/` folder for SQL-based analysis of months of trading data without running a database.
+
+### 12.3 Remote Command & Control (Panic Button)
+- **Mechanism**: The Cloud Run dashboard writes a command (e.g., `PANIC_BUTTON: True`) to a Firestore `trading_commands` document.
+- **Execution**: The VM's `CloudPublisher` daemon polls this document every 3 seconds. On detecting the flag, it publishes `SQUARE_OFF_ALL` to Redis, triggering immediate full position liquidation.
+- **Additional Commands**: `PAUSE_TRADING` (block new entries) and `RESUME_TRADING` (unblock).
+- **Safety Net**: Provides total control from a mobile device during unusual market conditions without SSH access.

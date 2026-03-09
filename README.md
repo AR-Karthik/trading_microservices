@@ -1,6 +1,8 @@
-# 🦸 Karthik's Quantitative Trading AI System
+# Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)
 
-> **An institutional-grade, fully-decoupled microservices architecture for deploying advanced derivatives strategies — built for Nifty/BankNifty Options scalping with real-time alpha scoring, graceful position management, and zero-latency execution via ZeroMQ.**
+**An Institutional-Grade, Sub-Millisecond Algorithmic Trading Microservices Architecture.**
+
+![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
 
 ---
 

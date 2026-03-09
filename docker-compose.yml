@@ -73,7 +73,7 @@ services:
         condition: service_healthy
     restart: always
     env_file: .env
-    cpuset: "2"
+    cpuset: "1"
     volumes:
       - /ram_disk:/ram_disk
 
@@ -119,30 +119,16 @@ services:
     restart: always
     env_file: .env
 
-  trading_api:
-    build:
-      context: ./dashboard/api
-    container_name: trading_api
+  cloud_publisher:
+    build: .
+    container_name: cloud_publisher
+    command: python -m daemons.cloud_publisher
     depends_on:
       redis:
         condition: service_healthy
-      timescaledb:
-        condition: service_healthy
+    restart: always
     env_file: .env
-    environment:
-      - REDIS_HOST=redis
-      - DB_HOST=timescaledb
-    restart: always
-
-  trading_frontend:
-    build:
-      context: ./dashboard/frontend
-    container_name: trading_frontend
-    ports:
-      - "8501:80"
-    depends_on:
-      - trading_api
-    restart: always
+    cpuset: "3"
 
   telegram_alerter:
     build: .
@@ -153,6 +139,7 @@ services:
         condition: service_healthy
     restart: always
     env_file: .env
+    cpuset: "3"
 
 volumes:
   timescaledb_data:

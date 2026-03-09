@@ -1,4 +1,4 @@
-# Technical Specifications: Resilient Quant Trading System
+# Technical Specifications: Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)
 
 This document outlines the architectural and engineering decisions made to build an institutional-grade, low-latency quant trading system.
 
@@ -23,14 +23,11 @@ To bypass Python's Global Interpreter Lock (GIL) and achieve true parallel compu
 - **Lee-Ready Trade Classification**: To filter "Bid-Ask Bounce," the `Market Sensor` classifies trades relative to the mid-quote ($(Bid + Ask) / 2$). Trades are only scored if they occur above (Buy) or below (Sell) the mid-point, ensuring alpha is based on true market aggression.
 - **Queue-Based IPC**: Communication between the main I/O loop and the compute workers happens via `multiprocessing.Queue`, ensuring sub-millisecond responsiveness to market ticks.
 
-## 4. Asynchronous IPC & Decoupled State
-- **ZeroMQ Ultra-Low Latency**: Utilizes ZeroMQ for sub-millisecond communication between daemons, moving away from slow, synchronous blocking calls.
-- **Decoupled State Reconciliation**: Replaced the fragile "Fire and Forget" order logic with a ROUTER/DEALER pattern. Added an independent **Order Reconciler** daemon that verifies every trade via the broker's REST API to prevent "Phantom" positions.
-
 ## 4. State Management (Redis & TimescaleDB)
 - **Redis (Real-time Blackboard)**: Serves as a high-speed shared memory for system-wide states (Alpha scores, current regime, risk limits). It acts as the "Bridge" between the Python backend and the React frontend.
-- **Pending Journal Persistence**: Implements a Redis-based WAL (Write-Ahead Log) for intents. Before dispatching to the broker, the `Execution Bridge` writes the full intent to a `Pending_Journal`. This ensures that even during a crash, the `System Controller` can recover and audit "Uncertain State" orders upon reboot.
-- **TimescaleDB (Persistence)**: A time-series optimized PostgreSQL extension used to log every trade and equity fluctuation, enabling per-strategy performance analytics and historical audit trails.
+- **Pending Journal Persistence**: Implements a Redis-based WAL (Write-Ahead Log) for intents. Before dispatching to the broker, the `Execution Bridge` writes the full intent to a `Pending_Journal`. This ensures that the `System Controller` can recover and audit "Uncertain State" orders upon reboot.
+- **TimescaleDB (Persistence)**: A time-series optimized PostgreSQL extension used to log every trade and equity fluctuation, enabling per-strategy performance analytics and historical audit trails. It also persists `market_history` for nightly HMM retraining.
+- **GCP Cloud Scheduler**: Orchestrates the nightly retraining lifecycle for the HMM model via a dedicated Cloud Function/Worker.
 
 ## 6. Resilience & Risk Controls
 - **Atomic UI Budget Lock**: Moved capital limits from hidden `.env` files to the React Dashboard. Implemented a Redis Lua Script to atomically check and reserve margin before an order is even sent.
@@ -73,6 +70,11 @@ The system implements a defensive "Veto" logic for high-impact news:
 - **Kelly Criterion & VPIN Filter**: Strategy bet sizing is dynamically scaled via the Fractional Kelly Criterion based on HMM state probabilities. VPIN (Volume-Synchronized Probability of Informed Trading) > 0.8 triggers a global veto on Long entries to avoid toxic liquidity vacuums.
 - **Dual-Stage Liquidation Protocol**: A 70-30 profit-taking rule. At +1.2x ATR, 70% of the position is market-sold to lock in risk-off profits. The STT-covered 30% "runner" holds until HMM invalidation or a 2.5x ATR hard ceiling is met.
 
+## 10. HMM Lifecycle Architecture
+- **Data Forking**: Real-time engineered features are forked from the `MarketSensor` to the `DataLogger` for SQL-level persistence.
+- **State Warm-up**: The `SystemController` enforces a 15-minute "quiet period" on open to prime HMM buffers, neutralizing the "Overnight Gap" impact on volatility sensors.
+- **Model Promotion**: Nightly EM training uses Log-Likelihood validation to avoid model drift and ensure adaptation to current-week microstructure.
+
 ## 11. C++ Gateway Sharding & SIMD Ingestion
 - **Instrument Sharding**: The Gateway operates three concurrent C++ shards (Index Spot/Futures, Nifty Options, BankNifty Options) to prevent head-of-line blocking.
 - **SIMD-Accelerated Parsing**: Utilizes `simdjson` for sub-microsecond JSON-to-Protobuf normalization, significantly reducing the "Normalization Bottleneck."
@@ -84,19 +86,61 @@ The system implements a defensive "Veto" logic for high-impact news:
 - **RAM Disk (tmpfs)**: IPC sockets and SHM files are host-mapped to a virtual RAM disk (`/ram_disk`) to minimize physical I/O latency.
 - **Stale Data Protection**: The SHM reader implementation includes timestamp-based staleness checks (>500ms) and simple CRC integrity verification.
 
-## 13. Institutional Infrastructure (High-Performance Cloud)
-- **CPU Affinity (Core Pinning)**: Leverages `cpuset` to isolate high-frequency processes on dedicated vCPUs.
-    - **Core 0**: C++ Data Gateway (Throughput-heavy I/O).
-    - **Core 1**: Market Sensor (Compute-heavy microstructure math).
-    - **Core 2**: Meta-Router/Strategy Engine (Inference & Routing).
-    - **Core 3**: Shared Services (Redis, DB, OS, Liquidation).
-- **GCP Tier_1 Networking**: Premium Tier networking with `GVNIC` and `TIER_1` egress performance enabled for jitter-free communication with Shoonya.
-- **Regional Data Strategy**: TimescaleDB is backed by Regional Persistent Disks to ensure zero data loss during zonal outages in Mumbai (`asia-south1`).
-- **Kernel Tuning**: OS-level optimizations including expanded `ulimit` (1M open files) and optimized TCP window sizes for high-connection concurrency.
+## 13. Project K.A.R.T.H.I.K. V5.4 Infrastructure Optimizations
+To achieve the lowest possible latency and prevent I/O or CPU contention on the Spot VM, the system employs the following institutional cloud archetypes:
+
+### 13.1 Three-Disk Architecture
+Running a time-series database and hot-path execution engine on the same block storage creates I/O contention. The V5.4 architecture shatters this bottleneck:
+- **Disk 1 (Standard SSD - 50GB)**: Dedicated exclusively to the Host OS, Docker daemon, and Python runtime.
+- **Disk 2 (Extreme PD Local NVMe)**: The fastest disk GCP offers. Mounted explicitly for the Redis Write-Ahead Log (WAL) and hot, intraday TimescaleDB tick ingestion.
+- **Disk 3 (Regional Persistent SSD)**: High-durability Cold Storage. Nightly HMM retraining runs off this disk, and intraday ticks are flushed here post-market to ensure data survival across Zonal outages.
+
+### 13.2 gVNIC & Tier_1 Networking Boost
+Standard virtio drivers introduce unacceptable virtualization interrupt latency.
+- **Google Virtual NIC (gVNIC)**: The primary network interface uses gVNIC, optimized for high-throughput, low-latency communication specific to C2 compute instances.
+- **Premium Tier 1 Performance**: Egress bandwidth is explicitly elevated to `TIER_1`, providing a dedicated, non-shared bandwidth lane to bypass "noisy neighbor" congestion when communicating with the Shoonya API.
+
+### 13.3 Shielded Cores via CPU Affinity (cpuset)
+The compute-heavy HMM Nightly Trainer must never steal cycles from the millisecond execution path.
+- **Core 0 (Hot I/O)**: Strictly pinned to the C++ Data Gateway for uninterrupted WebSocket tick handling.
+- **Core 1 (Compute & Routing)**: Strictly pinned to the Market Sensor (Math) and Meta-Router (Inference).
+- **Core 2 (Reconciliation)**: Strategy Engine, Paper Bridge, and Liquidation Daemon.
+- **Core 3 (The Grind)**: Dedicated entirely to the `hmm_trainer`, `timescaledb`, and `redis`. HMM parameter estimation can consume 100% of this core without impacting Cores 0-2.
+
+### 13.4 Kernel Memory Tuning (The "Magic" Flags)
+- **Transparent HugePages (THP)**: `always` enabled. Reduces TLB (Translation Lookaside Buffer) misses during massive matrix operations in the HMM math engine.
+- **TCP Fast Open**: `net.ipv4.tcp_fast_open=3` enabled to bypass the standard 3-way handshake round-trip latency on reconnects to external APIs.
+- **/dev/shm RAM Disk**: All ZeroMQ inter-process communication sockets and named shared memory files are mapped to a `tmpfs` RAM disk, completely eliminating physical disk I/O from the latency equation.
 
 ## 14. Infrastructure & Automation
 - **VM Proximity (Mumbai)**: Instances are deployed in **GCP `asia-south1` (Mumbai)** to minimize physical distance to NSE servers, achieving microsecond-scale execution latency.
 - **Ultra-Low Latency Engineering**: Combines `uvloop` (high-performance asyncio event loop substitution) with fire-and-forget execution patterns and Protobuf serialization to ensure the order path is never blocked by I/O.
 - **Serverless Pre-Flight Oracle**: Holiday and news scanning moved to a GCP Cloud Function (using `holidays` and FMP APIs) to decide if the VM should boot.
 - **Data Integrity**: All databases mapped to a **Detached Persistent SSD**, ensuring trade logs and ML states are safe if the Spot VM is reclaimed.
-- **Tailscale**: Secure, zero-config P2P networking for private access to the dashboard.
+
+## 15. Cloud-Native Decoupled Architecture (V5.4)
+The VM is no longer the owner of the dashboard; it is merely a **publisher**. This eliminates UI overhead from the execution VM and enables 24/7 monitoring.
+
+### 15.1 Decoupled Data Flow
+- **Intraday (The VM)**: Ticks and alpha scores are processed exclusively in RAM (`/dev/shm`). The VM dedicates 100% of its CPU to Market Sensor and Execution Bridge.
+- **Heartbeat (Every 10s)**: The `CloudPublisher` daemon pushes current P&L, Active Lots, Regime, Greeks, and Alpha scores to **Google Firestore** (NoSQL).
+- **EOD Snapshot (15:35 IST)**: The VM exports the full day's tick log as a `.parquet` file to **Google Cloud Storage (GCS)** and uploads the latest trained HMM `.pkl` model.
+- **Monitoring (The Dashboard)**: A **Cloud Run** UI reads from Firestore for "Live" status and GCS for "Historical" analytics.
+
+### 15.2 Storage Hierarchy (Cost-Optimized)
+| Tier | Service | Contents | Cost |
+|:-----|:--------|:---------|:-----|
+| **Hot State** | Firestore | `is_vm_running`, `daily_pnl`, `current_regime`, `active_lots` | Free (under 50K daily reads) |
+| **Cold Storage** | GCS | Historical tick `.parquet` files, HMM model versions, training logs | ~₹2/GB/month |
+| **Long-term Insights** | BigQuery (Optional) | SQL-based analysis of months of GCS data. No database server needed. | Pay-per-query |
+
+### 15.3 Cloud Run Monitoring Layer
+- **Availability**: Dashboard is accessible 24/7 on mobile or desktop, even when the Spot VM is shut down.
+- **Zero-Latency Trading**: The VM no longer handles web traffic (HTTP/Websockets). 100% CPU for the trading engine.
+- **Security**: Protected by **Identity-Aware Proxy (IAP)**, ensuring only authorized users via Google Login. Tailscale dependency is removed for dashboard access.
+
+### 15.4 Remote Command & Control (The "Back-Channel")
+A safety mechanism allowing remote intervention from any device:
+- **Panic Button**: The Cloud Run dashboard writes `PANIC_BUTTON: True` to Firestore. The VM's `CloudPublisher` watcher detects it and publishes `SQUARE_OFF_ALL` to Redis, triggering immediate full liquidation.
+- **Pause/Resume Trading**: Commands to disable or re-enable new trade entries, managed through Firestore flags.
+- **Benefit**: Total control from a mobile device during unusual market behavior, without needing to SSH into the VM.

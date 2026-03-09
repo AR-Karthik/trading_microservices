@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""
+Cloud Run Dashboard Deployer — Project K.A.R.T.H.I.K.
+======================================================
+Deploys the Firestore-backed dashboard to Cloud Run.
+Usage:
+    python infrastructure/deploy_cloudrun.py --action deploy
+    python infrastructure/deploy_cloudrun.py --action teardown
+"""
+import os
+import subprocess
+import argparse
+import sys
+
+PROJECT_ID = os.getenv("GCP_PROJECT_ID", "karthiks-trading-assistant")
+REGION = "asia-south1"
+SERVICE_NAME = "karthik-dashboard"
+IMAGE_NAME = f"gcr.io/{PROJECT_ID}/{SERVICE_NAME}"
+DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dashboard", "cloudrun")
+
+
+def run_cmd(cmd: str, check=True):
+    """Run a shell command and print output."""
+    print(f"  → {cmd}")
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if result.stdout:
+        print(result.stdout.strip())
+    if result.stderr:
+        print(result.stderr.strip())
+    if check and result.returncode != 0:
+        print(f"  ✗ Command failed with exit code {result.returncode}")
+        return False
+    return True
+
+
+def enable_apis():
+    """Enable required GCP APIs."""
+    apis = [
+        "run.googleapis.com",
+        "cloudbuild.googleapis.com",
+        "firestore.googleapis.com",
+        "storage.googleapis.com",
+        "iap.googleapis.com",
+    ]
+    for api in apis:
+        run_cmd(f"gcloud services enable {api} --project={PROJECT_ID}", check=False)
+
+
+def create_gcs_bucket():
+    """Create the GCS model bucket if it doesn't exist."""
+    bucket = os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models")
+    result = subprocess.run(
+        f"gcloud storage buckets describe gs://{bucket} --project={PROJECT_ID}",
+        shell=True, capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"Creating GCS bucket gs://{bucket} in {REGION}...")
+        run_cmd(f"gcloud storage buckets create gs://{bucket} --location={REGION} --project={PROJECT_ID}")
+    else:
+        print(f"GCS bucket gs://{bucket} already exists.")
+
+
+def setup_firestore():
+    """Create Firestore database in Native mode."""
+    # Check if Firestore is already initialized
+    result = subprocess.run(
+        f"gcloud firestore databases list --project={PROJECT_ID} --format=json",
+        shell=True, capture_output=True, text=True
+    )
+    if '"name"' in result.stdout:
+        print("Firestore database already exists.")
+        return
+    
+    print("Creating Firestore database (Native mode)...")
+    run_cmd(
+        f"gcloud firestore databases create --project={PROJECT_ID} --location={REGION} --type=firestore-native",
+        check=False
+    )
+
+
+def deploy_cloudrun():
+    """Build and deploy the Cloud Run dashboard."""
+    print("\n=== Deploying Cloud Run Dashboard ===")
+    
+    # Build and deploy using Cloud Build
+    run_cmd(
+        f"gcloud run deploy {SERVICE_NAME} "
+        f"--source {DASHBOARD_DIR} "
+        f"--region {REGION} "
+        f"--project {PROJECT_ID} "
+        f"--platform managed "
+        f"--allow-unauthenticated "
+        f"--set-env-vars GCP_PROJECT_ID={PROJECT_ID},GCS_MODEL_BUCKET={os.getenv('GCS_MODEL_BUCKET', 'karthiks-trading-models')} "
+        f"--memory 256Mi "
+        f"--cpu 1 "
+        f"--min-instances 0 "
+        f"--max-instances 2 "
+        f"--timeout 60"
+    )
+    
+    # Get the URL
+    result = subprocess.run(
+        f"gcloud run services describe {SERVICE_NAME} --region={REGION} --project={PROJECT_ID} --format='value(status.url)'",
+        shell=True, capture_output=True, text=True
+    )
+    url = result.stdout.strip()
+    if url:
+        print(f"\n🎉 Dashboard deployed at: {url}")
+        print(f"   Open in your browser to access the trading dashboard.")
+    return url
+
+
+def teardown():
+    """Delete all Cloud Run resources."""
+    print("\n=== Tearing Down Cloud Run Resources ===")
+    
+    # Delete Cloud Run service
+    run_cmd(
+        f"gcloud run services delete {SERVICE_NAME} --region={REGION} --project={PROJECT_ID} --quiet",
+        check=False
+    )
+    
+    # Delete GCS bucket contents and bucket
+    bucket = os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models")
+    run_cmd(f"gcloud storage rm -r gs://{bucket} --project={PROJECT_ID}", check=False)
+    
+    # Delete Firestore data (optional — costs nothing)
+    print("Note: Firestore data remains (free tier). Delete manually if needed.")
+    
+    print("\n✅ All billable Cloud Run resources deleted.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Cloud Run Dashboard Deployer")
+    parser.add_argument("--action", choices=["deploy", "teardown", "setup-only"], default="deploy")
+    args = parser.parse_args()
+
+    if args.action == "deploy":
+        enable_apis()
+        create_gcs_bucket()
+        setup_firestore()
+        deploy_cloudrun()
+    elif args.action == "setup-only":
+        enable_apis()
+        create_gcs_bucket()
+        setup_firestore()
+        print("\n✅ Cloud infrastructure ready. Run with --action deploy to push the dashboard.")
+    elif args.action == "teardown":
+        teardown()

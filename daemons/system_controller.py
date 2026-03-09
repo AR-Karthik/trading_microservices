@@ -53,6 +53,16 @@ GCP_METADATA_HEADERS = {"Metadata-Flavor": "Google"}
 SHUTDOWN_HH = 16
 SHUTDOWN_MM = 0
 
+# HMM Ingestion Hard Stop (to prevent MOC noise)
+LOGGER_STOP_HH = 15
+LOGGER_STOP_MM = 25
+
+# HMM Morning Warm-up (Priming hidden state)
+WARMUP_START_HH = 9
+WARMUP_START_MM = 0
+WARMUP_END_HH = 9
+WARMUP_END_MM = 15
+
 # SEBI batch limit
 SEBI_BATCH_SIZE = 10
 INTER_BATCH_WAIT = 1.01  # seconds
@@ -102,6 +112,7 @@ class SystemController:
                 self._preemption_poller(),
                 self._macro_lockdown_watcher(),
                 self._hard_shutdown_watcher(),
+                self._hmm_sync_watcher(),
             )
         except asyncio.CancelledError:
             pass
@@ -249,6 +260,30 @@ class SystemController:
                 logger.info("Graceful shutdown initiated.")
                 break
             await asyncio.sleep(15)
+
+    # ── HMM & Data Synchronization ──────────────────────────────────────────
+
+    async def _hmm_sync_watcher(self):
+        """Manages HMM warm-up and data logger hard-stop signals."""
+        logger.info("HMM synchronization watcher active.")
+        while not self._shutdown_flag:
+            now = datetime.now(tz=IST)
+            
+            # 09:00 - 09:15 Warm-up
+            is_warmup = (
+                (now.hour == WARMUP_START_HH and now.minute >= WARMUP_START_MM) or
+                (now.hour == WARMUP_END_HH and now.minute < WARMUP_END_MM)
+            )
+            await self.redis.set("HMM_WARM_UP", "True" if is_warmup else "False")
+            
+            # 15:25 Logger Stop
+            is_logger_stop = (now.hour > LOGGER_STOP_HH) or (now.hour == LOGGER_STOP_HH and now.minute >= LOGGER_STOP_MM)
+            # Reset logger stop at midnight
+            if now.hour < 9:
+                is_logger_stop = False
+            await self.redis.set("LOGGER_STOP", "True" if is_logger_stop else "False")
+            
+            await asyncio.sleep(30)
 
     # ── Batched Square-Off ───────────────────────────────────────────────────
 

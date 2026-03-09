@@ -63,7 +63,60 @@ def _hmm_worker(in_queue: mp.Queue, out_queue: mp.Queue):
     FEATURE_LEN = 60  # minimum ticks before HMM inference
 
     # Initialize HMM (will be retrained as data accumulates)
+    MODEL_PATH = "data/models/hmm_v_latest.pkl"
     hmm_model = None
+    
+    # Load latest trained model on boot
+    try:
+        import pickle
+        import os
+        if os.path.exists(MODEL_PATH):
+            with open(MODEL_PATH, "rb") as f:
+                hmm_model = pickle.load(f)
+            logger.info("Loaded HMM model from hmm_v_latest.pkl")
+    except Exception as e:
+        logger.warning(f"Failed to load HMM model: {e}")
+
+    # GCS Model Sync (Internal helper)
+    def sync_model_from_gcs():
+        bucket_name = os.getenv("GCS_MODEL_BUCKET")
+        if not bucket_name:
+            return
+        
+        try:
+            from google.cloud import storage
+            client = storage.Client()
+            bucket = client.bucket(bucket_name)
+            
+            # Try loading latest, then generic
+            for m_file in ["hmm_v_latest.pkl", "hmm_generic.pkl"]:
+                target_local = f"data/models/{m_file}"
+                if not os.path.exists(target_local):
+                    blob = bucket.blob(m_file)
+                    if blob.exists():
+                        os.makedirs("data/models", exist_ok=True)
+                        blob.download_to_filename(target_local)
+                        logger.info(f"Downloaded {m_file} from GCS.")
+                        return True
+            return False
+        except Exception as e:
+            logger.warning(f"GCS Model Sync failed: {e}")
+            return False
+
+    # Perform One-time Sync if model missing
+    if hmm_model is None:
+        if sync_model_from_gcs():
+            # Reload if downloaded
+            try:
+                if os.path.exists(MODEL_PATH):
+                    with open(MODEL_PATH, "rb") as f:
+                        hmm_model = pickle.load(f)
+                elif os.path.exists("data/models/hmm_generic.pkl"):
+                    with open("data/models/hmm_generic.pkl", "rb") as f:
+                        hmm_model = pickle.load(f)
+            except Exception:
+                pass
+
     feature_buffer: list[list[float]] = []
 
     def heuristic_regime(features: list[list[float]]) -> str:
@@ -132,11 +185,20 @@ def _hmm_worker(in_queue: mp.Queue, out_queue: mp.Queue):
 
             # Decode most probable state sequence
             try:
+                # Check for Market Sync Signals from SystemController
+                import redis
+                import os
+                r = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=6379, db=0, decode_responses=True)
+                is_warmup = r.get("HMM_WARM_UP") == "True"
+                
                 log_prob, state_seq = hmm_model.decode(X, lengths=[len(X)])
                 latest_state = int(state_seq[-1])
                 regime = REGIME_STATES.get(latest_state, "RANGING")
                 
-                # Get state probability for Kelly Criterion (SRS Phase 2)
+                # If in warm-up, we don't activate strategies
+                if is_warmup:
+                    regime = "WAITING"
+                
                 probas = hmm_model.predict_proba(X)
                 state_prob = float(probas[-1, latest_state])
             except Exception:
