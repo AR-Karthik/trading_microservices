@@ -19,19 +19,31 @@ The system utilizes **ZeroMQ** for all inter-service communication instead of tr
 
 ## 3. GIL Mitigation & Multi-Processing
 To bypass Python's Global Interpreter Lock (GIL) and achieve true parallel computation:
-- **Compute Offloading**: The `Market Sensor` and `Meta Router` spawn isolated OS processes (`ComputeProcess`, `HmmProcess`) for heavy mathematical tasks (HMM inference, Black-Scholes Greeks).
-- **Queue-Based IPC**: Communication between the main I/O loop and the compute workers happens via `multiprocessing.Queue`, ensuring the main thread stays responsive to market ticks.
+- **Multi-Process Neural Core**: Switched from a single-threaded asyncio loop to a Multi-Process architecture. Heavy math (HMM, Polars, Correlation) runs on dedicated CPU cores, ensuring the execution engine never lags due to Python's internal locks.
+- **Queue-Based IPC**: Communication between the main I/O loop and the compute workers happens via `multiprocessing.Queue`, ensuring sub-millisecond responsiveness to market ticks.
+
+## 4. Asynchronous IPC & Decoupled State
+- **ZeroMQ Ultra-Low Latency**: Utilizes ZeroMQ for sub-millisecond communication between daemons, moving away from slow, synchronous blocking calls.
+- **Decoupled State Reconciliation**: Replaced the fragile "Fire and Forget" order logic with a ROUTER/DEALER pattern. Added an independent **Order Reconciler** daemon that verifies every trade via the broker's REST API to prevent "Phantom" positions.
 
 ## 4. State Management (Redis & TimescaleDB)
 - **Redis (Real-time Blackboard)**: Serves as a high-speed shared memory for system-wide states (Alpha scores, current regime, risk limits). It acts as the "Bridge" between the Python backend and the React frontend.
 - **TimescaleDB (Persistence)**: A time-series optimized PostgreSQL extension used to log every trade and equity fluctuation, enabling per-strategy performance analytics and historical audit trails.
 
-## 5. Resilience & Risk Controls
-- **Feed Watchdog**: Monitors tick staleness. If a feed gaps by >1000ms, a TCP socket reset is forced to re-establish the connection.
-- **Docker-Based Persistence**: DB and Redis data are mapped to host volumes, ensuring trade history and system state survive VM restarts or container wipes.
+## 6. Resilience & Risk Controls
+- **Atomic UI Budget Lock**: Moved capital limits from hidden `.env` files to the Streamlit HUD. Implemented a Redis Lua Script to atomically check and reserve margin before an order is even sent.
+- **Dynamic NSE Protection**: Integrated real-time fetching of NSE Circuit Limits and Execution Price Bands. The system "clamps" orders to exchange rules to prevent instant rejections by the broker's RMS.
+- **Preemption Concurrency**: Optimized for GCP Spot VM shutdown notices. During a 30-second warning, the system fires exits in batches of 10 (with 1.01s delays) to flatten the portfolio while obeying SEBI's 10-orders-per-second limit.
 - **Rate Limiting**: Enforces a strict 10 Orders-Per-Second (OPS) limit to comply with institutional broker requirements.
 
-## 6. Infrastructure & Deployment
-- **GCP Spot VM**: Utilizes `c2-standard-4` instances for high compute performance at ~70% lower cost.
-- **Tailscale**: Secure, zero-config P2P networking for private access to the dashboard without exposing ports to the public internet.
-- **Zero-Build Frontend**: The React UI uses a CDN-based delivery model, ensuring it can be deployed instantly on any server without complex Node.js build pipelines.
+## 7. Quantitative & Strategy Refinements
+- **STT Tax Optimization**: Redefined strategy targets to 20–30 point structural moves to ensure viability after the 2026 hike in Options STT (0.15%).
+- **Index Dispersion Filter**: Added a Top 5 Stock Correlation sensor (RELIANCE, HDFC, etc.). Momentum trades are VETOED if heavyweights aren't moving in a unified direction.
+- **Vanna/Charm Analysis**: Integrated second-order Greeks to detect "Delta Bleed" on 0DTE/1DTE days, preventing entries into options decaying faster than index movement.
+
+## 8. Infrastructure & Automation
+- **VM Proximity (Mumbai)**: Instances are deployed in **GCP `asia-south1` (Mumbai)** to minimize physical distance to NSE servers, achieving microsecond-scale execution latency.
+- **Ultra-Low Latency Engineering**: Combines `uvloop` (high-performance asyncio event loop substitution) with fire-and-forget execution patterns to ensure the order path is never blocked by I/O.
+- **Serverless Pre-Flight Oracle**: Holiday and news scanning moved to a GCP Cloud Function (using `holidays` and FMP APIs) to decide if the VM should boot.
+- **Data Integrity**: All databases mapped to a **Detached Persistent SSD**, ensuring trade logs and ML states are safe if the Spot VM is reclaimed.
+- **Tailscale**: Secure, zero-config P2P networking for private access to the dashboard.
