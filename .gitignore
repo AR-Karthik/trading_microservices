@@ -7,3 +7,10 @@ venv/
 
 # Data and DB volumes
 data/
+
+# Temporary and test artifacts
+*.txt
+test_*.py
+!tests/test_*.py
+.pytest_cache/
+*.log
