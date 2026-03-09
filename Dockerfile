@@ -41,7 +41,8 @@ RUN make && cp uSockets.a /usr/local/lib/
 WORKDIR /build/cpp_gateway
 COPY cpp_gateway .
 RUN protoc -I=proto --cpp_out=proto proto/messages.proto
-RUN cmake -S . -B build \
+RUN ls -R /build/deps/uWebSockets/src && \
+    cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_FLAGS="-I/build/deps/uWebSockets/src -I/build/deps/uWebSockets/uSockets/src -I/build/cpp_gateway/proto" \
     && cmake --build build -- VERBOSE=1
