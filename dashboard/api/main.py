@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 
-app = FastAPI(title="Karthik's Trading API")
+app = FastAPI(title="🦸‍♂️ PROJECT K.A.R.T.H.I.K. (Kinetic Alpha Regime Tracking & High-frequency Institutional Kernel)")
 
 # Enable CORS for Next.js frontend
 app.add_middleware(
@@ -49,6 +49,7 @@ class SystemState(BaseModel):
     macro_lockdown: bool
     available_margin_paper: float
     available_margin_live: float
+    signals: dict  # Full quant signal vector
 
 class Position(BaseModel):
     symbol: str
@@ -57,6 +58,11 @@ class Position(BaseModel):
     avg_price: float
     realized_pnl: float
     unrealized_pnl: float
+
+class StrategyStatus(BaseModel):
+    name: str
+    status: str
+    parameters: dict
 
 # --- Endpoints ---
 
@@ -70,6 +76,19 @@ def get_state():
     state_raw = r.get("latest_market_state")
     ms = json.loads(state_raw) if state_raw else {}
     
+    # Extract deep signals
+    deep_signals = {
+        "log_ofi_z": ms.get("log_ofi_zscore", 0.0),
+        "dispersion": ms.get("dispersion_coeff", 0.5),
+        "hurst": ms.get("hurst", 0.5),
+        "rv": ms.get("rv", 0.0),
+        "vanna": ms.get("vanna", 0.0),
+        "charm": ms.get("charm", 0.0),
+        "atr": ms.get("atr", 20.0),
+        "basis_z": ms.get("basis_zscore", 0.0),
+        "cvd_flips": ms.get("cvd_flip_ticks", 0)
+    }
+
     return {
         "alpha_score": ms.get("s_total", 0.0),
         "hmm_regime": r.get("hmm_regime") or "UNKNOWN",
@@ -78,7 +97,67 @@ def get_state():
         "macro_lockdown": r.get("MACRO_EVENT_LOCKDOWN") == "True",
         "available_margin_paper": float(r.get("AVAILABLE_MARGIN_PAPER") or 0),
         "available_margin_live": float(r.get("AVAILABLE_MARGIN_LIVE") or 0),
+        "signals": deep_signals
     }
+
+@app.get("/strategies", response_model=List[StrategyStatus])
+def get_strategies():
+    r = get_redis()
+    # Strategies tracked by MetaRouter
+    targets = ["STRAT_GAMMA", "STRAT_REVERSION", "STRAT_VWAP", "STRAT_OI_PULSE", "STRAT_LEAD_LAG"]
+    results = []
+    
+    # In a real system, we'd fetch actual process status. 
+    # For now, we derive it from the last MetaRouter decision in Redis.
+    regime = r.get("hmm_regime") or "RANGING"
+    
+    for t in targets:
+        # Derivative logic to show "intended" state
+        status = "PAUSED"
+        if t == "STRAT_LEAD_LAG": status = "ACTIVE"
+        if t == "STRAT_GAMMA" and r.get("gex_sign") == "NEGATIVE" and regime == "TRENDING": status = "ACTIVE"
+        if t == "STRAT_REVERSION" and r.get("gex_sign") == "POSITIVE" and regime == "RANGING": status = "ACTIVE"
+        
+        results.append({
+            "name": t.replace("STRAT_", ""),
+            "status": status,
+            "parameters": {"regime": regime}
+        })
+    return results
+
+@app.get("/analytics")
+def get_analytics(mode: str = "Paper"):
+    conn = get_db()
+    if not conn:
+        return {"equity_curve": [], "drawdown": 0.0}
+    
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Fetch 1-min aggregated P&L for charting
+            cur.execute("""
+                SELECT 
+                    time_bucket('1 minute', time) AS bucket,
+                    SUM(CASE WHEN action='SELL' THEN (price * quantity) - fees ELSE -(price * quantity) - fees END) as pnl
+                FROM trades 
+                WHERE execution_type = %s
+                GROUP BY bucket 
+                ORDER BY bucket ASC
+            """, (mode,))
+            rows = cur.fetchall()
+            
+            equity = 0.0
+            curve = []
+            for row in rows:
+                equity += float(row['pnl'])
+                curve.append({"time": row['bucket'].isoformat(), "equity": equity})
+            
+            return {
+                "equity_curve": curve,
+                "total_pnl": equity,
+                "trade_count": len(rows)
+            }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/portfolio", response_model=List[Position])
 def get_portfolio(mode: str = "Paper"):
@@ -101,7 +180,8 @@ def get_portfolio(mode: str = "Paper"):
                     if tick_raw and qty != 0:
                         tick = json.loads(tick_raw)
                         cur_p = float(tick["price"])
-                        unrealized = (cur_p - avg_p) * qty if qty > 0 else (avg_p - cur_p) * abs(qty)
+                        # Simple P&L calc for visual purposes
+                        unrealized = (cur_p - avg_p) * qty
                     
                     positions.append({
                         "symbol": sym,
@@ -121,7 +201,7 @@ def panic(mode: str = "Paper"):
     r = get_redis()
     payload = {
         "action": "SQUARE_OFF_ALL",
-        "reason": "MANUAL_REACT_DASHBOARD",
+        "reason": "MANUAL_PRO_DASHBOARD",
         "execution_type": mode
     }
     r.publish("panic_channel", json.dumps(payload))
