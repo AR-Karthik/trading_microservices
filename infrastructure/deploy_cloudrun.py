@@ -41,21 +41,22 @@ def enable_apis():
         "firestore.googleapis.com",
         "storage.googleapis.com",
         "iap.googleapis.com",
+        "artifactregistry.googleapis.com",
     ]
     for api in apis:
-        run_cmd(f"gcloud services enable {api} --project={PROJECT_ID}", check=False)
+        run_cmd(f"gcloud services enable {api} --project={PROJECT_ID} --quiet", check=False)
 
 
 def create_gcs_bucket():
     """Create the GCS model bucket if it doesn't exist."""
     bucket = os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models")
     result = subprocess.run(
-        f"gcloud storage buckets describe gs://{bucket} --project={PROJECT_ID}",
+        f"gcloud storage buckets describe gs://{bucket} --project={PROJECT_ID} --quiet",
         shell=True, capture_output=True, text=True
     )
     if result.returncode != 0:
         print(f"Creating GCS bucket gs://{bucket} in {REGION}...")
-        run_cmd(f"gcloud storage buckets create gs://{bucket} --location={REGION} --project={PROJECT_ID}")
+        run_cmd(f"gcloud storage buckets create gs://{bucket} --location={REGION} --project={PROJECT_ID} --quiet")
     else:
         print(f"GCS bucket gs://{bucket} already exists.")
 
@@ -64,7 +65,7 @@ def setup_firestore():
     """Create Firestore database in Native mode."""
     # Check if Firestore is already initialized
     result = subprocess.run(
-        f"gcloud firestore databases list --project={PROJECT_ID} --format=json",
+        f"gcloud firestore databases list --project={PROJECT_ID} --format=json --quiet",
         shell=True, capture_output=True, text=True
     )
     if '"name"' in result.stdout:
@@ -73,7 +74,7 @@ def setup_firestore():
     
     print("Creating Firestore database (Native mode)...")
     run_cmd(
-        f"gcloud firestore databases create --project={PROJECT_ID} --location={REGION} --type=firestore-native",
+        f"gcloud firestore databases create --project={PROJECT_ID} --location={REGION} --type=firestore-native --quiet",
         check=False
     )
 
@@ -95,12 +96,13 @@ def deploy_cloudrun():
         f"--cpu 1 "
         f"--min-instances 0 "
         f"--max-instances 2 "
-        f"--timeout 60"
+        f"--timeout 60 "
+        f"--quiet"
     )
     
     # Get the URL
     result = subprocess.run(
-        f"gcloud run services describe {SERVICE_NAME} --region={REGION} --project={PROJECT_ID} --format='value(status.url)'",
+        f"gcloud run services describe {SERVICE_NAME} --region={REGION} --project={PROJECT_ID} --format='value(status.url)' --quiet",
         shell=True, capture_output=True, text=True
     )
     url = result.stdout.strip()
