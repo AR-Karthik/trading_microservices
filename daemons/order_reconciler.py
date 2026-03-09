@@ -208,6 +208,12 @@ class OrderReconciler:
             logger.debug(f"Broker query error for {broker_order_id}: {e}")
             return STATUS_PENDING, 0.0
 
+    async def _cleanup_refinement_locks(self, order_id: str, symbol: str):
+        """Clears Double-Tap Guard lock and Pending Journal (SRS §2.6, §2.7)."""
+        await self.redis.delete(f"lock:{symbol}")
+        await self.redis.delete(f"Pending_Journal:{order_id}")
+        logger.debug(f"Cleaned refinement locks for {order_id} ({symbol})")
+
     # ── State Update Helpers ─────────────────────────────────────────────────
 
     async def _mark_order_confirmed(self, order_id: str, meta: dict, fill_price: float):
@@ -216,6 +222,9 @@ class OrderReconciler:
         await self.redis.hdel("pending_orders", order_id)
         self._dispatch_times.pop(order_id, None)
         self._retry_counts.pop(order_id, None)
+        
+        # Clear Refinement Locks
+        await self._cleanup_refinement_locks(order_id, meta.get("symbol", "UNKNOWN"))
 
         # Publish confirmed fill for downstream consumers (liquidation daemon, dashboard)
         await self.redis.publish("order_confirmations", json.dumps({
@@ -251,6 +260,9 @@ class OrderReconciler:
         await self.redis.hdel("pending_orders", order_id)
         self._dispatch_times.pop(order_id, None)
         self._retry_counts.pop(order_id, None)
+        
+        # Clear Refinement Locks
+        await self._cleanup_refinement_locks(order_id, meta.get("symbol", "UNKNOWN"))
 
         await self.redis.publish("order_confirmations", json.dumps({
             "order_id": order_id,
@@ -271,6 +283,9 @@ class OrderReconciler:
         await self.redis.hdel("pending_orders", order_id)
         self._dispatch_times.pop(order_id, None)
         self._retry_counts.pop(order_id, None)
+        
+        # Clear Refinement Locks
+        await self._cleanup_refinement_locks(order_id, meta.get("symbol", "UNKNOWN"))
 
         alert = (
             f"👻 PHANTOM ORDER: {order_id}\n"

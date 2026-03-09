@@ -94,6 +94,9 @@ class SystemController:
         logger.info("SystemController started. Monitoring lifecycle events.")
         await self._telegram_alert(f"🟢 SYSTEM BOOT: Controller active. Paper Budget: ₹{paper_limit:,.2f} | Live Budget: ₹{live_limit:,.2f}")
 
+        # ── Persistence Reconciliation: Audit Pending Journal (SRS §2.7) ──
+        await self._audit_pending_journal()
+
         try:
             await asyncio.gather(
                 self._preemption_poller(),
@@ -104,6 +107,20 @@ class SystemController:
             pass
         finally:
             await self.redis.aclose()
+
+    async def _audit_pending_journal(self):
+        """Scans for orphaned intents in Redis on boot (SRS §2.7)."""
+        keys = await self.redis.keys("Pending_Journal:*")
+        if keys:
+            count = len(keys)
+            logger.warning(f"⚠️ FOUND {count} ORPHANED INTENTS in Pending Journal!")
+            for key in keys:
+                data_raw = await self.redis.get(key)
+                await self._telegram_alert(
+                    f"⚠️ ORPHANED INTENT detected on boot: {key}\n"
+                    f"Data: {data_raw[:200]}...\n"
+                    f"Action Required: Manually verify if order reached exchange!"
+                )
 
     # ── Macro Calendar ───────────────────────────────────────────────────────
 

@@ -10,8 +10,10 @@ The system identifies opportunities through a **Composite Alpha Scoring Model**,
     - *Logic*: FII bias tracks institutional flows (the "Big Money"). High IVP (>80) indicates expensive premium, vetoing long entries.
 - **Structural (30%)**: Futures Basis slope, Max Pain, and Put-Call Ratio (PCR).
     - *Logic*: Basis slope identifies futures premium/discount trends. PCR extremes indicate overbought/oversold exhaustion.
-- **Divergence (50%)**: Order Flow Imbalance (OFI), CVD absorption, and price-volume dislocation.
-    - *Logic*: **OFI-Z > +2.0** signals aggressive market orders overwhelming the book. **CVD Absorption** identifies when large players are absorbing sell pressure (bullish).
+- **Divergence (50%)**: Order Flow Imbalance (OFI), CVD absorption, price-volume dislocation, and VPIN.
+    - *Logic*: **OFI-Z > +2.0** signals aggressive market orders overwhelming the book.
+    - *Lee-Ready Filter*: To ensure OFI isn't biased by bid-ask bounce, every tick is classified as "Aggressive Buy" if $LTP > MidQuote$ and "Aggressive Sell" if $LTP < MidQuote$. **CVD Absorption** identifies when large players are absorbing pressure.
+    - *Flow Toxicity (VPIN)*: **VPIN > 0.8** indicates informed institutional selling that overwhelms liquidity, triggering a Veto on all Long entries.
 
 ## 2. Regime Identification (HMM)
 The system uses a **Gaussian Mixture Model - Hidden Markov Model (GMM-HMM)** to identify the latent state of the market. This runs in an isolated OS process to ensure high-frequency tick updates are never delayed by matrix calculations.
@@ -42,11 +44,11 @@ The Meta Router determines strategy authorization based on Alpha, Regime, and Ve
 ## 4. Capital Allocation & Lot Sizing Logic
 The system utilizes a dynamic, weight-based allocation model to manage risk and maximize compounding.
 
-### Mathematical Lot Sizing
+### Mathematical Lot Sizing & Fractional Kelly
 When a strategy triggers, the Meta-Router calculates the number of lots using Polars:
-$$Lots = \lfloor \frac{Available\_Margin \times Strategy\_Weight}{Ask\_Price \times Lot\_Size} \rfloor$$
+$$Lots = \lfloor \frac{Available\_Margin \times f_{Kelly}}{Ask\_Price \times Lot\_Size} \rfloor$$
 - **Available_Margin**: `GLOBAL_CAPITAL_LIMIT` - `CURRENT_MARGIN_UTILIZED` (from Redis).
-- **Strategy_Weight**: Multiplier (0.1 to 0.4) based on HMM regime confidence.
+- **Fractional Kelly ($f_{Kelly}$)**: $f^* = 0.5 \times (p - \frac{1-p}{b})$, where $p$ is the HMM Strategy probability and $b$ is the historical Strategy Profit Factor. Weight is clamped between 10% and 50%.
 - **Ask_Price**: Real-time option premium.
 - **Lot_Size**: Fetched at market open (e.g., 65 for Nifty).
 - *The Floor Function* ($\lfloor \rfloor$) ensures zero budget breaches.
@@ -58,12 +60,21 @@ $$Lots = \lfloor \frac{Available\_Margin \times Strategy\_Weight}{Ask\_Price \ti
 ## 5. Execution & Risk Management
 The system is designed for **low capital utilization** and **Buy-only (Long Premium)** strategies, optimized for retail/pro-sumer margin constraints.
 
-### The Three-Barrier Exit System:
-- **Barrier 1 (ATR-Mapped)**: Dynamic **Take-Profit (2.5×ATR)** and **Stop-Loss (1.0×ATR)** that breathe with market volatility to prevent "stop hunting."
-- **Barrier 2 (Time-Decay Stall)**: If a position stalls for **>5 minutes**, the system progressively crosses the bid-ask spread to force an exit (prevents Theta bleed).
+### The Dual-Stage Liquidation Protocol (70-30 Rule):
+- **Barrier 1a (Target 1 - Risk Off)**: Dynamic **Take-Profit (1.2×ATR)**. When hit, immediately market-sell **70%** of lots to lock in realized profit and cover STT/brokerage.
+- **Barrier 1b (Target 2 - Runner Hunt)**: The remaining **30%** enters Active Trailing Mode. Break-even Lock moves SL to Entry. The runner is invalidated and closed if:
+    - **HMM Regime Shifts** (e.g., Trending to Ranging).
+    - Checks hit the **Hard Ceiling (2.5×ATR)**.
+    - SL hits (Entry price).
+- **Regime-Adaptive Mutlipliers**: Stop Loss expands from 1.0x ATR to 1.5x ATR during High Volatility regimes (RV > 0.001) to prevent stop-hunting whipsaws.
+- **Barrier 2 (Dynamic Slippage)**: 
+    - *Stall Mode*: If a position stalls for >5 minutes, the system progressively crosses the spread in 0.05 increments.
+    - *Panic Mode*: If Realized Volatility (**RV > 3σ**), the system abandons the timer and fires a marketable limit order at the Best Bid - 1% (Puts) or Best Ask + 1% (Calls) for instant execution.
 - **Barrier 3 (Structural Flip)**: If Order Flow (**CVD flips**) consistently against the position for **>10 ticks**, a market exit is triggered regardless of P&L.
 
 ### Global Safeguards:
 - **Stop Day Loss**: A global hard limit (e.g., ₹5000) on daily realized loss. Once breached, all fresh opening trades are blocked.
+- **Double-Tap Guard**: An atomic Redis token lock prevents the system from triggering multiple identical trades on the same strike during high-volatility "Regime: TRENDING" moments.
+- **Journaled Persistence**: Every order is logged to a `Pending_Journal` in Redis before execution, ensuring data integrity for P&L tracking even if a daemon crashes during dispatch.
 - **Panic Button**: A mobile-friendly dashboard switch that instantly liquidates all active positions through the `Liquidation Daemon`.
 - **Macro Lockdown**: The system automatically "locks down" 30 minutes before high-impact news to avoid "fake out" volatility.

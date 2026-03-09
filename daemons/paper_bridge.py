@@ -179,6 +179,18 @@ async def execute_orders(pull_socket, pool, mq_manager, redis_client):
 
             logger.info(f"Received Order: {order['action']} {order['quantity']} {order['symbol']} [Strat: {order['strategy_id']}]")
             
+            # --- Double-Tap Execution Guard (SRS §2.6) ---
+            lock_key = f"lock:{order['symbol']}"
+            if await redis_client.exists(lock_key):
+                logger.warning(f"❌ DUPLICATE REJECTED: {order['symbol']} has an active lock. Double-tap prevented.")
+                continue
+            # Lock expires in 10s if not cleared by reconciler (safety fallback)
+            await redis_client.setex(lock_key, 10, "LOCKED")
+
+            # --- Pending Journal Persistence (SRS §2.7) ---
+            pending_key = f"Pending_Journal:{order['order_id']}"
+            await redis_client.set(pending_key, json.dumps(order))
+            
             # 1. RISK CHECK: Fetch global risk settings
             global_risk_raw = await redis_client.get("global_risk_settings")
             stop_day_loss = float('inf')
@@ -260,6 +272,10 @@ async def execute_orders(pull_socket, pool, mq_manager, redis_client):
                     
                     # 2. Update portfolio summary table
                     await update_portfolio(conn, execution, fees)
+            
+            # 3. Clear Pending Journal (DB transaction was successful)
+            await redis_client.delete(pending_key)
+            # Note: lock:{symbol} is cleared by order_reconciler.py as per spec.
             
             # Broadcast executed trade
             await mq_manager.send_json(trade_pub_socket, {

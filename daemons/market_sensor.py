@@ -14,6 +14,8 @@ Signals computed:
   - Index Dispersion (rolling 3-min Pearson correlation matrix)
   - Volatility Term Structure (near/far IV ratio)
   - Vanna & Charm flags (toxic option detection)
+  - Vanna & Charm flags (toxic option detection)
+  - VPIN (Volume-Synchronized Probability of Informed Trading)
   - CVD Absorption (bullish divergence signal)
   - Futures Basis deviation (price dislocation flag)
   - Composite Alpha Score
@@ -217,6 +219,12 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         else:
             result["spot_zscore_15m"] = 0.0
 
+        # ── VPIN (Flow Toxicity) ───────────────────────────────────────────
+        vpin_series = snapshot.get("vpin_series", [0.0])
+        result["vpin"] = float(vpin_series[-1]) if vpin_series else 0.0
+        # Veto long trades if VPIN > 0.8
+        result["flow_toxicity_veto"] = bool(result["vpin"] > 0.8)
+
         return result
 
     # Worker main loop
@@ -305,6 +313,13 @@ class MarketSensor:
         self.basis_series: collections.deque = collections.deque(maxlen=500)
         self.spot_15m_series: collections.deque = collections.deque(maxlen=900)  # ~15min @ 1/s
 
+        # VPIN State (SRS Phase 2)
+        self.vpin_bucket_size = 5000  # Configurable volume bucket size
+        self.current_bucket_vol = 0
+        self.current_bucket_buy_vol = 0
+        self.current_bucket_sell_vol = 0
+        self.vpin_series: collections.deque = collections.deque(maxlen=50)
+
         # Compute subprocess setup
         self._compute_in: mp.Queue = mp.Queue(maxsize=50)
         self._compute_out: mp.Queue = mp.Queue(maxsize=50)
@@ -340,18 +355,60 @@ class MarketSensor:
         poly = np.polyfit(np.log(lags), np.log(tau), 1)
         return float(poly[0] * 2.0)
 
+    def _classify_trade(self, tick: dict) -> float:
+        """
+        Lee-Ready Trade Classification (SRS §2.5).
+        Classifies LTP relative to mid-quote to filter bid-ask bounce noise.
+        """
+        ltp = tick.get("price", 0.0)
+        bid = tick.get("bid", 0.0)
+        ask = tick.get("ask", 0.0)
+        
+        if bid <= 0 or ask <= 0:
+            return 0.0
+            
+        mid = (bid + ask) / 2.0
+        
+        if ltp > mid:
+            return 1.0  # Aggressive Buy
+        elif ltp < mid:
+            return -1.0 # Aggressive Sell
+        return 0.0     # Neutral / Mid-quote bounce
+
     def _ofi(self, tick: dict) -> float:
-        """Order Flow Imbalance: log(bid_vol / ask_vol)."""
-        bid_v = max(tick.get("bid_vol", 1), 1)
-        ask_v = max(tick.get("ask_vol", 1), 1)
-        return math.log(bid_v / ask_v)
+        """
+        Order Flow Imbalance (OFI): Based on true market aggression.
+        Uses Lee-Ready classification * tick volume.
+        """
+        sign = self._classify_trade(tick)
+        volume = tick.get("last_volume", 1)
+        return sign * volume
 
     def _update_cvd(self, tick: dict):
-        """Cumulative Volume Delta update."""
-        bid_v = tick.get("bid_vol", 0)
-        ask_v = tick.get("ask_vol", 0)
-        self.cvd += bid_v - ask_v
+        """Cumulative Volume Delta update using Lee-Ready classification."""
+        sign = self._classify_trade(tick)
+        volume = tick.get("last_volume", 1)
+        self.cvd += sign * volume
         self.cvd_series.append(self.cvd)
+
+    def _update_vpin(self, tick: dict):
+        """Updates VPIN volume buckets and calculates VPIN on bucket completion."""
+        sign = self._classify_trade(tick)
+        volume = tick.get("last_volume", 1)
+        
+        self.current_bucket_vol += volume
+        if sign > 0:
+            self.current_bucket_buy_vol += volume
+        elif sign < 0:
+            self.current_bucket_sell_vol += volume
+            
+        # When bucket fills, calculate VPIN and reset
+        if self.current_bucket_vol >= self.vpin_bucket_size:
+            vpin = abs(self.current_bucket_buy_vol - self.current_bucket_sell_vol) / self.current_bucket_vol
+            self.vpin_series.append(vpin)
+            self.current_bucket_vol = 0
+            self.current_bucket_buy_vol = 0
+            self.current_bucket_sell_vol = 0
 
     async def _drain_compute_output(self):
         """Non-blocking drain of compute_out queue into latest_signals."""
@@ -388,9 +445,11 @@ class MarketSensor:
                     if symbol in TOP_5_HEAVYWEIGHTS:
                         self.hw_prices[symbol].append(price)
 
-                    # Update OFI, CVD, basis
+                    # Update OFI, CVD, VPIN, basis
                     self.ofi_series.append(self._ofi(tick))
                     self._update_cvd(tick)
+                    if symbol == "NIFTY50":  # Typically VPIN is calculated on the underlying/liquid asset
+                        self._update_vpin(tick)
 
                     # Simulate basis (futures_price - spot)
                     futures_est = price * (1 + 0.0005 * (np.random.random() - 0.5))
@@ -413,6 +472,7 @@ class MarketSensor:
                             "cvd_series": list(self.cvd_series),
                             "basis_series": list(self.basis_series),
                             "spot_15m_series": list(self.spot_15m_series),
+                            "vpin_series": list(self.vpin_series) if self.vpin_series else [0.0],
                             "price_series": [t.get("price", price) for t in list(self.tick_store[symbol])],
                             "strikes": [price - 200, price - 100, price, price + 100, price + 200],
                             "near_term_iv": 0.20,  # In prod: fetch from options chain
@@ -481,6 +541,8 @@ class MarketSensor:
             "basis_zscore": sig.get("basis_zscore", 0.0),
             "price_dislocation": sig.get("price_dislocation", False),
             "spot_zscore_15m": sig.get("spot_zscore_15m", 0.0),
+            "vpin": sig.get("vpin", 0.0),
+            "flow_toxicity_veto": sig.get("flow_toxicity_veto", False),
             "time_of_day": datetime.now().strftime("%H:%M:%S")
         }
 
@@ -495,11 +557,12 @@ class MarketSensor:
             await self._redis.set("price_dislocation", "1" if state["price_dislocation"] else "0")
             await self._redis.set("gex_sign", state["gex_sign"])
             await self._redis.set("atr", str(state["atr"]))
+            await self._redis.set("flow_toxicity_veto", "1" if state["flow_toxicity_veto"] else "0")
 
         logger.info(
-            f"STATE: α={s_total:.1f} | OFI-Z={state['log_ofi_zscore']:.2f} | "
-            f"Dispersion={state['dispersion_coeff']:.2f} | GEX={state['gex_sign']} | "
-            f"CVD_Absorb={state['cvd_absorption']}"
+            f"STATE: ALPHA={s_total:.1f} | OFI-Z={state['log_ofi_zscore']:.2f} | "
+            f"Dispersion={state['dispersion_coeff']:.2f} | VPIN={state['vpin']:.2f} | "
+            f"Veto={'ON' if state['flow_toxicity_veto'] else 'OFF'}"
         )
         return state
 

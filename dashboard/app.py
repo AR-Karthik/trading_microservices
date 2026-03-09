@@ -179,18 +179,42 @@ def fetch_daily_metrics(execution_type="Paper", strategy_id=None):
         return 1300.0, 5000000.0, 2200000.0
 
 def fetch_advanced_metrics(execution_type="Paper", strategy_id=None):
+    def calc_stats(df):
+        if df.empty: return {"win_rate": 0, "profit_factor": 0, "max_dd": 0, "sharpe": 0, "sortino": 0, "gain_to_pain": 0, "df": pd.DataFrame()}
+        df['net_value'] = pd.to_numeric(df['net_value'], errors='coerce').fillna(0).astype(float)
+        df['cumulative_pnl'] = df['net_value'].cumsum()
+        df['peak'] = df['cumulative_pnl'].cummax()
+        df['drawdown'] = df['peak'] - df['cumulative_pnl']
+        
+        wins = df[df['net_value'] > 0]['net_value'].sum()
+        losses = abs(df[df['net_value'] < 0]['net_value'].sum())
+        
+        mean_ret = df['net_value'].mean()
+        std_ret = df['net_value'].std()
+        downside_ret = df[df['net_value'] < 0]['net_value']
+        down_std = downside_ret.std() if not downside_ret.empty else 0
+        
+        sharpe = (mean_ret / std_ret) * (252**0.5) if pd.notna(std_ret) and std_ret != 0 else 0
+        sortino = (mean_ret / down_std) * (252**0.5) if pd.notna(down_std) and down_std != 0 else 0
+        
+        return {
+            "win_rate": len(df[df['net_value'] > 0]) / len(df) if len(df) > 0 else 0,
+            "profit_factor": wins / losses if losses > 0 else float('inf'),
+            "max_dd": float(df['drawdown'].max()),
+            "sharpe": sharpe,
+            "sortino": sortino,
+            "gain_to_pain": wins / losses if losses > 0 else float('inf'),
+            "df": df
+        }
+
     if not conn:
         dates = pd.date_range(end=datetime.now(), periods=100, freq='h')
         pnl = [random.uniform(-500, 800) for _ in range(100)]
         df = pd.DataFrame({'time': dates, 'net_value': pnl, 'strategy_id': 'STRAT_GAMMA'})
         if strategy_id and strategy_id != "All Portfolio":
             df = df[df['strategy_id'] == strategy_id]
-        if df.empty:
-            return 0.0, 0.0, 0.0, pd.DataFrame()
-        df['cumulative_pnl'] = df['net_value'].cumsum()
-        df['peak'] = df['cumulative_pnl'].cummax()
-        df['drawdown'] = df['peak'] - df['cumulative_pnl']
-        return 0.64, 1.92, float(df['drawdown'].max()), df
+        return calc_stats(df)
+        
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             q = "SELECT time, strategy_id, CASE WHEN action='SELL' THEN (price*quantity)-fees ELSE -(price*quantity)-fees END as net_value FROM trades WHERE execution_type=%s"
@@ -199,19 +223,11 @@ def fetch_advanced_metrics(execution_type="Paper", strategy_id=None):
                 q += " AND strategy_id=%s"; args.append(strategy_id)
             cur.execute(q + " ORDER BY time ASC", args)
             trades = cur.fetchall()
-            if not trades:
-                return 0.0, 0.0, 0.0, pd.DataFrame()
-            df = pd.DataFrame(trades)
-            df['net_value'] = pd.to_numeric(df['net_value'], errors='coerce').fillna(0).astype(float)
-            df['cumulative_pnl'] = df['net_value'].cumsum()
-            df['peak'] = df['cumulative_pnl'].cummax()
-            df['drawdown'] = df['peak'] - df['cumulative_pnl']
-            wins = df[df['net_value'] > 0]['net_value'].sum()
-            losses = abs(df[df['net_value'] < 0]['net_value'].sum())
-            return (len(df[df['net_value']>0])/len(df) if len(df)>0 else 0, wins/losses if losses>0 else float('inf'), float(df['drawdown'].max()), df)
+            df = pd.DataFrame(trades) if trades else pd.DataFrame()
+            return calc_stats(df)
     except Exception:
         conn.rollback()
-        return 0.0, 0.0, 0.0, pd.DataFrame()
+        return calc_stats(pd.DataFrame())
 
 def format_currency(value):
     if value >= 1_000_000: return f"₹{value/1_000_000:.2f}M"
@@ -727,12 +743,28 @@ with tab_risk:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_analytics:
     st.markdown('<p class="section-header">Advanced Performance Analytics</p>', unsafe_allow_html=True)
-    win_rate, profit_factor, max_dd, equity_df = fetch_advanced_metrics(view_type, strategy_id=selected_global_strat)
+    metrics = fetch_advanced_metrics(view_type, strategy_id=selected_global_strat)
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Win Rate", f"{win_rate*100:.1f}%" if win_rate else "N/A")
-    m2.metric("Profit Factor", f"{profit_factor:.2f}" if profit_factor else "N/A")
-    m3.metric("Max Drawdown", format_currency(max_dd) if max_dd else "N/A", delta_color="inverse")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Win Rate", f"{metrics['win_rate']*100:.1f}%")
+    m2.metric("Profit Factor", f"{metrics['profit_factor']:.2f}")
+    m3.metric("Max Drawdown", format_currency(metrics['max_dd']), delta_color="inverse")
+    m4.metric("Sharpe Ratio", f"{metrics['sharpe']:.2f}")
+    m5.metric("Sortino Ratio", f"{metrics['sortino']:.2f}")
+
+    st.markdown("")
+    am1, am2, am3 = st.columns(3)
+    am1.metric("Gain-to-Pain Ratio", f"{metrics['gain_to_pain']:.2f}")
+    
+    # M2 Measure = RiskFreeRate + Sharpe * MarketVol (Assuming MarketVol = 0.15, Rf = 0.065)
+    m2_measure = 0.065 + metrics['sharpe'] * 0.15
+    am2.metric("M² Measure Benchmark", f"{m2_measure*100:.1f}%")
+    
+    # Profit-to-Pain Profile (Total Profit / Max DD)
+    profit_to_pain = (metrics['df']['net_value'].sum() / metrics['max_dd']) if metrics['max_dd'] > 0 else float('inf')
+    am3.metric("Profit-to-Pain Profile", f"{profit_to_pain:.2f}")
+
+    equity_df = metrics['df']
 
     if not equity_df.empty and 'time' in equity_df.columns:
         st.markdown(f"###### Equity Curve — `{selected_global_strat}`")

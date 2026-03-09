@@ -134,11 +134,17 @@ def _hmm_worker(in_queue: mp.Queue, out_queue: mp.Queue):
                 log_prob, state_seq = hmm_model.decode(X, lengths=[len(X)])
                 latest_state = int(state_seq[-1])
                 regime = REGIME_STATES.get(latest_state, "RANGING")
+                
+                # Get state probability for Kelly Criterion (SRS Phase 2)
+                probas = hmm_model.predict_proba(X)
+                state_prob = float(probas[-1, latest_state])
             except Exception:
                 regime = heuristic_regime(feature_buffer[-10:])
+                state_prob = 0.6  # Default fallback confidence
 
             out_queue.put({
                 "regime": regime,
+                "state_prob": state_prob,
                 "log_likelihood": float(log_prob) if hmm_model else 0.0
             })
 
@@ -162,6 +168,7 @@ class MetaRouter:
             self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
 
         self.current_regime: str = "RANGING"
+        self.current_state_prob: float = 0.6  # Default confidence
         self._orphaned_lunch = False
         self._orphaned_eod = False
 
@@ -262,6 +269,8 @@ class MetaRouter:
                     self.current_regime = raw_regime
                     if not self.test_mode:
                         await self._redis.set("hmm_regime", raw_regime)
+                        
+                self.current_state_prob = result.get("state_prob", 0.6)
             except mp.queues.Empty:
                 break
 
@@ -273,13 +282,62 @@ class MetaRouter:
         should_orphan: bool = False,
         momentum_vetoed: bool = False,
         mr_1lot: bool = False,
-        oi_wall_veto: bool = False
+        oi_wall_veto: bool = False,
+        flow_toxicity_veto: bool = False
     ) -> list[dict]:
         commands: list[dict] = []
         spot = state.get("spot", 0.0)
         gex_sign = state.get("gex_sign", "POSITIVE")
         regime = self.current_regime
 
+        # --- Phase 2: Fractional Kelly Lot Sizing Logic ---
+        # f* = p - (1-p)/b
+        p = self.current_state_prob
+        b = 1.5  # Historical Win/Loss Payoff Ratio (e.g. 15pts TP / 10pts SL)
+        
+        kelly_f = p - ((1.0 - p) / b)
+        fractional_kelly = max(0.01, 0.5 * kelly_f)  # 0.5x Half-Kelly, min 1%
+        
+        # Cap Strategy Weights to prevent over-allocation despite Kelly
+        strat_weight = min(0.40, fractional_kelly) if regime == "TRENDING" else min(0.20, fractional_kelly)
+        
+        # Available Margin from Redis
+        try:
+            # We use PAPER by default for safety in broadcast if not specified, 
+            # but usually meta-router broadcasts to both or is mode-agnostic.
+            # Here we pull from the respective available margin key if possible.
+            # For simplicity, we assume the router manages the 'Current' active budget.
+            # In a multi-mode setup, we'd iterate.
+            avail_margin = float(await self._redis.get("AVAILABLE_MARGIN_PAPER") or 0.0)
+            global_limit = float(await self._redis.get("GLOBAL_CAPITAL_LIMIT_PAPER") or 50000.0)
+            
+            # Lot Size (e.g., 65 for Nifty)
+            lot_size = int(await self._redis.hget("lot_sizes", "NIFTY50") or 65)
+            
+            # Current Option Premium (Ask Price) - using 'price' as proxy if 'ask' missing
+            ask_price = float(state.get("ask", state.get("price", 100.0)))
+            
+            # Equation: Lots = floor((Available_Margin * Strategy_Weight) / (Ask_Price * Lot_Size))
+            calc_lots = int((avail_margin * strat_weight) / (ask_price * lot_size)) if ask_price > 0 else 0
+            
+            # Anti-Overdrive Safeguard 1: Max 50% single-trade cap
+            max_allowed_lots = int((global_limit * 0.5) / (ask_price * lot_size)) if ask_price > 0 else 0
+            final_lots = min(calc_lots, max_allowed_lots)
+            
+            # Strategy override for Dispersion Veto
+            if mr_1lot:
+                final_lots = 1
+                
+            # Anti-Overdrive Safeguard 2: 2026 STT Friction Buffer
+            # Reject if Premium < 50 pts and Qty = 1 lot (prevent negative expectancy)
+            if ask_price < 50 and final_lots <= 1:
+                logger.warning(f"STT_FRICTION_VETO: Premium {ask_price:.1f} < 50 and 1 lot. Rejection to protect alpha.")
+                final_lots = 0
+
+        except Exception as e:
+            logger.error(f"Lot sizing calculation failed: {e}")
+            final_lots = 1 # Safe default
+        
         if should_orphan:
             logger.warning("MACRO BOUNDARY: Issuing ORPHAN to all strategies.")
             commands = [
@@ -290,31 +348,29 @@ class MetaRouter:
                 {"target": "STRAT_LEAD_LAG", "command": "ORPHAN"},
             ]
         else:
-            # Long Gamma Momentum: NEG GEX + TRENDING
+            # Long Gamma Momentum: NEG GEX + TRENDING. Flow Toxicity vetoes Longs!
             if gex_sign == "NEGATIVE" and regime == "TRENDING" and not momentum_vetoed and not oi_wall_veto:
-                commands.append({"target": "STRAT_GAMMA", "command": "ACTIVATE", "regime": regime})
+                commands.append({"target": "STRAT_GAMMA", "command": "ACTIVATE", "regime": regime, "lots": final_lots, "vpin_veto_long": flow_toxicity_veto})
             else:
                 commands.append({"target": "STRAT_GAMMA", "command": "PAUSE"})
 
             # Institutional Fade: POS GEX + RANGING
             if gex_sign == "POSITIVE" and regime == "RANGING" and not oi_wall_veto:
-                cmd = {"target": "STRAT_REVERSION", "command": "ACTIVATE",
-                       "lot_override": 1 if mr_1lot else None, "regime": regime}
-                commands.append(cmd)
+                commands.append({"target": "STRAT_REVERSION", "command": "ACTIVATE", "regime": regime, "lots": final_lots, "vpin_veto_long": flow_toxicity_veto})
             else:
                 commands.append({"target": "STRAT_REVERSION", "command": "PAUSE"})
 
             # VWAP: activated on high alpha (|s_total| > 40)
             s_total = abs(state.get("s_total", 0))
             if s_total > 40 and not oi_wall_veto:
-                commands.append({"target": "STRAT_VWAP", "command": "ACTIVATE", "regime": regime})
+                commands.append({"target": "STRAT_VWAP", "command": "ACTIVATE", "regime": regime, "lots": final_lots, "vpin_veto_long": flow_toxicity_veto})
             else:
                 commands.append({"target": "STRAT_VWAP", "command": "PAUSE"})
 
             # OI Pulse & Lead-Lag: all regimes (if no OI wall veto on spot)
             oi_cmd = "PAUSE" if oi_wall_veto else "ACTIVATE"
-            commands.append({"target": "STRAT_OI_PULSE", "command": oi_cmd, "regime": regime})
-            commands.append({"target": "STRAT_LEAD_LAG", "command": "ACTIVATE", "regime": regime})
+            commands.append({"target": "STRAT_OI_PULSE", "command": oi_cmd, "regime": regime, "lots": final_lots, "vpin_veto_long": flow_toxicity_veto})
+            commands.append({"target": "STRAT_LEAD_LAG", "command": "ACTIVATE", "regime": regime, "lots": final_lots, "vpin_veto_long": flow_toxicity_veto})
 
         if not self.test_mode:
             for cmd in commands:
@@ -369,10 +425,11 @@ class MetaRouter:
 
                     # Veto checks
                     spot = state.get("spot", 22000.0)
-                    momentum_vetoed, mr_1lot, oi_wall_veto = False, False, False
+                    momentum_vetoed, mr_1lot, oi_wall_veto, flow_toxicity_veto = False, False, False, False
                     if not self.test_mode:
                         momentum_vetoed, mr_1lot = await self._check_dispersion_veto()
                         oi_wall_veto = await self._check_oi_wall_veto(spot)
+                        flow_toxicity_veto = (await self._redis.get("flow_toxicity_veto")) == "1"
 
                     # Macro window check
                     is_entry_allowed, should_orphan = self.check_macro_windows()
@@ -380,7 +437,7 @@ class MetaRouter:
                         await asyncio.sleep(0.5)
                         continue
 
-                    await self.broadcast(state, should_orphan, momentum_vetoed, mr_1lot, oi_wall_veto)
+                    await self.broadcast(state, should_orphan, momentum_vetoed, mr_1lot, oi_wall_veto, flow_toxicity_veto)
 
                     await asyncio.sleep(0.25)
 

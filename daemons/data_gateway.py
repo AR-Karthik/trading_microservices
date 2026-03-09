@@ -21,6 +21,9 @@ import os
 
 import redis.asyncio as redis
 from core.mq import MQManager, Ports, Topics
+from core.greeks import BlackScholes
+
+RISK_FREE_RATE = 0.065
 
 try:
     import uvloop
@@ -87,6 +90,29 @@ class DataGateway:
             self._circuit_breaker_monitor(),
         )
 
+    # ── Strike Selection (SRS Phase 2) ───────────────────────────────────────
+
+    def get_optimal_strike(self, spot: float, option_type: str = "call", expiry_years: float = 2.0/365, iv: float = 0.18) -> float:
+        """Filters option chain for Delta between 0.40 and 0.60 (Delta-Theta Balance)."""
+        best_strike = spot
+        closest_delta_diff = 1.0
+        
+        # Check strikes +/- 500 from spot in intervals of 50
+        base_strike = round(spot / 50) * 50
+        for offset in range(-500, 550, 50):
+            strike = base_strike + offset
+            delta = BlackScholes.delta(spot, strike, expiry_years, RISK_FREE_RATE, iv, option_type)
+            abs_delta = abs(delta)
+            
+            # Filter for Delta [0.40, 0.60]
+            if 0.40 <= abs_delta <= 0.60:
+                diff = abs(abs_delta - 0.50)  # Aim for Delta ~0.50
+                if diff < closest_delta_diff:
+                    closest_delta_diff = diff
+                    best_strike = strike
+                    
+        return best_strike
+
     # ── Tick Stream ──────────────────────────────────────────────────────────
 
     async def _tick_stream(self):
@@ -136,6 +162,16 @@ class DataGateway:
                 # Update Redis for UI and staleness watchdog
                 await self.redis_client.set(f"latest_tick:{symbol}", json.dumps(tick))
                 self._last_tick_ts[symbol] = now_ts.timestamp()
+
+                # Simulate Delta-Theta Balanced Strike Selection for NIFTY50
+                if symbol == "NIFTY50":
+                    optimal_ce_strike = self.get_optimal_strike(self._prices[symbol], "call", 2/365, 0.18)
+                    optimal_pe_strike = self.get_optimal_strike(self._prices[symbol], "put", 2/365, 0.18)
+                    
+                    await self.redis_client.hset("optimal_strikes", mapping={
+                        "NIFTY_CE": optimal_ce_strike,
+                        "NIFTY_PE": optimal_pe_strike
+                    })
 
                 # Publish via ZMQ
                 topic = f"TICK.{symbol}"

@@ -1,0 +1,38 @@
+.EC:\Users\karth\AppData\Local\Programs\Python\Python311\Lib\unittest\case.py:622: ResourceWarning: Unclosed socket <zmq.asyncio.Socket(zmq.PUB) at 0x15b1f506c10>
+  with outcome.testPartExecutor(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+C:\Users\karth\AppData\Local\Programs\Python\Python311\Lib\unittest\case.py:622: ResourceWarning: Unclosed context <zmq.asyncio.Context() at 0x15b1f39ef30>
+  with outcome.testPartExecutor(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+C:\Users\karth\AppData\Local\Programs\Python\Python311\Lib\unittest\async_case.py:117: ResourceWarning: Unclosed context <zmq.asyncio.Context() at 0x15b1f39ef30>
+  return self._asyncioTestContext.run(func, *args, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.
+======================================================================
+ERROR: test_kelly_criterion_sizing (tests.test_quant_refinements.TestQuantRefinements.test_kelly_criterion_sizing)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\karth\AppData\Local\Programs\Python\Python311\Lib\unittest\async_case.py", line 90, in _callTestMethod
+    if self._callMaybeAsync(method) is not None:
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\karth\AppData\Local\Programs\Python\Python311\Lib\unittest\async_case.py", line 117, in _callMaybeAsync
+    return self._asyncioTestContext.run(func, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\karth\.gemini\antigravity\scratch\trading_microservices\tests\test_quant_refinements.py", line 43, in test_kelly_criterion_sizing
+    router = MetaRouter()
+             ^^^^^^^^^^^^
+  File "C:\Users\karth\.gemini\antigravity\scratch\trading_microservices\daemons\meta_router.py", line 166, in __init__
+    self.cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\karth\.gemini\antigravity\scratch\trading_microservices\core\mq.py", line 67, in create_publisher
+    socket.bind(addr)
+  File "C:\Users\karth\AppData\Local\Programs\Python\Python311\Lib\site-packages\zmq\sugar\socket.py", line 302, in bind
+    super().bind(addr)
+  File "zmq\\backend\\cython\\socket.pyx", line 564, in zmq.backend.cython.socket.Socket.bind
+  File "zmq\\backend\\cython\\checkrc.pxd", line 28, in zmq.backend.cython.checkrc._check_rc
+zmq.error.ZMQError: Address in use (addr='tcp://0.0.0.0:5559')
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.088s
+
+FAILED (errors=1)

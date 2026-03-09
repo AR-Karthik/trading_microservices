@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package trading;
+
+message TickData {
+    string symbol = 1;
+    double price = 2;
+    double prev_price = 3;
+    int32 volume = 4;
+    int32 oi = 5;
+    int32 prev_oi = 6;
+    double bid = 7;
+    double ask = 8;
+    int32 bid_vol = 9;
+    int32 ask_vol = 10;
+    string timestamp = 11;
+}
+
+message OrderIntent {
+    string order_id = 1;
+    string symbol = 2;
+    string action = 3;
+    int32 quantity = 4;
+    string order_type = 5;
+    double price = 6;
+    string strategy_id = 7;
+    string execution_type = 8;
+    string timestamp = 9;
+    string reason = 10;
+}

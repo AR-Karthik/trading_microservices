@@ -10,9 +10,10 @@ import pandas as pd
 import os
 from redis import asyncio as redis
 from datetime import datetime, timezone
-from core.mq import MQManager, Ports, RedisLogger
+from core.mq import MQManager, Ports, RedisLogger, Topics
 from core.greeks import BlackScholes
 from core.shared_memory import TickSharedMemory
+from core.margin import AsyncMarginManager
 
 try:
     import uvloop
@@ -350,13 +351,42 @@ async def warmup_engine(active_strategies, num_ticks=1000):
                     
     logger.info("âœ… Warmup Complete. Bytecode is primed.")
 
-async def run_strategies(sub_socket, push_socket, mq_manager, redis_client, shm):
+async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_client, shm):
     """Subscribes to market data and runs strategies using SHM for zero-copy lookups."""
     logger.info("Starting Strategy Engine loop...")
     
     shm_slots = {}
     last_shm_sync = 0
     
+    # Track real-time lot overrides from Meta-Router
+    strategy_states = collections.defaultdict(lambda: {"lots": 1, "active": True})
+    margin_manager = AsyncMarginManager(redis_client)
+
+    async def handle_commands():
+        nonlocal strategy_states
+        while True:
+            try:
+                topic, cmd = await mq_manager.recv_json(cmd_socket)
+                if cmd:
+                    target = cmd.get("target")
+                    command = cmd.get("command")
+                    lots = cmd.get("lots", 1)
+                    
+                    if target == "ALL" or target is None:
+                        for s_id in active_strategies:
+                            strategy_states[s_id]["active"] = (command == "ACTIVATE")
+                            strategy_states[s_id]["lots"] = lots
+                    else:
+                        strategy_states[target]["active"] = (command == "ACTIVATE")
+                        strategy_states[target]["lots"] = lots
+                        
+            except Exception as e:
+                logger.error(f"Command Handler Error: {e}")
+                await asyncio.sleep(0.1)
+
+    # Launch command handler as a background task
+    asyncio.create_task(handle_commands())
+
     while True:
         try:
             topic, tick_msg = await mq_manager.recv_json(sub_socket)
@@ -382,37 +412,42 @@ async def run_strategies(sub_socket, push_socket, mq_manager, redis_client, shm)
             price = tick.get("price")
             
             for strategy in list(active_strategies.values()):
+                s_id = strategy.strategy_id
                 if symbol not in strategy.symbols:
                     continue  
                 
-                if not strategy.is_active_now():
+                # Check both Redis-based config and real-time ZMQ commands
+                if not strategy.is_active_now() or not strategy_states[s_id]["active"]:
                     continue
                     
                 signal = strategy.on_tick(symbol, tick)
                 
                 if signal:
                     action = signal
-                    # --- Dynamic Sizing based on DTE ---
-                    now_dt = datetime.now()
-                    # DTE 0/1 (Wed/Thu) = 100%, Others = 50%
-                    is_expiry = now_dt.strftime("%A") in ["Wednesday", "Thursday"]
-                    base_qty = 100
-                    qty = base_qty if is_expiry else int(base_qty * 0.5)
+                    # --- Project K.A.R.T.H.I.K. Sizing Logic ---
+                    # Prioritize Meta-Router calculated lots, fallback to DTE logic
+                    lots_from_router = strategy_states[s_id].get("lots")
+                    if lots_from_router and lots_from_router > 0:
+                        qty = lots_from_router
+                    else:
+                        # Fallback sizing based on DTE
+                        now_dt = datetime.now()
+                        # DTE 0/1 (Wed/Thu) = 100%, Others = 50%
+                        is_expiry = now_dt.strftime("%A") in ["Wednesday", "Thursday"]
+                        base_qty = 100
+                        qty = base_qty if is_expiry else int(base_qty * 0.5)
+
                     if "QTY" in signal:
                         parts = signal.split("_")
                         action = parts[0]
                         qty = int(parts[3])
                         
-                    # --- Hard Global Budget Check ---
+                    # --- Atomic Capital Locking (SRS §2.4) ---
                     required_margin = price * qty
-                    # Create generic temporary margin manager or import it at top?
-                    # We should use an instance created outside the loop, but for now we'll import here if needed.
-                    # Wait, we need to import MarginManager. I will update the top of the file separately, or use a passed-in margin_manager.
                     if action == "BUY":
-                        from core.margin import AsyncMarginManager
-                        margin_manager = AsyncMarginManager(redis_client)
                         if not await margin_manager.reserve(required_margin, strategy.execution_type):
-                            logger.error(f"❌ MARGIN REJECTED: {symbol} needs ₹{required_margin:,.2f} but {strategy.execution_type} budget is exhausted.")
+                            logger.error(f"❌ MARGIN REJECTED: {s_id} needs ₹{required_margin:,.2f} but {strategy.execution_type} budget is exhausted.")
+                            await redis_logger.log(f"Margin Reject: {s_id} needs ₹{required_margin:,.2f}", "RISK")
                             continue # Skip dispatch
 
                     order = {
@@ -455,6 +490,7 @@ async def start_engine():
     
     sub_socket = mq.create_subscriber(Ports.MARKET_DATA, topics=["TICK."])
     push_socket = mq.create_push(Ports.ORDERS)
+    cmd_socket = mq.create_subscriber(Ports.SYSTEM_CMD, topics=["STRAT_", "ALL"])
     
     # 1. Start Config Polling
     config_task = asyncio.create_task(config_subscriber(redis_client))
@@ -466,13 +502,14 @@ async def start_engine():
     await warmup_engine(active_strategies)
 
     try:
-        await run_strategies(sub_socket, push_socket, mq, redis_client, shm)
+        await run_strategies(sub_socket, push_socket, cmd_socket, mq, redis_client, shm)
     finally:
         config_task.cancel()
-        shm.close()
+        if shm: shm.close()
         await redis_client.aclose()
         sub_socket.close()
         push_socket.close()
+        cmd_socket.close()
         mq.context.term()
 
 if __name__ == "__main__":

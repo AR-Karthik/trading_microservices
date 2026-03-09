@@ -231,6 +231,19 @@ class LiveExecutionEngine:
             logger.warning(f"Order rejected: Kill switch active. Symbol: {order['symbol']}")
             return
 
+        # --- Double-Tap Execution Guard (SRS §2.6) ---
+        lock_key = f"lock:{order['symbol']}"
+        if await self.redis.exists(lock_key):
+            logger.warning(f"❌ LIVE DUPLICATE REJECTED: {order['symbol']} has an active lock. Double-tap prevented.")
+            return
+        # Lock expires in 10s if not cleared by reconciler (safety fallback)
+        await self.redis.setex(lock_key, 10, "LOCKED")
+
+        # --- Pending Journal Persistence (SRS §2.7) ---
+        # Journal before network dispatch to Shoonya
+        pending_key = f"Pending_Journal:{order['order_id']}"
+        await self.redis.set(pending_key, json.dumps(order))
+
         execution = await self.execute_live_order(order)
         
         if execution:
@@ -247,6 +260,11 @@ class LiveExecutionEngine:
                         execution['strategy_id'], execution['execution_type']
                     )
                     await self.update_portfolio(conn, execution, execution['fees'])
+            
+            # --- Resilience: Clear Pending Journal ---
+            # Order successfully written to DB and confirmed by broker execution state
+            await self.redis.delete(pending_key)
+            # lock:{symbol} is cleared by order_reconciler.py as per spec.
             
             await self.mq.send_json(trade_pub_socket, {
                 "id": execution["id"], "symbol": execution["symbol"],

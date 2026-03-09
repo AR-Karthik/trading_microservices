@@ -1,0 +1,149 @@
+python : E..
+At line:1 char:1
++ python -m unittest t
+ests/test_capital_allo
+cation.py > 
+test_results.tx ...
++ ~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~
+~~~~~
+    + CategoryInfo    
+          : NotSpeci  
+  fied: (E..:String   
+ ) [], RemoteExcep    
+tion
+    + FullyQualifiedE 
+   rrorId : NativeCo  
+  mmandError
+ 
+======================
+======================
+======================
+====
+ERROR: test_liquidatio
+n_margin_release (test
+s.test_capital_allocat
+ion.TestCapitalAllocat
+ion.test_liquidation_m
+argin_release)
+----------------------
+----------------------
+----------------------
+----
+Traceback (most 
+recent call last):
+  File "C:\Users\karth
+\AppData\Local\Program
+s\Python\Python311\Lib
+\unittest\async_case.p
+y", line 90, in 
+_callTestMethod
+    if self._callMaybe
+Async(method) is not 
+None:
+       ^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^
+  File "C:\Users\karth
+\AppData\Local\Program
+s\Python\Python311\Lib
+\unittest\async_case.p
+y", line 112, in 
+_callMaybeAsync
+    return self._async
+ioRunner.run(
+           ^^^^^^^^^^^
+^^^^^^^^^^^^^
+  File "C:\Users\karth
+\AppData\Local\Program
+s\Python\Python311\Lib
+\asyncio\runners.py", 
+line 118, in run
+    return self._loop.
+run_until_complete(tas
+k)
+           ^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^
+^^
+  File "C:\Users\karth
+\AppData\Local\Program
+s\Python\Python311\Lib
+\asyncio\base_events.p
+y", line 654, in 
+run_until_complete
+    return 
+future.result()
+           
+^^^^^^^^^^^^^^^
+  File "C:\Users\karth
+\AppData\Local\Program
+s\Python\Python311\Lib
+\unittest\mock.py", 
+line 1392, in patched
+    with self.decorati
+on_helper(patched,
+  File "C:\Users\karth
+\AppData\Local\Program
+s\Python\Python311\Lib
+\contextlib.py", line 
+137, in __enter__
+    return 
+next(self.gen)
+           
+^^^^^^^^^^^^^^
+  File "C:\Users\karth
+\AppData\Local\Program
+s\Python\Python311\Lib
+\unittest\mock.py", 
+line 1357, in 
+decoration_helper
+    arg = exit_stack.e
+nter_context(patching)
+          ^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\karth
+\AppData\Local\Program
+s\Python\Python311\Lib
+\contextlib.py", line 
+517, in enter_context
+    result = 
+_enter(cm)
+             
+^^^^^^^^^^
+  File "C:\Users\karth
+\AppData\Local\Program
+s\Python\Python311\Lib
+\unittest\mock.py", 
+line 1446, in 
+__enter__
+    original, local = 
+self.get_original()
+                      
+^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\karth
+\AppData\Local\Program
+s\Python\Python311\Lib
+\unittest\mock.py", 
+line 1419, in 
+get_original
+    raise 
+AttributeError(
+AttributeError: 
+<module 'daemons.liqui
+dation_daemon' from 'C
+:\\Users\\karth\\.gemi
+ni\\antigravity\\scrat
+ch\\trading_microservi
+ces\\daemons\\liquidat
+ion_daemon.py'> does 
+not have the 
+attribute 
+'AsyncMarginManager'
+
+----------------------
+----------------------
+----------------------
+----
+Ran 3 tests in 0.065s
+
+FAILED (errors=1)
