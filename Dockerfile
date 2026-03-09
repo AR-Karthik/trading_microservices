@@ -42,6 +42,7 @@ WORKDIR /build/cpp_gateway
 COPY cpp_gateway .
 RUN cp /build/deps/uWebSockets/src/*.h include/ && \
     cp /build/deps/uWebSockets/uSockets/src/*.h include/ && \
+    ls -la include/ && \
     protoc -I=proto --cpp_out=proto proto/messages.proto
 RUN ls -R /build/deps/uWebSockets/src && \
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
