@@ -39,11 +39,11 @@ WORKDIR /build/deps/uWebSockets/uSockets
 RUN make && cp uSockets.a /usr/local/lib/
 
 # 3. Build C++ Gateway
+WORKDIR /build/deps
+RUN git clone --recursive https://github.com/uNetworking/uWebSockets.git
 WORKDIR /build/cpp_gateway
 COPY cpp_gateway .
-RUN cp /build/deps/uWebSockets/src/*.h include/ && \
-    cp /build/deps/uWebSockets/uSockets/src/*.h include/ && \
-    protoc -I=proto --cpp_out=proto proto/messages.proto
+RUN protoc -I=proto --cpp_out=proto proto/messages.proto
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
     cmake --build build -- VERBOSE=1
 

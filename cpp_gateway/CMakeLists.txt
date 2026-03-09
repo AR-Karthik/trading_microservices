@@ -12,9 +12,9 @@ find_package(ZeroMQ REQUIRED)
 target_include_directories(cpp_gateway PRIVATE include)
 target_include_directories(cpp_gateway PRIVATE proto)
 target_include_directories(cpp_gateway PRIVATE ${PROTOBUF_INCLUDE_DIRS})
-target_include_directories(cpp_gateway PRIVATE /build/deps/uWebSockets/src)
-target_include_directories(cpp_gateway PRIVATE /build/deps/uWebSockets/uSockets/src)
-target_include_directories(cpp_gateway PRIVATE /opt/trading/cpp_gateway/proto)
+target_include_directories(cpp_gateway PRIVATE ../deps/uWebSockets/src)
+target_include_directories(cpp_gateway PRIVATE ../deps/uWebSockets/uSockets/src)
+target_include_directories(cpp_gateway PRIVATE proto)
 
 # Source files (Protobuf generated manually in Docker)
 set(SOURCES
