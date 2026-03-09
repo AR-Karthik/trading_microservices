@@ -7,7 +7,7 @@ COPY rust_extensions/tick_engine .
 RUN maturin build --release --out /wheels
 
 # Stage 2: Build C++ Gateway
-FROM gcc:13 AS cpp-builder
+FROM debian:bookworm-slim AS cpp-builder
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
@@ -20,7 +20,8 @@ RUN apt-get update && apt-get install -y \
     libhiredis-dev \
     git \
     make \
-    g++
+    g++ \
+    pkg-config
 
 # 1. Build redis-plus-plus
 WORKDIR /build/deps
@@ -42,10 +43,8 @@ WORKDIR /build/cpp_gateway
 COPY cpp_gateway .
 RUN cp /build/deps/uWebSockets/src/*.h include/ && \
     cp /build/deps/uWebSockets/uSockets/src/*.h include/ && \
-    ls -la include/ && \
     protoc -I=proto --cpp_out=proto proto/messages.proto
-RUN ls -R /build/deps/uWebSockets/src && \
-    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
     cmake --build build -- VERBOSE=1
 
 # Stage 3: Python Runtime
