@@ -225,13 +225,13 @@ def create_spot_instance():
         )
     )
     
-    # Disk 2: Extreme NVMe for Hot Path (WAL/Active Ticks)
+    # Disk 2: SSD for Hot Path (WAL/Active Ticks) - pd-extreme not in asia-south1-a
     disk2 = compute_v1.AttachedDisk(
         auto_delete=False,
         boot=False,
         initialize_params=compute_v1.AttachedDiskInitializeParams(
             disk_size_gb=100,
-            disk_type=f"zones/{ZONE}/diskTypes/pd-extreme"
+            disk_type=f"zones/{ZONE}/diskTypes/pd-ssd"
         )
     )
 
@@ -247,7 +247,7 @@ def create_spot_instance():
 
     instance.disks = [disk1, disk2, disk3]
 
-    # Network with Premium Tier & Tier_1 Performance
+    # Network with Premium Tier & GVNIC
     access_config = compute_v1.AccessConfig(
         type_="ONE_TO_ONE_NAT",
         name="External NAT",
@@ -256,12 +256,9 @@ def create_spot_instance():
     network_interface = compute_v1.NetworkInterface(
         network="global/networks/default",
         access_configs=[access_config],
-        nic_type="GVNIC" # Enabled for Tier_1
+        nic_type="GVNIC" 
     )
     instance.network_interfaces = [network_interface]
-    instance.network_performance_config = compute_v1.NetworkPerformanceConfig(
-        total_egress_bandwidth_tier="TIER_1"
-    )
 
     # Startup script via metadata
     metadata = compute_v1.Metadata(
