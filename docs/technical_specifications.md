@@ -68,7 +68,7 @@ The system implements a defensive "Veto" logic for high-impact news:
 
 ## 9. Quantitative & Strategy Refinements
 - **STT Tax Optimization**: Redefined strategy targets to 20–30 point structural moves to ensure viability after the 2026 hike in Options STT (0.15%).
-- **Index Dispersion Filter**: Added a Top 5 Stock Correlation sensor (RELIANCE, HDFC, etc.). Momentum trades are VETOED if heavyweights aren't moving in a unified direction.
+- **Index Correlation Filter**: Added a Top 5 Stock Correlation sensor (RELIANCE, HDFC, etc.). Momentum trades are VETOED if heavyweights aren't moving in a unified direction (Correlation < 0.7).
 - **Vanna/Charm Analysis**: Integrated second-order Greeks to detect "Delta Bleed" on 0DTE/1DTE days, preventing entries into options decaying faster than index movement.
 - **Kelly Criterion & VPIN Filter**: Strategy bet sizing is dynamically scaled via the Fractional Kelly Criterion based on HMM state probabilities. VPIN (Volume-Synchronized Probability of Informed Trading) > 0.8 triggers a global veto on Long entries to avoid toxic liquidity vacuums.
 - **Dual-Stage Liquidation Protocol**: A 70-30 profit-taking rule. At +1.2x ATR, 70% of the position is market-sold to lock in risk-off profits. The STT-covered 30% "runner" holds until HMM invalidation or a 2.5x ATR hard ceiling is met.

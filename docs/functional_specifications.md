@@ -37,7 +37,7 @@ The Meta Router determines strategy authorization based on Alpha, Regime, and Ve
 
 - **Selective Activation**: Momentum strategies are only activated when Net GEX is negative and the regime is TRENDING.
 - **Veto Logic**:
-    - **Dispersion Veto**: If heavyweight correlation is too high (Dispersion < 0.30), momentum trades are blocked.
+    - **Correlation Veto**: If heavyweight correlation is too low (Correlation < 0.70), momentum trades are blocked.
     - **OI Wall Veto**: If the spot price is within 15 points of the top-3 OI walls, fresh buy entries are vetoed.
 - **Macro Windows**: High-liquidity windows are restricted to **09:30–11:30** and **13:30–15:00**.
 
@@ -92,3 +92,4 @@ To mitigate "Flash Crash" risks during major economic releases, the system maint
 - **Veto Mechanism**: During a 60-minute window centered on the event time (T-30 to T+30), the `SystemController` sets a global `MACRO_EVENT_LOCKDOWN` flag.
 - **Financial Rationale**: News spikes often cause temporary "Regime: CRASH" prints that are purely noise-driven. By vetoing aggressive entries during these windows, the system preserves capital for structural moves once the "news dust" settles.
 - **Sentiment Layer**: EOD FII/DII data provides a secondary filter on long-term institutional bias, preventing the system from fighting against major flow trends.
+- **Correlation Guard**: Strict requirement for `HMM == TRENDING` AND `Correlation > 0.7` for momentum strategy activation to ensure high-probability leader-led moves.

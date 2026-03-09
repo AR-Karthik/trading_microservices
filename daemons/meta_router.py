@@ -11,7 +11,7 @@ Architecture:
 Regime states: TRENDING | RANGING | CRASH
 
 Vetoes enforced:
-  - Dispersion Veto: dispersion_coeff < 0.30 → block momentum, limit MR to 1 lot
+  - Correlation Veto: correlation_coeff < 0.70 → block momentum, limit MR to 1 lot
   - OI Wall Veto: spot < 15pts from top-3 Call/Put OI strikes → block all buys
   - Macro Lockdown: MACRO_EVENT_LOCKDOWN=True → neutralise CRASH detection
 """
@@ -213,17 +213,18 @@ class MetaRouter:
 
     # ── Veto Checks ───────────────────────────────────────────────────────────
 
-    async def _check_dispersion_veto(self) -> tuple[bool, bool]:
+    async def _check_correlation_veto(self) -> tuple[bool, bool]:
         """
         Returns (momentum_vetoed, mr_restricted_to_1lot).
-        True if dispersion_coeff < 0.30 (correlated market = momentum strategies unreliable).
+        True if correlation_coeff < 0.70 (uncorrelated market = momentum strategies unreliable).
+        Institutional Requirement: Only trade Trending when Top 5 Correlation > 0.7.
         """
         try:
-            disp_val = await self._redis.get("dispersion_coeff")
-            disp = float(disp_val or 0.5)
+            corr_val = await self._redis.get("dispersion_coeff")
+            corr = float(corr_val or 0.5)
         except Exception:
-            disp = 0.5
-        if disp < 0.30:
+            corr = 0.5
+        if corr < 0.70:
             return True, True
         return False, False
 
@@ -328,7 +329,7 @@ class MetaRouter:
             max_allowed_lots = int((global_limit * 0.5) / (ask_price * lot_size)) if ask_price > 0 else 0
             final_lots = min(calc_lots, max_allowed_lots)
             
-            # Strategy override for Dispersion Veto
+            # Strategy override for Correlation Veto
             if mr_1lot:
                 final_lots = 1
                 
@@ -441,7 +442,7 @@ class MetaRouter:
 
                     momentum_vetoed, mr_1lot, oi_wall_veto, flow_toxicity_veto = False, False, False, False
                     if not self.test_mode:
-                        momentum_vetoed, mr_1lot = await self._check_dispersion_veto()
+                        momentum_vetoed, mr_1lot = await self._check_correlation_veto()
                         oi_wall_veto = await self._check_oi_wall_veto(spot)
                         flow_toxicity_veto = state.get("vpin", 0) > 0.8
 
