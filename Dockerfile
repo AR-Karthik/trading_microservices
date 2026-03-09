@@ -9,6 +9,7 @@ RUN maturin build --release --out /wheels
 # Stage 2: Build C++ Gateway
 FROM gcc:13 AS cpp-builder
 RUN apt-get update && apt-get install -y \
+    build-essential \
     cmake \
     libzmq3-dev \
     libprotobuf-dev \
