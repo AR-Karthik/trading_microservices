@@ -2,7 +2,7 @@
 #include "tick_normalizer.h"
 #include "zmq_publisher.h"
 #include "redis_writer.h"
-#include <App.h> // uWebSockets
+#include "../../deps/uWebSockets/src/App.h" // uWebSockets
 #include <iostream>
 #include <chrono>
 
