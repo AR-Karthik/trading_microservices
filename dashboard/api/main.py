@@ -207,6 +207,31 @@ def panic(mode: str = "Paper"):
     r.publish("panic_channel", json.dumps(payload))
     return {"status": "Panic signal sent"}
 
+@app.get("/signals/history")
+def get_signal_history(limit: int = 100):
+    """v5.5: Returns rolling signal history for UI charting."""
+    r = get_redis()
+    history_raw = r.lrange("signal_history", 0, limit - 1)
+    return [json.loads(h) for h in history_raw]
+
+@app.get("/greeks/sensitivity")
+def get_greek_sensitivity():
+    """v5.5: Returns Greek sensitivity matrix and alpha components."""
+    r = get_redis()
+    state_raw = r.get("latest_market_state")
+    if not state_raw:
+        return {}
+    ms = json.loads(state_raw)
+    return {
+        "vanna": ms.get("vanna", 0.0),
+        "charm": ms.get("charm", 0.0),
+        "alpha_components": {
+            "env": ms.get("s_env", 0.0),
+            "str": ms.get("s_str", 0.0),
+            "div": ms.get("s_div", 0.0)
+        }
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

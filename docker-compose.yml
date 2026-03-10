@@ -144,5 +144,28 @@ services:
     env_file: .env
     cpuset: "3"
 
+  dashboard_api:
+    image: trading-app:latest
+    container_name: dashboard_api
+    command: python -m uvicorn dashboard.api.main:app --host 0.0.0.0 --port 8000
+    depends_on:
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    restart: always
+    env_file: .env
+
+  dashboard_frontend:
+    image: trading-app:latest
+    container_name: dashboard_frontend
+    command: python -m http.server 8501 --directory dashboard/frontend
+    ports:
+      - "8501:8501"
+    restart: always
+    env_file: .env
+
 volumes:
   timescaledb_data:

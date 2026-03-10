@@ -351,9 +351,9 @@ async def warmup_engine(active_strategies, num_ticks=1000):
                     
     logger.info("âœ… Warmup Complete. Bytecode is primed.")
 
-async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_client, shm):
+async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_client, shm_ticks, shm_alpha):
     """Subscribes to market data and runs strategies using SHM for zero-copy lookups."""
-    logger.info("Starting Strategy Engine loop...")
+    logger.info("Starting Strategy Engine loop... (v5.5 Quantitative Risk Active)")
     
     shm_slots = {}
     last_shm_sync = 0
@@ -395,32 +395,47 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
             # Periodically sync SHM slot mapping from Redis
             if time.time() - last_shm_sync > 10:
                 shm_slots = await redis_client.hgetall("shm_slots")
-                # Convert bytes keys/values to str/int
                 shm_slots = {k.decode(): int(v) for k, v in shm_slots.items()}
                 last_shm_sync = time.time()
 
             symbol = tick_msg.get("symbol")
             
-            # --- Recommendation 1: Zero-Copy Shared Memory Access ---
-            # Instead of just using tick_msg, we pull from SHM for the latest state
+            # --- Zero-Copy SHM Access ---
             tick = tick_msg
-            if shm and symbol in shm_slots:
-                shm_tick = shm.read_tick(shm_slots[symbol])
+            if shm_ticks and symbol in shm_slots:
+                shm_tick = shm_ticks.read_tick(shm_slots[symbol])
                 if shm_tick:
-                    tick = shm_tick  # Use the SHM data which is potentially newer/faster to read
+                    tick = shm_tick  
             
             price = tick.get("price")
             
+            # --- v5.5: Zero-Latency Risk Veto ---
+            qstate = shm_alpha.read() if shm_alpha else None
+            is_toxic = qstate.get("toxic_veto", False) if qstate else False
+            alpha_total = qstate.get("s_total", 0.0) if qstate else 0.0
+
             for strategy in list(active_strategies.values()):
                 s_id = strategy.strategy_id
                 if symbol not in strategy.symbols:
                     continue  
                 
-                # Check both Redis-based config and real-time ZMQ commands
                 if not strategy.is_active_now() or not strategy_states[s_id]["active"]:
                     continue
-                    
+                
+                # Veto entries if market is toxic OR alpha is severely negative
+                if is_toxic and alpha_total < 0:
+                    continue
+
                 signal = strategy.on_tick(symbol, tick)
+                
+                if signal:
+                    # Double-check signal against alpha bias
+                    if signal == "BUY" and alpha_total < -20: 
+                        logger.warning(f"⚠️ VETO BUY: {s_id} signal rejected by negative Alpha ({alpha_total:.1f})")
+                        continue
+                    if signal == "SELL" and alpha_total > 20:
+                        logger.warning(f"⚠️ VETO SELL: {s_id} signal rejected by positive Alpha ({alpha_total:.1f})")
+                        continue
                 
                 if signal:
                     action = signal
@@ -482,11 +497,16 @@ async def start_engine():
     mq = MQManager()
     redis_host = os.getenv("REDIS_HOST", "localhost")
     redis_client = redis.Redis(host=redis_host, port=6379, db=0)
+    
+    # v5.5: Zero-latency Risk & Alpha via SHM
+    from core.shm import ShmManager
+    shm_alpha = ShmManager(mode='r')
+    
     try:
-        shm = TickSharedMemory(create=False) # Read-only access
+        shm_ticks = TickSharedMemory(create=False) # Read-only access
     except Exception as e:
-        logger.warning(f"⚠️ Shared Memory not found: {e}. Falling back to MQ only.")
-        shm = None
+        logger.warning(f"⚠️ Shared Memory (Ticks) not found: {e}. Falling back to MQ only.")
+        shm_ticks = None
     
     sub_socket = mq.create_subscriber(Ports.MARKET_DATA, topics=["TICK."])
     push_socket = mq.create_push(Ports.ORDERS)
@@ -502,7 +522,7 @@ async def start_engine():
     await warmup_engine(active_strategies)
 
     try:
-        await run_strategies(sub_socket, push_socket, cmd_socket, mq, redis_client, shm)
+        await run_strategies(sub_socket, push_socket, cmd_socket, mq, redis_client, shm_ticks, shm_alpha)
     finally:
         config_task.cancel()
         if shm: shm.close()

@@ -144,3 +144,10 @@ A safety mechanism allowing remote intervention from any device:
 - **Panic Button**: The Cloud Run dashboard writes `PANIC_BUTTON: True` to Firestore. The VM's `CloudPublisher` watcher detects it and publishes `SQUARE_OFF_ALL` to Redis, triggering immediate full liquidation.
 - **Pause/Resume Trading**: Commands to disable or re-enable new trade entries, managed through Firestore flags.
 - **Benefit**: Total control from a mobile device during unusual market behavior, without needing to SSH into the VM.
+
+## 16. Project K.A.R.T.H.I.K. V5.5 Roadmap: The Quantitative Edge
+To maintain its lead as a premier autonomous quant engine, v5.5 focuses on deep sensory feedback:
+- **Greek Sensitivity Heatmaps**: Real-time visualization of Vanna/Charm drift to detect "Delta-Bleed" before it hits P&L.
+- **Signal History Persistence**: Moving signal vectors (OFI, CVD, Alpha) from transient memory to a rolling Redis buffer for high-fidelity retrospectives.
+- **Strategy Alpha Drift**: Side-by-side visualization of expected (Paper) vs realized (Live) alpha to identify execution slippage in high-volatility regimes.
+- **High-Fidelity React Dash**: Transitioning all monitoring to the modular React/FastAPI stack for microsecond-reactive UI updates.

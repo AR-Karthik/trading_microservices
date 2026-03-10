@@ -61,6 +61,9 @@
             const [positions, setPositions] = useState([]);
             const [strategies, setStrategies] = useState([]);
             const [analytics, setAnalytics] = useState({ equity_curve: [], total_pnl: 0 });
+            const [signalHistory, setSignalHistory] = useState([]);
+            const [greekSensitivity, setGreekSensitivity] = useState({ alpha_components: { env: 0, str: 0, div: 0 } });
+            
             const chartRef = useRef(null);
             const chartInstance = useRef(null);
 
@@ -74,16 +77,20 @@
 
             const fetchData = async () => {
                 try {
-                    const [stateRes, portRes, stratRes, analRes] = await Promise.all([
+                    const [stateRes, portRes, stratRes, analRes, histRes, greekRes] = await Promise.all([
                         fetch(`${API_BASE}/state`),
                         fetch(`${API_BASE}/portfolio?mode=${mode}`),
                         fetch(`${API_BASE}/strategies`),
-                        fetch(`${API_BASE}/analytics?mode=${mode}`)
+                        fetch(`${API_BASE}/analytics?mode=${mode}`),
+                        fetch(`${API_BASE}/signals/history?limit=60`),
+                        fetch(`${API_BASE}/greeks/sensitivity`)
                     ]);
                     setState(await stateRes.json());
                     setPositions(await portRes.json());
                     setStrategies(await stratRes.json());
                     setAnalytics(await analRes.json());
+                    setSignalHistory(await histRes.json());
+                    setGreekSensitivity(await greekRes.json());
                 } catch (err) {
                     console.error("Fetch failed", err);
                 }
@@ -137,7 +144,7 @@
             };
 
             const SignalItem = ({ label, value, color }) => (
-                <div className="bg-white/5 p-3 rounded-xl border border-white/5">
+                <div className="bg-white/5 p-3 rounded-xl border border-white/5 transition-all hover:bg-white/10">
                     <div className="text-[9px] text-gray-500 uppercase font-black mb-1">{label}</div>
                     <div className={`text-xs font-bold mono ${color || 'text-gray-200'}`}>{value}</div>
                 </div>
@@ -182,7 +189,7 @@
                         <div className="grid grid-cols-4 gap-4">
                             <div className="glass p-6 rounded-2xl">
                                 <span className="text-[10px] text-gray-500 uppercase font-black block mb-2">Alpha Momentum</span>
-                                <span className="text-4xl font-black mono text-accent">{state.alpha_score.toFixed(1)}</span>
+                                <span className={`text-4xl font-black mono ${state.alpha_score > 39 ? 'text-accent' : (state.alpha_score < -39 ? 'text-danger' : 'text-gray-400')}`}>{state.alpha_score.toFixed(1)}</span>
                             </div>
                             <div className="glass p-6 rounded-2xl">
                                 <span className="text-[10px] text-gray-500 uppercase font-black block mb-2">HMM Regime</span>
@@ -198,67 +205,112 @@
                             </div>
                         </div>
 
-                        <div className="grid grid-cols-12 gap-8">
-                            {/* Left Panel: Analytics & Signals */}
-                            <div className="col-span-8 space-y-8">
-                                <div className="glass p-6 rounded-3xl h-64 overflow-hidden relative">
-                                    <h3 className="text-xs font-black uppercase text-gray-500 mb-4 px-2">Performance Curve</h3>
-                                    <canvas ref={chartRef}></canvas>
+                        {activeTab === 'overview' && (
+                            <div className="grid grid-cols-12 gap-8 animate-fadeIn">
+                                {/* Left Panel: Analytics & Signals */}
+                                <div className="col-span-8 space-y-8">
+                                    <div className="glass p-6 rounded-3xl h-64 overflow-hidden relative">
+                                        <h3 className="text-xs font-black uppercase text-gray-500 mb-4 px-2">Performance Curve</h3>
+                                        <canvas ref={chartRef}></canvas>
+                                    </div>
+
+                                    <div className="glass p-6 rounded-3xl">
+                                        <h3 className="text-xs font-black uppercase text-gray-500 mb-6 px-1">Signal Microstructure</h3>
+                                        <div className="grid-signal">
+                                            <SignalItem label="Log OFI (Z)" value={state.signals.log_ofi_z?.toFixed(2)} color={Math.abs(state.signals.log_ofi_z) > 1.5 ? 'text-accent' : ''} />
+                                            <SignalItem label="Dispersion" value={state.signals.dispersion?.toFixed(2)} />
+                                            <SignalItem label="Hurst Exp" value={state.signals.hurst?.toFixed(2)} color={state.signals.hurst > 0.6 ? 'text-success' : ''} />
+                                            <SignalItem label="Vanna (Vega-Delta)" value={state.signals.vanna?.toFixed(4)} />
+                                            <SignalItem label="Charm (Delta-Decay)" value={state.signals.charm?.toFixed(4)} color={state.signals.charm < -0.05 ? 'text-danger' : ''} />
+                                            <SignalItem label="RV (Implied)" value={state.signals.rv?.toFixed(4)} />
+                                            <SignalItem label="CVD Flips" value={state.signals.cvd_flips} color={state.signals.cvd_flips > 5 ? 'text-warning' : ''} />
+                                            <SignalItem label="ATR (Volatility)" value={state.signals.atr?.toFixed(2)} />
+                                        </div>
+                                    </div>
                                 </div>
 
-                                <div className="glass p-6 rounded-3xl">
-                                    <h3 className="text-xs font-black uppercase text-gray-500 mb-6 px-1">Signal Microstructure</h3>
-                                    <div className="grid-signal">
-                                        <SignalItem label="Log OFI (Z)" value={state.signals.log_ofi_z?.toFixed(2)} color={Math.abs(state.signals.log_ofi_z) > 1.5 ? 'text-accent' : ''} />
-                                        <SignalItem label="Dispersion" value={state.signals.dispersion?.toFixed(2)} />
-                                        <SignalItem label="Hurst Exp" value={state.signals.hurst?.toFixed(2)} color={state.signals.hurst > 0.6 ? 'text-success' : ''} />
-                                        <SignalItem label="Vanna (Vega-Delta)" value={state.signals.vanna?.toFixed(4)} />
-                                        <SignalItem label="Charm (Delta-Decay)" value={state.signals.charm?.toFixed(4)} color={state.signals.charm < -0.05 ? 'text-danger' : ''} />
-                                        <SignalItem label="RV (Implied)" value={state.signals.rv?.toFixed(4)} />
-                                        <SignalItem label="CVD Flips" value={state.signals.cvd_flips} color={state.signals.cvd_flips > 5 ? 'text-warning' : ''} />
-                                        <SignalItem label="ATR (Volatility)" value={state.signals.atr?.toFixed(2)} />
+                                {/* Right Panel: Strategy & Positions */}
+                                <div className="col-span-4 space-y-8">
+                                    <div className="glass p-6 rounded-3xl">
+                                        <h3 className="text-xs font-black uppercase text-gray-500 mb-4">Strat Daemons</h3>
+                                        <div className="space-y-2">
+                                            {strategies.map(s => (
+                                                <div key={s.name} className="flex justify-between items-center p-3 rounded-xl bg-white/5 border border-white/5">
+                                                    <span className="text-[10px] font-black uppercase tracking-tight">{s.name}</span>
+                                                    <span className={`text-[9px] font-bold px-2 py-0.5 rounded-md ${s.status === 'ACTIVE' ? 'bg-success/20 text-success' : 'bg-gray-800 text-gray-500'}`}>{s.status}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div className="glass p-6 rounded-3xl">
+                                        <div className="flex justify-between items-center mb-4">
+                                            <h3 className="text-xs font-black uppercase text-gray-500">Live Positions</h3>
+                                            <span className="text-[9px] bg-accent/10 px-2 py-0.5 rounded text-accent font-bold">{positions.length}</span>
+                                        </div>
+                                        <div className="space-y-3 max-h-80 overflow-y-auto scroll-hide pr-1">
+                                            {positions.length > 0 ? positions.map((p, i) => (
+                                                <div key={i} className="p-4 rounded-2xl bg-white/5 border border-white/5">
+                                                    <div className="flex justify-between mb-2">
+                                                        <span className="text-xs font-bold leading-none">{p.symbol}</span>
+                                                        <span className={`text-[9px] font-black px-1.5 py-0.5 rounded ${p.quantity > 0 ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>{p.quantity > 0 ? 'L' : 'S'} {Math.abs(p.quantity)}</span>
+                                                    </div>
+                                                    <div className="flex justify-between items-end">
+                                                        <span className="text-[10px] text-gray-500 mono">P/L: <span className={p.unrealized_pnl >= 0 ? 'text-success' : 'text-danger'}>{p.unrealized_pnl.toFixed(1)}</span></span>
+                                                        <span className="text-[8px] text-gray-600 uppercase font-black">{p.strategy_id}</span>
+                                                    </div>
+                                                </div>
+                                            )) : (
+                                                <div className="text-center py-6 text-gray-600 text-[10px] italic">Neutral exposure</div>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
                             </div>
+                        )}
 
-                            {/* Right Panel: Strategy & Positions */}
-                            <div className="col-span-4 space-y-8">
-                                <div className="glass p-6 rounded-3xl">
-                                    <h3 className="text-xs font-black uppercase text-gray-500 mb-4">Strat Daemons</h3>
-                                    <div className="space-y-2">
-                                        {strategies.map(s => (
-                                            <div key={s.name} className="flex justify-between items-center p-3 rounded-xl bg-white/5 border border-white/5">
-                                                <span className="text-[10px] font-black uppercase tracking-tight">{s.name}</span>
-                                                <span className={`text-[9px] font-bold px-2 py-0.5 rounded-md ${s.status === 'ACTIVE' ? 'bg-success/20 text-success' : 'bg-gray-800 text-gray-500'}`}>{s.status}</span>
+                        {activeTab === 'analytics' && (
+                            <div className="space-y-8 animate-fadeIn">
+                                <div className="grid grid-cols-2 gap-8">
+                                    <div className="glass p-6 rounded-3xl">
+                                        <h3 className="text-xs font-black uppercase text-gray-500 mb-6 px-1">Greek Sensitivity Heatmap</h3>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <div className={`p-6 rounded-2xl border transition-all ${Math.abs(greekSensitivity.vanna) > 0.01 ? 'bg-accent/10 border-accent/30' : 'bg-white/5 border-white/5'}`}>
+                                                <div className="text-[10px] text-gray-500 font-black uppercase mb-2">Vanna (dDelta/dVol)</div>
+                                                <div className="text-2xl font-black mono text-accent">{greekSensitivity.vanna?.toFixed(4)}</div>
+                                                <div className="text-[8px] text-gray-600 mt-2 uppercase font-bold">Sensitivity to IV Skew</div>
                                             </div>
-                                        ))}
+                                            <div className={`p-6 rounded-2xl border transition-all ${greekSensitivity.charm < -0.05 ? 'bg-danger/10 border-danger/30' : 'bg-white/5 border-white/5'}`}>
+                                                <div className="text-[10px] text-gray-500 font-black uppercase mb-2">Charm (dDelta/dTime)</div>
+                                                <div className="text-2xl font-black mono text-danger">{greekSensitivity.charm?.toFixed(4)}</div>
+                                                <div className="text-[8px] text-gray-600 mt-2 uppercase font-bold">Delta Bleed per Hour</div>
+                                            </div>
+                                        </div>
+                                        <div className="grid grid-cols-3 gap-4 mt-4">
+                                            <SignalItem label="Alpha: ENV" value={greekSensitivity.alpha_components?.env.toFixed(1)} color={greekSensitivity.alpha_components?.env > 0 ? 'text-success' : 'text-danger'} />
+                                            <SignalItem label="Alpha: STR" value={greekSensitivity.alpha_components?.str.toFixed(1)} color={greekSensitivity.alpha_components?.str > 0 ? 'text-success' : 'text-danger'} />
+                                            <SignalItem label="Alpha: DIV" value={greekSensitivity.alpha_components?.div.toFixed(1)} color={greekSensitivity.alpha_components?.div > 0 ? 'text-success' : 'text-danger'} />
+                                        </div>
                                     </div>
-                                </div>
 
-                                <div className="glass p-6 rounded-3xl">
-                                    <div className="flex justify-between items-center mb-4">
-                                        <h3 className="text-xs font-black uppercase text-gray-500">Live Positions</h3>
-                                        <span className="text-[9px] bg-accent/10 px-2 py-0.5 rounded text-accent font-bold">{positions.length}</span>
-                                    </div>
-                                    <div className="space-y-3 max-h-80 overflow-y-auto scroll-hide pr-1">
-                                        {positions.length > 0 ? positions.map((p, i) => (
-                                            <div key={i} className="p-4 rounded-2xl bg-white/5 border border-white/5">
-                                                <div className="flex justify-between mb-2">
-                                                    <span className="text-xs font-bold leading-none">{p.symbol}</span>
-                                                    <span className={`text-[9px] font-black px-1.5 py-0.5 rounded ${p.quantity > 0 ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>{p.quantity > 0 ? 'L' : 'S'} {Math.abs(p.quantity)}</span>
-                                                </div>
-                                                <div className="flex justify-between items-end">
-                                                    <span className="text-[10px] text-gray-500 mono">P/L: <span className={p.unrealized_pnl >= 0 ? 'text-success' : 'text-danger'}>{p.unrealized_pnl.toFixed(1)}</span></span>
-                                                    <span className="text-[8px] text-gray-600 uppercase font-black">{p.strategy_id}</span>
-                                                </div>
-                                            </div>
-                                        )) : (
-                                            <div className="text-center py-6 text-gray-600 text-[10px] italic">Neutral exposure</div>
-                                        )}
+                                    <div className="glass p-6 rounded-3xl h-full flex flex-col">
+                                        <h3 className="text-xs font-black uppercase text-gray-500 mb-6 px-1">Signal Momentum (60m)</h3>
+                                        <div className="flex-1 flex items-end gap-1 px-2 pb-4">
+                                            {signalHistory.length > 0 ? signalHistory.slice().reverse().map((h, i) => (
+                                                <div key={i} className={`flex-1 rounded-t-sm transition-all hover:opacity-100 opacity-60`} 
+                                                     style={{ height: `${Math.max(5, Math.min(100, Math.abs(h.s_total)))}%`, backgroundColor: h.s_total > 39 ? '#00D2FF' : (h.s_total < -39 ? '#f85149' : '#334155') }}
+                                                     title={`α: ${h.s_total.toFixed(1)} @ ${new Date(h.timestamp).toLocaleTimeString()}`}
+                                                />
+                                            )) : <div className="w-full text-center text-[10px] text-gray-700 italic pb-20">Waiting for signal stream...</div>}
+                                        </div>
+                                        <div className="flex justify-between text-[8px] text-gray-600 font-black uppercase px-2">
+                                            <span>-60 min</span>
+                                            <span>Now</span>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
-                        </div>
+                        )}
                     </main>
                 </div>
             );
@@ -323,17 +375,32 @@
                         )}
 
                         {activeTab === 'analytics' && (
-                             <section className="space-y-4">
+                             <section className="space-y-4 animate-fadeIn">
                                 <div className="glass p-4 rounded-2xl h-48 relative">
                                     <canvas ref={chartRef}></canvas>
                                 </div>
-                                <div className="glass p-4 rounded-2xl">
-                                    <h3 className="text-[10px] font-black uppercase text-gray-500 mb-4">Deep Signals</h3>
-                                    <div className="grid grid-cols-2 gap-2">
-                                        <SignalItem label="OFI-Z" value={state.signals.log_ofi_z?.toFixed(2)} />
-                                        <SignalItem label="Hurst" value={state.signals.hurst?.toFixed(2)} />
-                                        <SignalItem label="CVD Flips" value={state.signals.cvd_flips} />
-                                        <SignalItem label="Dispersion" value={state.signals.dispersion?.toFixed(2)} />
+                                <div className="glass p-5 rounded-2xl">
+                                    <h3 className="text-[10px] font-black uppercase text-gray-500 mb-4">Quantitative Edge</h3>
+                                    <div className="grid grid-cols-2 gap-3 mb-6">
+                                        <div className={`p-4 rounded-xl border ${Math.abs(greekSensitivity.vanna) > 0.01 ? 'bg-accent/10 border-accent/30' : 'bg-white/5 border-white/5'}`}>
+                                            <div className="text-[10px] text-gray-500 font-bold uppercase mb-1">Vanna</div>
+                                            <div className="text-xl font-black mono text-accent">{greekSensitivity.vanna?.toFixed(4)}</div>
+                                        </div>
+                                        <div className={`p-4 rounded-xl border ${greekSensitivity.charm < -0.05 ? 'bg-danger/10 border-danger/30' : 'bg-white/5 border-white/5'}`}>
+                                            <div className="text-[10px] text-gray-500 font-bold uppercase mb-1">Charm</div>
+                                            <div className="text-xl font-black mono text-danger">{greekSensitivity.charm?.toFixed(4)}</div>
+                                        </div>
+                                    </div>
+                                    <div className="h-24 flex items-end gap-0.5 px-1 bg-white/5 rounded-xl pt-4">
+                                        {signalHistory.length > 0 ? signalHistory.slice(0,30).reverse().map((h, i) => (
+                                            <div key={i} className={`flex-1 rounded-t-sm`} 
+                                                 style={{ height: `${Math.max(10, Math.min(100, Math.abs(h.s_total)))}%`, backgroundColor: h.s_total > 39 ? '#00D2FF' : (h.s_total < -39 ? '#f85149' : '#475569') }}
+                                            />
+                                        )) : <div className="w-full text-center text-[10px] text-gray-700 italic pb-8">Streaming signals...</div>}
+                                    </div>
+                                    <div className="flex justify-between text-[7px] text-gray-600 font-black uppercase mt-2 px-1">
+                                        <span>-30m History</span>
+                                        <span>Alpha Momentum</span>
                                     </div>
                                 </div>
                              </section>

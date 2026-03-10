@@ -39,6 +39,16 @@ import redis.asyncio as redis
 import os
 from core.shm import ShmManager
 
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
+
 # Try to import Rust extension for high-performance math
 try:
     import tick_engine
@@ -556,12 +566,18 @@ class MarketSensor:
                     "pcr_slope": 0.02, "cvd_slope": float(np.diff(list(self.cvd_series)[-5:]).mean())
                     if len(self.cvd_series) >= 5 else 0}
 
+        s_env = self._calc_env(env_data)
+        s_str = self._calc_str(str_data)
+        s_div = self._calc_div(div_data)
         s_total = self.scorer.get_total_score(env_data, str_data, div_data)
 
         state = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol,
             "s_total": s_total,
+            "s_env": s_env,
+            "s_str": s_str,
+            "s_div": s_div,
             "hurst": self.calculate_hurst(prices_arr[-500:]) if len(prices_arr) >= 50 else 0.5,
             "rv": float(np.std(np.diff(np.log(np.maximum(prices_arr, 1e-6))))) if len(prices_arr) >= 2 else 0.0,
             "log_ofi_zscore": sig.get("log_ofi_zscore", 0.0),
@@ -585,9 +601,22 @@ class MarketSensor:
 
         if not self.test_mode:
             if self.shm:
-                self.shm.write(s_total, state["vpin"], state["log_ofi_zscore"])
+                self.shm.write(
+                    s_total=state["s_total"], 
+                    vpin=state["vpin"], 
+                    ofi_z=state["log_ofi_zscore"],
+                    vanna=state["vanna"],
+                    charm=state["charm"],
+                    s_env=state["s_env"],
+                    s_str=state["s_str"],
+                    s_div=state["s_div"],
+                    veto=state["flow_toxicity_veto"] or state["toxic_option"]
+                )
             await self.mq.send_json(self.pub, state, topic=Topics.MARKET_STATE)
             await self._redis.set("latest_market_state", json.dumps(state, cls=NumpyEncoder))
+            # v5.5: Persist history for UI charts
+            await self._persist_signal_history(state)
+            
             # Publish individual signals for strategy guards
             await self._redis.set("dispersion_coeff", str(state["dispersion_coeff"]))
             await self._redis.set("log_ofi_zscore", str(state["log_ofi_zscore"]))
@@ -604,6 +633,24 @@ class MarketSensor:
             f"Veto={'ON' if state['flow_toxicity_veto'] else 'OFF'}"
         )
         return state
+
+    async def _persist_signal_history(self, state: dict):
+        """Pushes the current state into a rolling Redis list for UI history."""
+        try:
+            # Save a stripped down version for the history charts
+            history_item = {
+                "timestamp": state["timestamp"],
+                "s_total": state["s_total"],
+                "log_ofi_zscore": state["log_ofi_zscore"],
+                "cvd_absorption": state["cvd_absorption"],
+                "vpin": state["vpin"],
+                "vanna": state["vanna"],
+                "charm": state["charm"]
+            }
+            await self._redis.lpush("signal_history", json.dumps(history_item))
+            await self._redis.ltrim("signal_history", 0, 3600) # Keep 1 hour of history
+        except Exception as e:
+            logger.error(f"Failed to persist signal history: {e}")
 
 
 if __name__ == "__main__":

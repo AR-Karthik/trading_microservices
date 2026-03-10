@@ -134,3 +134,18 @@ The dashboard is fully decoupled from the trading VM. The VM **publishes** state
 - **Execution**: The VM's `CloudPublisher` daemon polls this document every 3 seconds. On detecting the flag, it publishes `SQUARE_OFF_ALL` to Redis, triggering immediate full position liquidation.
 - **Additional Commands**: `PAUSE_TRADING` (block new entries) and `RESUME_TRADING` (unblock).
 - **Safety Net**: Provides total control from a mobile device during unusual market conditions without SSH access.
+
+## 13. Project K.A.R.T.H.I.K. V5.5: The Quantitative Edge
+The "Quantitative Edge" upgrade focuses on bridging the gap between raw signal computation and human-readable intuition.
+
+### 13.1 High-Fidelity Greek Heatmaps
+- **Visual Sensitivity**: The dashboard will feature a real-time heatmap of second-order Greeks (Vanna, Charm).
+- **Logic**: Vanna indicates how Delta changes with Volatility; Charm indicates how Delta changes with Time. High negative Charm on 0DTE days triggers a "Delta-Bleed" warning, alerting the user to rapid premium decay.
+
+### 13.2 Signal History & Persistence
+- **Retrospective Analysis**: The system will maintain a 1-hour rolling buffer of all Alpha components ($S_{env}, S_{str}, S_{div}$).
+- **Drift Detection**: By comparing Paper-mode Alpha with Live-mode execution fills, the system identifies "Liquidity Vacuums" where signals were strong but fills were poor.
+
+### 13.3 Institutional "Pro" Terminal
+- **Interface**: Transitioning all monitoring to a modular React-based "Pro" terminal.
+- **Features**: Customizable tab layouts, persistent trade logs, and integrated Chart.js equity curves with drawdown overlays.
