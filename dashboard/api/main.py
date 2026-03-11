@@ -49,8 +49,8 @@ class RegimeConfigRequest(BaseModel):
     vpin_toxicity: float
     paper_capital: float
     live_capital: float
-    paper_max_risk: float = 2500.0  # v8.0: Paper trade max ₹ loss per trade
-    live_max_risk: float  = 2500.0  # v8.0: Live trade max ₹ loss per trade
+    paper_max_risk: float = 0.0  # Default 0.0 to prevent orders until UI configures it
+    live_max_risk: float  = 0.0  # Default 0.0 to prevent orders until UI configures it
 
 class CapitalRequest(BaseModel):
     amount: float

@@ -14,7 +14,7 @@ Architecture:
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 DEFAULT_MAX_PORTFOLIO_HEAT = 0.5   # Maximum combined fractional Kelly across all Tri-Brain assets
-MAX_RISK_PER_TRADE         = 2500.0  # ₹2,500 max rupee loss per trade (ATR-unit sizing input)
+MAX_RISK_PER_TRADE         = 0.0     # Default 0.0 to prevent orders until UI configures it
 ATR_SL_MULTIPLIER          = 1.0     # Mirrors liquidation_daemon constant for sizing consistency
 
 import asyncio
@@ -79,7 +79,7 @@ class BaseStrategyLogic:
                 else:
                     risk_key = "CONFIG:MAX_RISK_PER_TRADE_PAPER"
                 max_risk = float(await self.r.get(risk_key) or MAX_RISK_PER_TRADE) if self.r else MAX_RISK_PER_TRADE
-                max_risk = max(max_risk, 100.0)  # Floor: never less than ₹100
+                max_risk = max(max_risk, 0.0)  # Floor: Allow 0 to prevent trading
             except Exception:
                 max_risk = MAX_RISK_PER_TRADE
 

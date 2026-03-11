@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import asyncpg
 import redis.asyncio as redis
 from dotenv import load_dotenv
-from core.mq import MQManager, Ports
+from core.mq import MQManager, Ports, Topics
 from core.execution_wrapper import MultiLegExecutor
 from NorenRestApiPy.NorenApi import NorenApi
 

@@ -38,6 +38,7 @@ services:
     image: trading-app:latest
     build:
       context: .
+      dockerfile: Dockerfile.local
       network: host
     container_name: data_gateway
     command: python -m daemons.data_gateway

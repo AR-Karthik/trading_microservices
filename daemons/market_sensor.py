@@ -38,6 +38,7 @@ import redis.asyncio as redis
 
 import os
 from core.shm import ShmManager
+from core.mq import MQManager, Ports, Topics
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):

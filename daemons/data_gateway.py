@@ -18,10 +18,19 @@ import sys
 from datetime import datetime, timezone, time as dt_time
 from zoneinfo import ZoneInfo
 import os
+import threading
+
+import pyotp
+from dotenv import load_dotenv
 
 import redis.asyncio as redis
 from core.mq import MQManager, Ports, Topics
 from core.greeks import BlackScholes
+from NorenRestApiPy.NorenApi import NorenApi
+
+load_dotenv()
+
+RISK_FREE_RATE = 0.065
 
 RISK_FREE_RATE = 0.065
 
@@ -40,7 +49,15 @@ logger = logging.getLogger("DataGateway")
 IST = ZoneInfo("Asia/Kolkata")
 
 # Symbols simulated / watched
-SYMBOLS_UNDERLYING = ["NIFTY50", "BANKNIFTY", "RELIANCE", "HDFC", "INFY", "TCS", "ICICIBANK"]
+SYMBOLS_UNDERLYING = ["NIFTY50", "BANKNIFTY", "RELIANCE", "HDFC", "INFY", "TCS", "ICICIBANK", "SENSEX"]
+
+# Shoonya API Tokens Mapping
+TOKEN_TO_SYMBOL = {
+    "26000": "NIFTY50",
+    "26009": "BANKNIFTY",
+    "1":     "SENSEX"
+}
+SHOONYA_SUBSCRIPTIONS = ["NSE|26000", "NSE|26009", "BSE|1"]
 
 # Default dynamic lot sizes (updated from broker at 09:01 IST)
 DEFAULT_LOT_SIZES = {"NIFTY50": 65, "BANKNIFTY": 30}
@@ -68,7 +85,7 @@ class DataGateway:
         self.pub_socket = self.mq.create_publisher(Ports.MARKET_DATA)
 
         self._prices = {
-            "NIFTY50": 22350.0, "BANKNIFTY": 47200.0,
+            "NIFTY50": 22350.0, "BANKNIFTY": 47200.0, "SENSEX": 73000.0,
             "RELIANCE": 1480.0, "HDFC": 1680.0,
             "INFY": 1820.0, "TCS": 3940.0, "ICICIBANK": 1230.0
         }
@@ -76,6 +93,36 @@ class DataGateway:
         self._last_tick_ts: dict[str, float] = {}
         self._lot_sizes_fetched = False
         self._system_halted = False
+
+        # Shoonya API Setup
+        host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
+        ws_host = host.replace("https", "wss").replace("NorenWClientTP", "NorenWSTP/")
+        self.api = NorenApi(host=host, websocket=ws_host)
+        self.tick_queue = asyncio.Queue()
+
+    # ── Authentication ───────────────────────────────────────────────────────
+
+    def _login(self):
+        user = os.getenv("SHOONYA_USER")
+        pwd = os.getenv("SHOONYA_PWD")
+        factor2 = os.getenv("SHOONYA_FACTOR2")
+        vc = os.getenv("SHOONYA_VC")
+        app_key = os.getenv("SHOONYA_APP_KEY")
+        imei = os.getenv("SHOONYA_IMEI")
+
+        if not all([user, pwd, factor2, vc, app_key, imei]):
+            logger.error("Missing Shoonya credentials in .env file.")
+            return False
+
+        totp = pyotp.TOTP(factor2).now()
+        res = self.api.login(userid=user, password=pwd, twoFA=totp, vendor_code=vc, api_secret=app_key, imei=imei)
+
+        if res and res.get("stat") == "Ok":
+            logger.info("✅ Shoonya Login OK")
+            return True
+        else:
+            logger.error(f"❌ Shoonya Login failed: {res}")
+            return False
 
     # ── Gateway Startup ──────────────────────────────────────────────────────
 
@@ -117,56 +164,117 @@ class DataGateway:
 
     async def _tick_stream(self):
         """
-        Simulates Shoonya WebSocket tick stream.
-        In production, replace with actual WebSocket callback handler.
+        Processes live ticks from the Shoonya WebSocket background thread.
+        Uses asyncio.Queue to bridge the synchronous callback to the async event loop.
         """
-        logger.info("Tick stream started (simulated Shoonya WebSocket).")
+        logger.info("Starting live Shoonya WebSocket integration...")
+
+        if not self._login():
+            logger.error("Could not log in to Shoonya. Tick stream will not start.")
+            return
+
+        loop = asyncio.get_running_loop()
+        feed_opened = threading.Event()
+
+        def on_feed_update(tick_msg):
+            # Safe queuing from the WebSocket thread
+            loop.call_soon_threadsafe(self.tick_queue.put_nowait, tick_msg)
+
+        def on_open():
+            logger.info("✅ Shoonya WebSocket Connected")
+            feed_opened.set()
+            for sub in SHOONYA_SUBSCRIPTIONS:
+                self.api.subscribe(sub)
+                logger.info(f"Subscribed to {sub}")
+
+        def on_error(err):
+            logger.error(f"Shoonya WS Error: {err}")
+
+        def on_close():
+            logger.warning("Shoonya WS Closed")
+
+        ws_thread = threading.Thread(
+            target=self.api.start_websocket,
+            kwargs={
+                "subscribe_callback": on_feed_update,
+                "order_update_callback": lambda o: None,
+                "socket_open_callback": on_open,
+                "socket_error_callback": on_error,
+                "socket_close_callback": on_close
+            },
+            daemon=True
+        )
+        ws_thread.start()
+
+        def _wait_for_feed():
+            return feed_opened.wait(20.0)
+            
+        # Wait for socket to open with a generous timeout for staging environments
+        await asyncio.to_thread(_wait_for_feed)
+        if not feed_opened.is_set():
+            logger.error("WebSocket failed to connect within 20 seconds. Streaming aborted.")
+            return
 
         while True:
             if self._system_halted:
-                logger.warning("System halted — tick stream paused.")
                 await asyncio.sleep(1)
                 continue
 
             try:
-                await asyncio.sleep(random.uniform(0.04, 0.18))
+                # Read from queue
+                raw_tick = await self.tick_queue.get()
 
-                symbol = random.choice(SYMBOLS_UNDERLYING)
-                prev_price = self._prices[symbol]
+                if raw_tick.get('t') not in ('tk', 'tf'):
+                    continue
 
-                # Random walk with skewed volatility for index vs equity
-                vol = 0.0008 if symbol in ("NIFTY50", "BANKNIFTY") else 0.0015
-                change = prev_price * random.uniform(-vol, vol)
-                self._prices[symbol] = round(prev_price + change, 2)
+                token = raw_tick.get('tk')
+                symbol = TOKEN_TO_SYMBOL.get(token)
 
-                prev_oi = self._oi[symbol]
-                self._oi[symbol] = max(0, int(prev_oi + prev_oi * random.uniform(-0.001, 0.0015)))
+                if not symbol:
+                    continue
+
+                if 'lp' in raw_tick:
+                    price = float(raw_tick['lp'])
+                    self._prices[symbol] = price
+                else:
+                    price = self._prices[symbol]
+
+                # Synthesize standard fields safely handles missing properties in touchlines
+                bid = float(raw_tick.get('bp1', price))
+                ask = float(raw_tick.get('sp1', price))
+                # Fallback for indices lacking order book
+                if bid == price and ask == price:
+                    bid = price - 0.5
+                    ask = price + 0.5
+
+                vol = int(raw_tick.get('v', 1))
+                if vol == 0: vol = 1
 
                 now_ts = datetime.now(timezone.utc)
                 tick = {
                     "symbol": symbol,
-                    "price": self._prices[symbol],
-                    "prev_price": prev_price,
-                    "volume": random.randint(1, 200),
-                    "oi": self._oi[symbol],
-                    "prev_oi": prev_oi,
-                    # Simulated bid/ask around mid-price for OFI calculation
-                    "bid": round(self._prices[symbol] - random.uniform(0.1, 0.5), 2),
-                    "ask": round(self._prices[symbol] + random.uniform(0.1, 0.5), 2),
-                    "bid_vol": random.randint(50, 500),
-                    "ask_vol": random.randint(50, 500),
+                    "price": price,
+                    "prev_price": self._prices[symbol],
+                    "volume": vol,
+                    "last_volume": vol,
+                    "oi": int(raw_tick.get('oi', self._oi.get(symbol, 0))),
+                    "prev_oi": self._oi.get(symbol, 0),
+                    "bid": bid,
+                    "ask": ask,
+                    "bid_vol": int(raw_tick.get('bq1', 100)),
+                    "ask_vol": int(raw_tick.get('sq1', 100)),
                     "timestamp": now_ts.isoformat(),
                     "type": "TICK"
                 }
 
-                # Update Redis for UI and staleness watchdog
+                # Update Redis
                 await self.redis_client.set(f"latest_tick:{symbol}", json.dumps(tick))
                 self._last_tick_ts[symbol] = now_ts.timestamp()
 
-                # Simulate Delta-Theta Balanced Strike Selection for NIFTY50
+                # Simulate Strike Selection
                 if symbol == "NIFTY50":
-                    optimal_ce_strike = self.get_optimal_strike(self._prices[symbol], "call", 2/365, 0.18)
-                    optimal_pe_strike = self.get_optimal_strike(self._prices[symbol], "put", 2/365, 0.18)
+                    optimal_ce_strike = self.get_optimal_strike(price, "call", 2/365, 0.18)
+                    optimal_pe_strike = self.get_optimal_strike(price, "put", 2/365, 0.18)
                     
                     await self.redis_client.hset("optimal_strikes", mapping={
                         "NIFTY_CE": optimal_ce_strike,
@@ -176,13 +284,16 @@ class DataGateway:
                 # Publish via ZMQ
                 topic = f"TICK.{symbol}"
                 await self.mq.send_json(self.pub_socket, tick, topic=topic)
-                logger.debug(f"TICK {symbol} @ {self._prices[symbol]}")
+                
+                # Debug sample to keep terminal clean
+                if random.random() < 0.05:
+                    logger.debug(f"LIVE TICK {symbol} @ {price}")
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Tick stream error: {e}")
-                await asyncio.sleep(1)
+                logger.error(f"Tick stream processing error: {e}")
+                await asyncio.sleep(0.1)
 
     # ── Lot Size Scheduler ───────────────────────────────────────────────────
 
@@ -280,8 +391,8 @@ class DataGateway:
 
         while True:
             try:
-                nifty_chg = abs(self._prices["NIFTY50"] - base_nifty) / base_nifty * 100
-                bn_chg = abs(self._prices["BANKNIFTY"] - base_banknifty) / base_banknifty * 100
+                nifty_chg = abs(float(self._prices["NIFTY50"]) - float(base_nifty)) / float(base_nifty) * 100
+                bn_chg = abs(float(self._prices["BANKNIFTY"]) - float(base_banknifty)) / float(base_banknifty) * 100
                 max_chg = max(nifty_chg, bn_chg)
 
                 halt_level = None
