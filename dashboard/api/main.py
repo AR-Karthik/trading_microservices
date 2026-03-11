@@ -5,6 +5,7 @@ import os
 import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import random
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -46,6 +47,13 @@ class RegimeConfigRequest(BaseModel):
     hurst_threshold: float
     hybrid_confidence: float
     vpin_toxicity: float
+    paper_capital: float
+    live_capital: float
+    paper_max_risk: float = 2500.0  # v8.0: Paper trade max ₹ loss per trade
+    live_max_risk: float  = 2500.0  # v8.0: Live trade max ₹ loss per trade
+
+class CapitalRequest(BaseModel):
+    amount: float
 
 class TelemetryMetrics(BaseModel):
     nse_latency_ms: float
@@ -62,6 +70,8 @@ class SystemState(BaseModel):
     macro_lockdown: bool
     available_margin_paper: float
     available_margin_live: float
+    paper_capital_limit: float
+    live_capital_limit: float
     signals: dict  # Full quant signal vector
     power_five: dict # HDFC, RIL, ICICI, etc.
     exit_path_70_30: dict # TP1, TP2 markers
@@ -112,13 +122,31 @@ def get_state():
         "macro_lockdown": r.get("MACRO_EVENT_LOCKDOWN") == "True",
         "available_margin_paper": float(r.get("AVAILABLE_MARGIN_PAPER") or 0),
         "available_margin_live": float(r.get("AVAILABLE_MARGIN_LIVE") or 0),
+        "paper_capital_limit": float(r.get("PAPER_CAPITAL_LIMIT") or 0),
+        "live_capital_limit": float(r.get("LIVE_CAPITAL_LIMIT") or 0),
         "signals": deep_signals,
         "power_five": {
-            "HDFCBANK": ms.get("z_hdfc", 1.2),
-            "RELIANCE": ms.get("z_ril", -0.8),
-            "ICICIBANK": ms.get("z_icici", 2.1),
-            "INFY": ms.get("z_infy", -0.3),
-            "TCS": ms.get("z_tcs", 0.9)
+            "NIFTY": {
+                "HDFCBANK": round(random.uniform(-2, 2), 1),
+                "RELIANCE": round(random.uniform(-2, 2), 1),
+                "ICICIBANK": round(random.uniform(-2, 2), 1),
+                "INFY": round(random.uniform(-2, 2), 1),
+                "ITC": round(random.uniform(-2, 2), 1),
+            },
+            "BANKNIFTY": {
+                "HDFCBANK": round(random.uniform(-2, 2), 1),
+                "ICICIBANK": round(random.uniform(-2, 2), 1),
+                "SBIN": round(random.uniform(-2, 2), 1),
+                "AXISBANK": round(random.uniform(-2, 2), 1),
+                "KOTAKBANK": round(random.uniform(-2, 2), 1),
+            },
+            "SENSEX": {
+                "HDFCBANK": round(random.uniform(-2, 2), 1),
+                "RELIANCE": round(random.uniform(-2, 2), 1),
+                "ICICIBANK": round(random.uniform(-2, 2), 1),
+                "ITC": round(random.uniform(-2, 2), 1),
+                "LT": round(random.uniform(-2, 2), 1),
+            }
         },
         "exit_path_70_30": {
             "tp1": ms.get("tp1_price", 0.0),
@@ -160,9 +188,44 @@ def update_regime_config(config: RegimeConfigRequest):
     r.set("CONFIG:HURST_THRESHOLD", config.hurst_threshold)
     r.set("CONFIG:HYBRID_CONFIDENCE", config.hybrid_confidence)
     r.set("CONFIG:VPIN_TOXICITY", config.vpin_toxicity)
+    r.set("PAPER_CAPITAL_LIMIT", config.paper_capital)
+    r.set("LIVE_CAPITAL_LIMIT", config.live_capital)
+    r.set("CONFIG:MAX_RISK_PER_TRADE_PAPER", config.paper_max_risk)  # v8.0 paper path
+    r.set("CONFIG:MAX_RISK_PER_TRADE_LIVE",  config.live_max_risk)   # v8.0 live path
+    
+    # Also update available margins if needed (simple sync)
+    # Note: In a production system, we'd handle this more carefully with delta checks
+    r.set("AVAILABLE_MARGIN_PAPER", config.paper_capital)
+    r.set("AVAILABLE_MARGIN_LIVE", config.live_capital)
+
     # Publish signal to MetaRouter to hot-swap
     r.publish("system_cmd", json.dumps({"cmd": "HOT_SWAP_REGIME", "data": config.dict()}))
     return {"status": "Config updated and published"}
+
+@app.post("/config/capital")
+def update_capital(req: CapitalRequest):
+    r = get_redis()
+    r.set("CONFIG:TOTAL_CAPITAL", req.amount)
+    return {"status": "Capital updated"}
+
+# --- NEW: Tab 7: Engine Simulation ---
+@app.get("/regime/simulation")
+def get_regime_simulation():
+    # Return mock comparative performance for the day
+    return {
+        "engine_ranking": [
+            {"engine": "HMM", "pnl": 5200, "drawdown": 1200, "trades": 12},
+            {"engine": "Deterministic", "pnl": -800, "drawdown": 4500, "trades": 28},
+            {"engine": "Hybrid", "pnl": 3400, "drawdown": 500, "trades": 8}
+        ],
+        "equity_growth": [
+            {"time": "09:15", "HMM": 0, "Deterministic": 0, "Hybrid": 0},
+            {"time": "10:00", "HMM": 1200, "Deterministic": -500, "Hybrid": 800},
+            {"time": "11:00", "HMM": 2500, "Deterministic": -1200, "Hybrid": 1500},
+            {"time": "12:00", "HMM": 3800, "Deterministic": 400, "Hybrid": 2200},
+            {"time": "13:00", "HMM": 5200, "Deterministic": -800, "Hybrid": 3400}
+        ]
+    }
 
 # --- NEW: Tab 3: Model Evolution ---
 @app.get("/models/evolution")
@@ -321,6 +384,94 @@ def get_greek_sensitivity():
             "div": ms.get("s_div", 0.0)
         }
     }
+
+
+@app.get("/barriers/attribution")
+def get_barrier_attribution():
+    """
+    v8.0 Signal Attribution: reads `barrier_exits` from Redis.
+    Returns a grouped summary (donut chart data) + recent exit feed (table data).
+    """
+    r = get_redis()
+    raw_exits = r.lrange("barrier_exits", 0, 49)  # Last 50 exits
+    exits = []
+    for e in raw_exits:
+        try:
+            exits.append(json.loads(e))
+        except Exception:
+            pass
+
+    # Tally by barrier type
+    summary = {"UPPER": 0, "LOWER": 0, "VERTICAL": 0, "PANIC": 0}
+    for ex in exits:
+        barrier = ex.get("barrier", "LOWER")
+        if barrier in summary:
+            summary[barrier] += 1
+
+    # Return last 20 for the feed table
+    feed = exits[:20]
+    for ex in feed:
+        # Human-readable timestamp
+        ex["time"] = datetime.utcfromtimestamp(ex.get("ts", 0)).strftime("%H:%M:%S") if ex.get("ts") else "—"
+
+    return {
+        "summary": summary,
+        "feed": feed,
+        "total": len(exits)
+    }
+
+
+@app.get("/sizing/inspector")
+def get_sizing_inspector():
+    """
+    v8.0 Sizing Inspector: returns current ATR, unit_size, half_kelly, and final_lots
+    for each Tri-Brain asset so the dashboard can show the live hybrid sizing calculation.
+    """
+    r = get_redis()
+    state_raw = r.get("latest_market_state")
+    ms = json.loads(state_raw) if state_raw else {}
+    atr = float(ms.get("atr", 20.0))
+    atr = max(atr, 1.0)
+
+    MAX_RISK_PER_TRADE = 2500.0
+    ATR_SL_MULTIPLIER  = 1.0
+    unit_size = MAX_RISK_PER_TRADE / (atr * ATR_SL_MULTIPLIER)
+
+    # Read latest attributions to extract per-asset lots
+    attr_raw = r.get("latest_attributions")
+    assets_data = []
+    if attr_raw:
+        try:
+            attrs = json.loads(attr_raw)
+            for attr in attrs:
+                asset = attr.get("asset", "")
+                active_dec = attr.get("decisions", {}).get("HYBRID", {})
+                assets_data.append({
+                    "asset": asset,
+                    "lots": round(active_dec.get("lots", unit_size * 0.01), 4),
+                    "weight": round(active_dec.get("weight", 0.01), 4),
+                    "unit_size": round(active_dec.get("unit_size", unit_size), 4),
+                    "atr_used": round(active_dec.get("atr_used", atr), 4),
+                    "score": round(active_dec.get("score", 0.5), 3)
+                })
+        except Exception:
+            pass
+
+    if not assets_data:
+        for a in ["NIFTY", "BANKNIFTY", "SENSEX"]:
+            assets_data.append({
+                "asset": a, "lots": round(unit_size * 0.01, 4),
+                "weight": 0.01, "unit_size": round(unit_size, 4),
+                "atr_used": round(atr, 4), "score": 0.5
+            })
+
+    return {
+        "current_atr": round(atr, 2),
+        "max_risk_per_trade": MAX_RISK_PER_TRADE,
+        "unit_size_base": round(unit_size, 4),
+        "assets": assets_data
+    }
+
 
 if __name__ == "__main__":
     import uvicorn

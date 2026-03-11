@@ -38,6 +38,10 @@ STALL_TIMEOUT_SEC  = 300   # Barrier 2: 5-minute stall timer (shrinks to 180s in
 CVD_FLIP_EXIT_THRESHOLD   = 5    # Barrier 3: 5 consecutive CVD flips → market exit
 BARRIER2_SPREAD_CROSS_PCT = 0.10 # Barrier 2: Cross bid-ask by 10% increments per retry
 
+# A2: Slippage Budget
+SLIPPAGE_BUDGET_PCT  = 0.02  # 2%: per-trade slippage threshold before 60s halt
+SLIPPAGE_HALT_TTL_SEC = 60  # seconds to pause new entries after slippage event
+
 # HTTP 400 emsg substrings that indicate CIRCUIT LIMIT (safe to re-fire)
 CIRCUIT_LIMIT_STRINGS = ["price range", "circuit", "freeze", "price band", "pcl", "ucl"]
 # emsg substrings that indicate ABORT (don't re-fire)
@@ -64,7 +68,49 @@ class LiquidationDaemon:
         await asyncio.gather(
             self._handoff_listener(),
             self._market_monitor(),
+            self._monitor_fill_slippage(),  # A2: Slippage Budget monitor
         )
+
+    # ── A2: Fill Slippage Budget Monitor ────────────────────────────────────
+
+    async def _monitor_fill_slippage(self):
+        """
+        Subscribes to order_confirmations. If any single exit has slippage > SLIPPAGE_BUDGET_PCT,
+        sets SLIPPAGE_HALT in Redis for SLIPPAGE_HALT_TTL_SEC seconds, pausing new entries.
+        """
+        try:
+            pubsub = self._redis.pubsub()
+            await pubsub.subscribe("order_confirmations")
+            async for msg in pubsub.listen():
+                if msg["type"] != "message":
+                    continue
+                try:
+                    data = json.loads(msg["data"])
+                    fill_price = float(data.get("fill_price") or 0)
+                    intended_price = float(data.get("intended_price") or fill_price)
+                    symbol = data.get("symbol", "UNKNOWN")
+
+                    if intended_price > 0 and fill_price > 0:
+                        slip = abs(fill_price - intended_price) / intended_price
+                        if slip > SLIPPAGE_BUDGET_PCT:
+                            await self._redis.set("SLIPPAGE_HALT", "True", ex=SLIPPAGE_HALT_TTL_SEC)
+                            logger.critical(
+                                f"🚨 SLIPPAGE HALT [{symbol}]: {slip:.1%} slippage "
+                                f"(fill={fill_price:.2f} vs intended={intended_price:.2f}). "
+                                f"Pausing new entries for {SLIPPAGE_HALT_TTL_SEC}s."
+                            )
+                            await self._telegram_alert(
+                                f"🚨 SLIPPAGE BUDGET BREACHED\n"
+                                f"Symbol: {symbol} | Slippage: {slip:.1%}\n"
+                                f"Fill: ₹{fill_price:.2f} vs Intended: ₹{intended_price:.2f}\n"
+                                f"New entries paused for {SLIPPAGE_HALT_TTL_SEC}s."
+                            )
+                except Exception as e:
+                    logger.error(f"Slippage monitor parse error: {e}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Slippage monitor fatal error: {e}")
 
     # ── Handoff Listener ─────────────────────────────────────────────────────
 
@@ -205,6 +251,7 @@ class LiquidationDaemon:
 
                 exit_reason = f"PANIC_VOL_EXIT: RV {rv:.5f} > 3σ | Marketable Limit"
                 logger.critical(f"🔥 VOLATILITY SPIKE! {symbol} Emergency Exit @ {aggressive_price:.2f}")
+                await self._record_barrier_exit(symbol, "PANIC", exit_reason, aggressive_price, entry)
                 await self._attempt_exit(pos, symbol, price=aggressive_price, reason=exit_reason)
                 return
 
@@ -226,6 +273,24 @@ class LiquidationDaemon:
 
         sl_mult = 1.5 if is_high_vol else ATR_SL_MULTIPLIER # 1.5x for High Vol
         stall_timer = 180 if is_low_vol else STALL_TIMEOUT_SEC # 3m for Low Vol
+
+        # ── C1: Theta-Aware Dynamic Stall Timer (Expiry Day) ─────────────────
+        now_dt = datetime.now()
+        is_expiry_day = now_dt.strftime("%A") in ["Wednesday", "Thursday"]
+        if is_expiry_day:
+            # Linear decay from full stall_timer → 60s floor as close (15:30) approaches
+            market_close_minutes = 15 * 60 + 30  # 15:30 in minutes since midnight
+            current_minutes = now_dt.hour * 60 + now_dt.minute
+            minutes_to_close = max(0, market_close_minutes - current_minutes)
+            # Decay over the last 6 hours (360 min) of the trading day
+            expiry_stall = max(60, int(stall_timer * (minutes_to_close / 360.0)))
+            if expiry_stall < stall_timer:
+                stall_timer = expiry_stall
+                if expiry_stall < 120:
+                    logger.warning(
+                        f"⏱️ EXPIRY THETA SQUEEZE [{symbol}]: Stall timer → {stall_timer}s "
+                        f"({minutes_to_close:.0f}min to close). Gamma risk accelerating."
+                    )
 
         # 70-30 Rule State
         runner_active = pos.get("runner_active", False)
@@ -269,6 +334,7 @@ class LiquidationDaemon:
             aggressive_price = ask + (ask - tick.get("bid", price - 0.5)) * BARRIER2_SPREAD_CROSS_PCT * retries
             exit_reason = f"STALL_TIMEOUT: {elapsed:.0f}s | aggressive_px={aggressive_price:.2f}"
             logger.warning(f"Barrier 2 triggered for {symbol}. Retry #{retries} @ {aggressive_price:.2f}")
+            await self._record_barrier_exit(symbol, "VERTICAL", exit_reason, aggressive_price, entry)
             await self._attempt_exit(pos, symbol, price=aggressive_price, reason=exit_reason)
             return  # Don't also refire below
 
@@ -285,12 +351,22 @@ class LiquidationDaemon:
                 exit_reason = f"CVD_STRUCTURAL_FLIP: {cvd_flips} consecutive ticks (Runner Invalidation)" if runner_active else f"CVD_STRUCTURAL_FLIP: {cvd_flips} consecutive ticks"
 
         if exit_reason:
+            # Classify barrier type for attribution tracking
+            if "TP1" in exit_reason or "TP2" in exit_reason:
+                _barrier_label = "UPPER"
+            elif "SL_HIT" in exit_reason or "CVD" in exit_reason or "HMM_SHIFT" in exit_reason:
+                _barrier_label = "LOWER"
+            else:
+                _barrier_label = "LOWER"  # fallback
+
             if is_partial:
                 logger.info(f"LIQUIDATION PARTIAL [{symbol}]: {exit_reason}")
+                await self._record_barrier_exit(symbol, _barrier_label, exit_reason, price, entry)
                 await self._attempt_partial_exit(pos, symbol, price=price, reason=exit_reason, pct=0.70)
                 pos["runner_active"] = True
             else:
                 logger.info(f"LIQUIDATION [{symbol}]: {exit_reason}")
+                await self._record_barrier_exit(symbol, _barrier_label, exit_reason, price, entry)
                 await self._attempt_exit(pos, symbol, price=price, reason=exit_reason)
 
     # ── Exit Execution with HTTP 400 Handling ────────────────────────────────
@@ -429,6 +505,36 @@ class LiquidationDaemon:
             if pattern in err_lower:
                 return "abort"
         return "retry"
+
+    # ── Barrier Exit Attribution ───────────────────────────────────────────────
+
+    async def _record_barrier_exit(self, symbol: str, barrier: str, reason: str,
+                                    exit_price: float, entry_price: float = 0.0):
+        """
+        Writes a structured exit record to the `barrier_exits` Redis list (max 50 entries).
+        Called on every exit path before order dispatch.
+
+        Args:
+            symbol:      Instrument symbol (e.g. 'NIFTY_ATM_CE')
+            barrier:     One of 'UPPER' | 'LOWER' | 'VERTICAL' | 'PANIC'
+            reason:      Human-readable description of the trigger
+            exit_price:  The price at which the exit was fired
+            entry_price: Entry price (used to compute P&L points; optional)
+        """
+        try:
+            pnl_pts = round(exit_price - entry_price, 2) if entry_price else 0.0
+            record = json.dumps({
+                "symbol": symbol,
+                "barrier": barrier,
+                "reason": reason,
+                "exit_price": round(exit_price, 2),
+                "pnl_pts": pnl_pts,
+                "ts": int(time.time())
+            })
+            await self._redis.lpush("barrier_exits", record)
+            await self._redis.ltrim("barrier_exits", 0, 49)   # Keep last 50 exits
+        except Exception as e:
+            logger.error(f"Barrier exit record error: {e}")
 
     # ── Telegram Alert ────────────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 # Functional Specifications: Project K.A.R.T.H.I.K.
 ## *(Kinetic Algorithmic Real-Time High-Intensity Knight)*
-**Version 0.9**
+**Version 7.0**
 
 This document represents the absolute ground-truth functional specifications for the trading system, derived from a line-by-line analysis of the current active codebase (`v0.9`). It serves as both a blueprint of *what* the system does and a guide on *why* it is configured this way.
 
@@ -259,3 +259,145 @@ To ensure the dashboard can operate completely off-premise via Google Cloud Run 
 
 > **Rationale & Usage**: 
 > This provides absolute real-time Observability for a mobile device or a remote Risk Manager. By pushing precise margin limits and stop-loss breach states out to a cloud database, an off-site human overseer can see exactly how close the system is to self-terminating its capital allocation without ever needing SSH access to the core trading machine.
+
+---
+
+## 9. v7.0 System Improvements
+
+### 9.1 A1 — Global Portfolio Heat Constraint [meta_router.py]
+
+- **Trigger**: After all three Tri-Brain signals are collected in roadcast_decisions(), the sum of fractional Kelly weights is calculated.
+- **Logic**: If 	otal_heat > CONFIG:MAX_PORTFOLIO_HEAT (Redis key, default  .5), all weights are scaled: weight = weight × (heat_limit / total_heat).
+- **Status Key**: PORTFOLIO_HEAT_CAPPED (True/False, 60s TTL) — visible in the Risk pane.
+- **Configuration**: SET CONFIG:MAX_PORTFOLIO_HEAT 0.5 in Redis.
+
+> **Rationale:** When NIFTY, BANKNIFTY, and SENSEX all fire simultaneously during macro events, the combined margin from three independent Half-Kelly allocations can be 3× any single position's exposure. In a 90% correlated basket, a 10-sigma event hits all three simultaneously. The Heat Constraint treats the Tri-Brain as a single correlated portfolio and enforces a portfolio-level risk cap.
+
+### 9.2 A2 — Slippage Budget [liquidation_daemon.py, strategy_engine.py]
+
+- **Monitor**: _monitor_fill_slippage() coroutine subscribes to order_confirmations channel.
+- **Trigger**: If |fill_price − intended_price| / intended_price > 2%, sets SLIPPAGE_HALT = True in Redis with 60s TTL.
+- **Guard**: StrategyEngine.run_strategies() checks SLIPPAGE_HALT before every new entry dispatch. If True, signal is dropped and logged.
+- **Alert**: Telegram notification fires automatically on slippage breach.
+
+> **Rationale:** During Panic liquidations (Barrier 3), large market orders can suffer extreme slippage in thin option books. Without a pause, the system could continue firing entries into an already-deteriorating book, turning a controlled stop into cascading bad fills. The 60-second pause allows orderbook depth to reform.
+
+### 9.3 B2 — HMM Warm-Up Gap Normalization [strategy_engine.py]
+
+- **Trigger**: _calibrate_vol_context() runs at 09:00–09:14 pre-market, *before* the JIT priming phase.
+- **Logic**: For each Tri-Brain index, reads prev_close:{symbol}, 	ick_history:{symbol} (first tick of day), and olling_std_20d:{symbol}. Computes gap_z = (open_price − prev_close) / rolling_std_20d. Writes VOL_GAP_Z:{symbol} to Redis with 2-hour TTL. Fallback: if olling_std_20d missing, uses 50.0. If prev_close missing, skips that symbol gracefully.
+
+> **Rationale:** The HMM carries no overnight context. Without gap normalization, a +200pt NIFTY gap-up looks identical to a +200pt intraday trend — but gap-up opens frequently see mean-reversion in the first 30 minutes. Calibrating the Vol Context at open prevents the HMM from prematurely declaring TRENDING into what is structurally a reversion setup.
+
+### 9.4 C1 — Theta-Aware Dynamic Stall Timer [liquidation_daemon.py]
+
+- **Normal timer**: STALL_TIMEOUT_SEC = 300 seconds (Barrier 2, §6.2).
+- **Expiry Days (Wed/Thu)**: Timer decays linearly as market close approaches:
+  `
+  expiry_stall = max(60, timer × (minutes_to_close / 360))
+  `
+  At 09:30 (360 min to close): unchanged = 300s. At 15:20 (10 min): = 60s floor.
+- **Log Warning**: Emitted when stall timer drops below 120s.
+
+> **Rationale:** On expiry days, Theta decay is exponential and concentrated in the final 60–90 minutes. A position stalling at 14:45 faces double the Theta cost per minute versus a midday stall. The standard 5-minute timer actively destroys value after 14:30. The dynamic decay ensures system patience is inversely proportional to remaining time value.
+
+### 9.5 C2 — Automated Orphaned Order Reconciliation [order_reconciler.py]
+
+Supersedes the legacy §7.2 "Orphaned Intent Audit" with deterministic auto-resolution:
+
+- **Trigger**: _reboot_audit() runs at every OrderReconciler.start() before the normal polling loop.
+- **Logic**: Reads all entries from pending_orders hash. For each:
+
+| Broker Status | Action |
+|---|---|
+| COMPLETE (Filled) | Confirm state. If ction=BUY, publish HANDOFF to LiquidationDaemon via ZMQ. |
+| OPEN | Cancel at broker via pi.cancel_order(). Clean up locally via _mark_order_failed(). |
+| PENDING / PHANTOM | Treat as phantom. Reverse margin. Push Telegram alert. |
+
+- **Helpers**: _handoff_to_liquidation_daemon(meta, fill_price), _cancel_open_order(broker_order_id, order_id, meta).
+- **Fallback**: If broker API is unavailable, OPEN orders are still cleaned locally.
+
+> **Rationale:** Before v7.0, the boot audit only surfaced orphaned orders via Telegram for human review, requiring manual intervention before reliable trading resumed. In auto-restart scenarios (GCP preemption, OOM kill), waiting for human review could mean missing the entire morning session. The new deterministic reconciliation self-heals in under 10 seconds, resumes managing surviving positions immediately, and never starts with ambiguous residual positions.
+
+
+---
+
+## 9. v7.0 System Improvements
+
+### 9.1 A1 — Global Portfolio Heat Constraint `[meta_router.py]`
+
+- **Trigger**: After all three Tri-Brain signals are collected in `broadcast_decisions()`, the sum of fractional Kelly weights is calculated.
+- **Logic**: If `total_heat > CONFIG:MAX_PORTFOLIO_HEAT` (Redis key, default `0.5`), all weights are scaled: `weight = weight * (heat_limit / total_heat)`.
+- **Status Key**: `PORTFOLIO_HEAT_CAPPED` (True/False, 60s TTL) — visible in the Risk pane.
+- **Configuration**: `SET CONFIG:MAX_PORTFOLIO_HEAT 0.5` in Redis.
+
+> **Rationale:** When NIFTY, BANKNIFTY, and SENSEX all fire simultaneously during macro events, the combined margin from three independent Half-Kelly allocations can be 3x any single position. In a 90%-correlated basket, a 10-sigma event hits all three simultaneously. The Heat Constraint treats the Tri-Brain as a single correlated portfolio and enforces a portfolio-level risk cap.
+
+### 9.2 A2 — Slippage Budget `[liquidation_daemon.py, strategy_engine.py]`
+
+- **Monitor**: `_monitor_fill_slippage()` coroutine subscribes to `order_confirmations` channel.
+- **Trigger**: If `|fill_price - intended_price| / intended_price > 2%`, sets `SLIPPAGE_HALT = True` in Redis with 60s TTL.
+- **Guard**: `StrategyEngine.run_strategies()` checks `SLIPPAGE_HALT` before every new entry dispatch. If True, signal is dropped.
+- **Alert**: Telegram notification fires automatically on slippage breach.
+
+> **Rationale:** During Panic liquidations (Barrier 3), large market orders can suffer extreme slippage in thin option books. Without a pause, the system continues firing entries into an already-deteriorating book, turning a controlled stop into cascading bad fills. The 60-second pause allows orderbook depth to reform.
+
+### 9.3 B2 — HMM Warm-Up Gap Normalization `[strategy_engine.py]`
+
+- **Trigger**: `_calibrate_vol_context()` runs at 09:00-09:14 pre-market, before the JIT priming phase.
+- **Logic**: For each Tri-Brain index, reads `prev_close:{symbol}`, `tick_history:{symbol}` (first tick of day), and `rolling_std_20d:{symbol}`. Computes:
+  ```
+  gap_z = (open_price - prev_close) / rolling_std_20d
+  ```
+  Writes `VOL_GAP_Z:{symbol}` to Redis with 2-hour TTL. Fallback: if `rolling_std_20d` is missing, uses 50.0. If `prev_close` is missing, skips that symbol gracefully.
+
+> **Rationale:** The HMM carries no overnight context. A +200pt NIFTY gap-up looks identical to a +200pt intraday trend, but gap-up opens frequently see mean-reversion in the first 30 minutes. Calibrating the Vol Context at open prevents the HMM from prematurely declaring TRENDING into what is structurally a reversion setup.
+
+### 9.4 C1 — Theta-Aware Dynamic Stall Timer `[liquidation_daemon.py]`
+
+- **Normal timer**: `STALL_TIMEOUT_SEC = 300` seconds (Barrier 2, SS6.2).
+- **Expiry Days (Wed/Thu)**: Timer decays linearly as market close approaches:
+  ```
+  expiry_stall = max(60, timer * (minutes_to_close / 360))
+  ```
+  At 09:30 (360 min to close): timer unchanged = 300s. At 15:20 (10 min to close): = 60s floor.
+- **Log Warning**: Emitted when stall timer drops below 120s.
+
+> **Rationale:** On expiry days, Theta decay is exponential and concentrated in the final 60-90 minutes. A position stalling at 14:45 faces double the Theta cost per minute versus a midday stall. The standard 5-minute timer actively destroys value by 14:30. Dynamic decay ensures system patience is inversely proportional to remaining time value.
+
+### 9.5 C2 — Automated Orphaned Order Reconciliation `[order_reconciler.py]`
+
+Supersedes the legacy SS7.2 "Orphaned Intent Audit" with deterministic auto-resolution:
+
+- **Trigger**: `_reboot_audit()` runs at every `OrderReconciler.start()` before the normal polling loop.
+- **Logic**: Reads all entries from `pending_orders` hash. For each:
+
+| Broker Status | Action |
+|---|---|
+| `COMPLETE` (Filled) | Confirm state. If `action=BUY`, publish `HANDOFF` to `LiquidationDaemon` via ZMQ. |
+| `OPEN` | Cancel at broker via `api.cancel_order()`. Clean up locally via `_mark_order_failed()`. |
+| `PENDING` / `PHANTOM` | Treat as phantom. Reverse margin. Push Telegram alert. |
+
+- **Helpers**: `_handoff_to_liquidation_daemon(meta, fill_price)`, `_cancel_open_order(broker_order_id, order_id, meta)`.
+- **Fallback**: If broker API is unavailable, `OPEN` orders are still cleaned locally.
+
+> **Rationale:** Before v7.0, the boot audit only surfaced orphans via Telegram for human review. In auto-restart scenarios (GCP preemption, OOM kill), waiting for human review could mean missing the entire morning session. Deterministic reconciliation self-heals in under 10 seconds and resumes managing surviving positions immediately.
+
+
+## 10. v8.0 System Improvements
+
+### 10.1 Hybrid ATR×Kelly Sizing `[meta_router.py]`
+Replaces simple fractional Kelly with Conviction × Volatility sizing.
+- **Step A: ATR Unit (Safety Floor)**. Ensures constant risk per trade regardless of volatility. `UnitSize = MaxRiskPerTrade / (ATR * ATR_SL_MULTIPLIER)`.
+- **Step B: Kelly Multiplier (Conviction)**. `FinalLots = UnitSize * max(0.01, 0.5 * f)`.
+- **Paper/Live Split**: Max risk per trade is isolated into `paper_max_risk` and `live_max_risk`, similar to capital isolation.
+
+### 10.2 Barrier Exit Attribution `[liquidation_daemon.py]`
+Implements Lopez de Prado's Triple-Barrier Protocol attribution.
+- Tracks exact reason for position exit: `UPPER` (take profit), `LOWER` (stop loss), `VERTICAL` (time stop), or `PANIC` (manual/hard stop).
+- Stores the last 50 exit events in Redis for dashboard consumption.
+
+### 10.3 Signal Attribution & Sizing UI `[dashboard]`
+- **Signal Attribution Panel**: Visualizes barrier exit distribution via Donut Chart and displays a live feed of recent exits.
+- **Sizing Inspector**: Displays live variables (ATR, Unit Size, Kelly Fraction, Final Lots) used in the Hybrid Sizing calculation.
+- **Orchestrator Panel**: Added `Paper Max Loss / Trade` and `Live Max Loss / Trade` inputs.

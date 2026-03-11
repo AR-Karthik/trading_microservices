@@ -96,6 +96,9 @@ class OrderReconciler:
         self._margin = AsyncMarginManager(self.redis)
         logger.info("OrderReconciler started. Polling pending_orders every 500ms.")
 
+        # C2: Deterministic reboot audit — reconcile any orphaned orders from previous session
+        await self._reboot_audit()
+
         while True:
             try:
                 await self._reconciliation_cycle()
@@ -106,6 +109,100 @@ class OrderReconciler:
             await asyncio.sleep(POLL_INTERVAL_MS / 1000.0)
 
         await self.redis.aclose()
+
+    # ── C2: Reboot Audit ────────────────────────────────────────────────────
+
+    async def _reboot_audit(self):
+        """
+        On startup, performs deterministic reconciliation of ALL orders that were
+        in-flight when the previous session ended.
+
+        - COMPLETE (Filled): Confirm position state. If it was a BUY, handoff
+          to LiquidationDaemon so it can manage the 'ghost' position.
+        - OPEN: Cancel at the broker immediately to prevent double-fills.
+        - PHANTOM / PENDING (no broker record): Treat as phantom. Reverse margin.
+        """
+        pending = await self.redis.hgetall("pending_orders")
+        if not pending:
+            logger.info("Reboot Audit: Clean slate — no orphaned orders found.")
+            return
+
+        logger.warning(
+            f"⚠️  Reboot Audit: Found {len(pending)} orphaned pending orders. "
+            f"Reconciling deterministically..."
+        )
+
+        for order_id, meta_raw in pending.items():
+            try:
+                meta = json.loads(meta_raw)
+            except Exception:
+                await self.redis.hdel("pending_orders", order_id)
+                continue
+
+            broker_order_id = meta.get("broker_order_id")
+            status, fill_price = await self._query_broker(broker_order_id, order_id)
+
+            if status == STATUS_COMPLETE:
+                logger.info(f"Reboot Audit: Order {order_id} was FILLED. Confirming state.")
+                await self._mark_order_confirmed(order_id, meta, fill_price)
+                # If it was a BUY, the position is open — hand off to LiquidationDaemon
+                if meta.get("action") == "BUY":
+                    await self._handoff_to_liquidation_daemon(meta, fill_price)
+
+            elif status == STATUS_OPEN:
+                logger.warning(
+                    f"Reboot Audit: Order {order_id} is OPEN at broker. Auto-cancelling."
+                )
+                await self._cancel_open_order(broker_order_id, order_id, meta)
+
+            else:
+                # PENDING / REJECTED / unknown — treat as phantom to clean up state
+                logger.warning(
+                    f"Reboot Audit: Order {order_id} is unconfirmed ({status}). Treating as phantom."
+                )
+                await self._handle_phantom(order_id, meta)
+
+        logger.info("Reboot Audit: Complete. Starting normal reconciliation loop.")
+
+    async def _handoff_to_liquidation_daemon(self, meta: dict, fill_price: float):
+        """Publishes a HANDOFF command so the LiquidationDaemon manages post-reboot ghost positions."""
+        try:
+            from core.mq import MQManager, Ports
+            mq = MQManager()
+            pub = mq.create_publisher(Ports.SYSTEM_CMD)
+            payload = {
+                **meta,
+                "price": fill_price,
+                "entry_time": time.time(),
+                "cmd": "HANDOFF",
+                "reboot_recovery": True,
+            }
+            await mq.send_json(pub, payload, topic="HANDOFF")
+            logger.info(
+                f"🔁 Reboot Handoff → LiquidationDaemon: "
+                f"{meta.get('symbol')} x{meta.get('quantity')} @ ₹{fill_price:.2f}"
+            )
+        except Exception as e:
+            logger.error(f"Reboot handoff failed for {meta.get('symbol')}: {e}")
+
+    async def _cancel_open_order(self, broker_order_id: str | None, order_id: str, meta: dict):
+        """Cancels an OPEN order at the broker on reboot to prevent double-fill on reconnect."""
+        if self._api_available and broker_order_id:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, lambda: self._api.cancel_order(orderno=broker_order_id)
+                )
+                logger.info(f"Reboot: CANCELLED OPEN order {broker_order_id} at broker.")
+            except Exception as e:
+                logger.error(f"Reboot cancel failed for {broker_order_id}: {e}")
+        else:
+            logger.warning(
+                f"Reboot: Cannot cancel {order_id} (no broker API or no broker_order_id). "
+                f"Cleaning up locally."
+            )
+        # Always clean up local state regardless of API call success
+        await self._mark_order_failed(order_id, meta, STATUS_CANCELLED)
 
     # ── Reconciliation Cycle ─────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 # Technical Specifications: Project K.A.R.T.H.I.K.
 ## *(Kinetic Algorithmic Real-Time High-Intensity Knight)*
-**Version 0.9**
+**Version 7.0**
 
 This document represents the absolute ground-truth technical architecture for the trading system, derived from a line-by-line analysis of the current active codebase (`v0.9`).
 
@@ -206,3 +206,221 @@ Every component of this architecture was specifically selected to guarantee **th
 - **CPU Affinity (Core Pinning)**: The Docker engines configure container affinity. Core 0 handles the C++ Gateway (I/O bursty), Core 1 handles the heavy `market_sensor` math. **Result**: Eliminates CPU context-switching overhead (~30µs penalty per thread swap).
 - **Three-Disk I/O Shattering**: By splitting I/O across 3 physical Google Cloud disks (Standard OS Disk, Extreme NVMe for Redis WAL, Persistent SSD for PostgreSQL), a massive tick-ingestion DB write sequence physically cannot starve the CPU or block the Redis memory write that authorizes a trade entry.
 - **gVNIC & Transparent HugePages (THP)**: By utilizing GCP's Custom Virtual Network Interfaces (gVNIC) and forcing Linux `THP=always`, the kernel is optimized for large block matrix calculations (HMM Inference) and high-throughput network bursting.
+
+---
+
+## 10. v7.0 Technical Additions
+
+### 10.1 A1 — Portfolio Heat Constraint [meta_router.py]
+
+**New constants/keys:**
+`python
+DEFAULT_MAX_PORTFOLIO_HEAT = 0.5  # fallback if Redis key absent
+`
+**Redis Keys:**
+| Key | Type | TTL | Written By | Read By |
+|-----|------|-----|-----------|---------|
+| CONFIG:MAX_PORTFOLIO_HEAT | String | persistent | UI/Ops | meta_router.broadcast_decisions() |
+| PORTFOLIO_HEAT_CAPPED | String | 60s | meta_router | dashboard Risk pane |
+
+**Code path:** roadcast_decisions() → sum weights → compare to CONFIG:MAX_PORTFOLIO_HEAT → optional scale-down → publish commands unchanged.
+
+### 10.2 A2 — Slippage Budget [liquidation_daemon.py, strategy_engine.py]
+
+**New constants:**
+`python
+SLIPPAGE_BUDGET_PCT   = 0.02   # 2% slippage threshold
+SLIPPAGE_HALT_TTL_SEC = 60     # seconds to pause new entries
+`
+**New coroutine:** LiquidationDaemon._monitor_fill_slippage() — subscribes to Redis PubSub order_confirmations, calculates slippage per fill, sets SLIPPAGE_HALT with TTL.
+
+**Guard added to:** StrategyEngine.run_strategies() — checks wait redis.get("SLIPPAGE_HALT") before every _place_order().
+
+**Redis Keys:**
+| Key | Type | TTL | Written By | Read By |
+|-----|------|-----|-----------|---------|
+| SLIPPAGE_HALT | String | 60s | liquidation_daemon | strategy_engine |
+
+### 10.3 B2 — HMM Gap Calibration [strategy_engine.py]
+
+**New function:** _calibrate_vol_context(redis) — async, called from start_engine() pre-warmup.
+
+**Input keys read (Redis):**
+- prev_close:{symbol} — previous closing price
+- 	ick_history:{symbol} — list, index 0 = first tick JSON {"price": float}
+- olling_std_20d:{symbol} — 20-day rolling standard deviation (fallback: 50.0)
+
+**Output key written:**
+| Key | Type | TTL | Formula |
+|-----|------|-----|---------|
+| VOL_GAP_Z:{symbol} | String | 7200s | (open − prev_close) / std |
+
+**Symbols calibrated:** NIFTY50, BANKNIFTY, SENSEX (tri-brain indices).
+
+### 10.4 C1 — Theta Stall Timer [liquidation_daemon.py]
+
+Applied inside _evaluate_barriers(). Calculation runs once per eval cycle on Wed/Thu:
+`python
+is_expiry_day = now.weekday() in (2, 3)  # Wed=2, Thu=3
+if is_expiry_day:
+    minutes_to_close = max(0, (15*60+30) - (now.hour*60+now.minute))
+    stall_timer = max(60, int(STALL_TIMEOUT_SEC * (minutes_to_close / 360.0)))
+`
+No new Redis keys. No new constants (60s floor is inline).
+
+### 10.5 C2 — Reboot Audit [order_reconciler.py]
+
+**New methods on OrderReconciler:**
+
+| Method | Signature | Purpose |
+|--------|-----------|---------|
+| _reboot_audit() | sync → None | Entry point. Called from start(). |
+| _handoff_to_liquidation_daemon() | sync (meta, fill_price) → None | ZMQ publish HANDOFF command |
+| _cancel_open_order() | sync (broker_id, order_id, meta) → None | pi.cancel_order() + _mark_order_failed() |
+
+**Boot sequence addition:**
+`
+[STARTUP]
+  OrderReconciler.start()
+    → _reboot_audit()          ← NEW: deterministic reconciliation first
+    → _reconciliation_cycle()  ← then normal 500ms polling
+`
+
+**Updated Redis Key Registry:**
+| Key | Type | Written By | Read By |
+|-----|------|-----------|---------|
+| CONFIG:MAX_PORTFOLIO_HEAT | String | UI/Ops | meta_router |
+| PORTFOLIO_HEAT_CAPPED | String (60s TTL) | meta_router | dashboard |
+| SLIPPAGE_HALT | String (60s TTL) | liquidation_daemon | strategy_engine |
+| VOL_GAP_Z:NIFTY50 | String (2h TTL) | strategy_engine | hmm_engine, meta_router |
+| VOL_GAP_Z:BANKNIFTY | String (2h TTL) | strategy_engine | hmm_engine, meta_router |
+| VOL_GAP_Z:SENSEX | String (2h TTL) | strategy_engine | hmm_engine, meta_router |
+
+### 10.6 Test Coverage Added (v7.0)
+
+| Test File | Coverage |
+|-----------|----------|
+| 	ests/test_v70_features.py | A1 heat constraint, A2 slippage budget, B2 gap Z-score, C1 theta timer (6 cases), C2 reboot audit (5 cases) |
+| 	ests/test_shoonya_integration.py | Live login, market data, account, order lifecycle (place→cancel→history), WebSocket touchline |
+
+
+---
+
+## 10. v7.0 Technical Additions
+
+### 10.1 A1 — Portfolio Heat Constraint `[meta_router.py]`
+
+**New constant:**
+```python
+DEFAULT_MAX_PORTFOLIO_HEAT = 0.5
+```
+
+**New Redis Keys:**
+| Key | Type | TTL | Written By | Read By |
+|-----|------|-----|-----------|---------|
+| `CONFIG:MAX_PORTFOLIO_HEAT` | String | persistent | UI/Ops | `meta_router.broadcast_decisions()` |
+| `PORTFOLIO_HEAT_CAPPED` | String | 60s | `meta_router` | dashboard Risk pane |
+
+**Code path:** `broadcast_decisions()` -> sum weights -> compare to `CONFIG:MAX_PORTFOLIO_HEAT` -> optional proportional scale-down -> publish commands.
+
+### 10.2 A2 — Slippage Budget `[liquidation_daemon.py, strategy_engine.py]`
+
+**New constants:**
+```python
+SLIPPAGE_BUDGET_PCT   = 0.02   # 2% slippage threshold
+SLIPPAGE_HALT_TTL_SEC = 60     # seconds to pause new entries
+```
+
+**New coroutine:** `LiquidationDaemon._monitor_fill_slippage()` — subscribes to Redis PubSub `order_confirmations`, calculates slippage per fill, sets `SLIPPAGE_HALT` with TTL.
+
+**Guard added to:** `StrategyEngine.run_strategies()` — `await redis.get("SLIPPAGE_HALT")` before every `_place_order()` call.
+
+**New Redis Keys:**
+| Key | Type | TTL | Written By | Read By |
+|-----|------|-----|-----------|---------|
+| `SLIPPAGE_HALT` | String | 60s | `liquidation_daemon` | `strategy_engine` |
+
+### 10.3 B2 — HMM Gap Calibration `[strategy_engine.py]`
+
+**New function:** `_calibrate_vol_context(redis)` — async, called from `start_engine()` before warmup.
+
+**Input Redis keys:**
+- `prev_close:{symbol}` — previous session closing price
+- `tick_history:{symbol}` — list; index 0 = first tick of day as JSON `{"price": float}`
+- `rolling_std_20d:{symbol}` — 20-day rolling std dev (fallback: 50.0 if absent)
+
+**Output Redis keys written:**
+| Key | Type | TTL | Formula |
+|-----|------|-----|---------|
+| `VOL_GAP_Z:NIFTY50` | String | 7200s | `(open - prev_close) / std` |
+| `VOL_GAP_Z:BANKNIFTY` | String | 7200s | same |
+| `VOL_GAP_Z:SENSEX` | String | 7200s | same |
+
+### 10.4 C1 — Theta Stall Timer `[liquidation_daemon.py]`
+
+Applied inside `_evaluate_barriers()`. No new constants or Redis keys:
+```python
+is_expiry_day = now.weekday() in (2, 3)  # Wednesday=2, Thursday=3
+if is_expiry_day:
+    minutes_to_close = max(0, (15*60+30) - (now.hour*60 + now.minute))
+    stall_timer = max(60, int(STALL_TIMEOUT_SEC * (minutes_to_close / 360.0)))
+```
+
+### 10.5 C2 — Reboot Audit `[order_reconciler.py]`
+
+**New methods on `OrderReconciler`:**
+| Method | Signature | Purpose |
+|--------|-----------|---------|
+| `_reboot_audit()` | `async -> None` | Entry point, called from `start()` |
+| `_handoff_to_liquidation_daemon()` | `async (meta, fill_price) -> None` | ZMQ publish `HANDOFF` command |
+| `_cancel_open_order()` | `async (broker_id, order_id, meta) -> None` | `api.cancel_order()` + `_mark_order_failed()` |
+
+**Updated startup sequence:**
+```
+OrderReconciler.start()
+  -> _reboot_audit()          [NEW: deterministic reconciliation first]
+  -> _reconciliation_cycle()  [then normal 500ms polling]
+```
+
+**Complete v7.0 Redis Key Registry additions:**
+| Key | Type | TTL | Written By | Read By |
+|-----|------|-----|-----------|---------|
+| `CONFIG:MAX_PORTFOLIO_HEAT` | String | persistent | UI/Ops | `meta_router` |
+| `PORTFOLIO_HEAT_CAPPED` | String | 60s | `meta_router` | dashboard |
+| `SLIPPAGE_HALT` | String | 60s | `liquidation_daemon` | `strategy_engine` |
+| `VOL_GAP_Z:NIFTY50` | String | 2h | `strategy_engine` | `hmm_engine` |
+| `VOL_GAP_Z:BANKNIFTY` | String | 2h | `strategy_engine` | `hmm_engine` |
+| `VOL_GAP_Z:SENSEX` | String | 2h | `strategy_engine` | `hmm_engine` |
+
+### 10.6 Test Coverage Added (v7.0)
+
+| Test File | Covers |
+|-----------|--------|
+| `tests/test_v70_features.py` | A1 heat constraint (4 cases), A2 slippage budget (5 cases), B2 gap Z-score (5 cases), C1 theta timer (6 cases), C2 reboot audit (5 cases) |
+| `tests/test_shoonya_integration.py` | Live login with TOTP, market data (quotes, option chain, time series), account info (limits, positions, order book), order lifecycle (place->cancel->history), WebSocket touchline |
+
+
+### 10.7 v8.0 Hybrid Sizing & Attribution Updates
+
+**Hybrid Sizing `[meta_router.py]`:**
+- Uses `MAX_RISK_PER_TRADE` (read dynamically from `CONFIG:MAX_RISK_PER_TRADE_LIVE` or `_PAPER` depending on active mode).
+- Constants: `ATR_SL_MULTIPLIER = 1.0`.
+
+**Barrier Exit Tracking `[liquidation_daemon.py]`:**
+- `_record_barrier_exit(symbol, barrier_type, trigger_price, exit_price, pnl)` helper function.
+- Writes to Redis list `barrier_exits` using `LPUSH` and `LTRIM` to keep the last 50 events.
+
+**Dashboard APIs `[dashboard/api/main.py]`:**
+- `RegimeConfigRequest` expanded to include `paper_max_risk` and `live_max_risk`.
+- `GET /barriers/attribution`: Reads `barrier_exits` from Redis and aggregates counts for `UPPER`, `LOWER`, `VERTICAL`, `PANIC`.
+- `GET /sizing/inspector`: Provides real-time asset sizing details.
+
+**Added Redis Keys:**
+| Key | Type | TTL | Written By | Read By |
+|-----|------|-----|-----------|---------|
+| `CONFIG:MAX_RISK_PER_TRADE_PAPER` | String | persistent | UI | `meta_router` |
+| `CONFIG:MAX_RISK_PER_TRADE_LIVE` | String | persistent | UI | `meta_router` |
+| `barrier_exits` | List (50 cap) | persistent | `liquidation_daemon` | dashboard API |
+
+**New Tests:**
+- `tests/test_hybrid_sizing.py`: Tests ATR unit calculation, Kelly bounds, and final lot formulas.

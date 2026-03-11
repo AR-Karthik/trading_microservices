@@ -351,6 +351,56 @@ async def warmup_engine(active_strategies, num_ticks=1000):
                     
     logger.info("âœ… Warmup Complete. Bytecode is primed.")
 
+async def _calibrate_vol_context(redis_client):
+    """
+    B2: Pre-market Rolling Z-Score normalization of the overnight gap.
+    Computes VOL_GAP_Z:<symbol> for NIFTY50, BANKNIFTY, SENSEX based on
+    prev_close vs first available tick. Writes result to Redis for the
+    HMM engine to use when setting its first state threshold at 09:15.
+    Called during the warm-up window (09:00–09:15).
+    """
+    symbols = ["NIFTY50", "BANKNIFTY", "SENSEX"]
+    calibrated = 0
+    for symbol in symbols:
+        try:
+            prev_close_raw = await redis_client.get(f"prev_close:{symbol}")
+            if not prev_close_raw:
+                continue
+            prev_close = float(prev_close_raw)
+            if prev_close <= 0:
+                continue
+
+            # Get most recent tick from short-lived tick history list
+            tick_raw = await redis_client.lindex(f"tick_history:{symbol}", -1)
+            if not tick_raw:
+                continue
+            tick = json.loads(tick_raw)
+            open_price = float(tick.get("price", 0) or 0)
+            if open_price <= 0:
+                continue
+
+            # 20-day rolling std (stored by market_sensor.py)
+            rolling_std_raw = await redis_client.get(f"rolling_std_20d:{symbol}")
+            rolling_std = float(rolling_std_raw or 50.0)  # fallback 50 points
+            if rolling_std <= 0:
+                rolling_std = 50.0
+
+            gap_z = (open_price - prev_close) / rolling_std
+            await redis_client.set(f"VOL_GAP_Z:{symbol}", round(gap_z, 4), ex=7200)  # 2h TTL
+            logger.info(
+                f"📊 Vol Gap Calibration [{symbol}]: Z={gap_z:.2f} "
+                f"(Open={open_price:.1f}, PrevClose={prev_close:.1f}, Std={rolling_std:.1f})"
+            )
+            calibrated += 1
+        except Exception as e:
+            logger.warning(f"B2 calibration skipped for {symbol}: {e}")
+
+    if calibrated > 0:
+        logger.info(f"✅ B2 Vol Context: {calibrated}/{len(symbols)} symbols calibrated.")
+    else:
+        logger.warning("⚠️ B2 Vol Context: No symbols calibrated (prev_close data missing). Proceeding with defaults.")
+
+
 async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_client, shm_ticks, shm_alpha):
     """Subscribes to market data and runs strategies using SHM for zero-copy lookups."""
     logger.info("Starting Strategy Engine loop... (v5.5 Quantitative Risk Active)")
@@ -457,6 +507,11 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                         action = parts[0]
                         qty = int(parts[3])
                         
+                    # --- A2: Slippage Halt Guard ---
+                    if await redis_client.get("SLIPPAGE_HALT") == "True":
+                        logger.warning(f"⏸️ SLIPPAGE HALT ACTIVE: {s_id} entry blocked. Order book stabilizing.")
+                        continue  # Skip dispatch while halt is active
+
                     # --- Atomic Capital Locking (SRS §2.4) ---
                     required_margin = price * qty
                     if action == "BUY":
@@ -518,7 +573,10 @@ async def start_engine():
     # Wait for initial config to load
     await asyncio.sleep(1)
     
-    # 2. Recommendation 2: Pre-Flight Warmup
+    # 2. B2: Overnight Gap Z-Score Calibration (before warmup)
+    await _calibrate_vol_context(redis_client)
+
+    # 3. Recommendation 2: Pre-Flight Warmup
     await warmup_engine(active_strategies)
 
     try:

@@ -1,7 +1,7 @@
 """
 daemons/meta_router.py
 ======================
-Tri-Brain HMM Dispatcher & Portfolio Allocation (V6.4)
+Tri-Brain HMM Dispatcher & Portfolio Allocation (V8.0)
 
 Architecture:
   Main asyncio loop   → Reads Market State and Firestore settings;
@@ -11,6 +11,11 @@ Architecture:
   Providers           → Logic for regime classification and signal weighting.
 
 """
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+DEFAULT_MAX_PORTFOLIO_HEAT = 0.5   # Maximum combined fractional Kelly across all Tri-Brain assets
+MAX_RISK_PER_TRADE         = 2500.0  # ₹2,500 max rupee loss per trade (ATR-unit sizing input)
+ATR_SL_MULTIPLIER          = 1.0     # Mirrors liquidation_daemon constant for sizing consistency
 
 import asyncio
 import json
@@ -32,27 +37,74 @@ class BaseStrategyLogic:
         self.r = redis_client
 
     async def calculate_weights(self, state: dict, regime_context: dict) -> dict:
-        """Calculates fractional kelly allocations based on the provided context."""
+        """
+        Hybrid Sizing: Conviction × Volatility (v8.0)
+
+        Step A — ATR Unit (Safety Floor)
+        ---------------------------------
+        Normalizes the "Cost of Being Wrong" by expressing position size as the number
+        of units (lots) where one unit = ₹MAX_RISK_PER_TRADE of rupee loss at the ATR stop:
+
+            unit_size = MAX_RISK_PER_TRADE / (ATR × ATR_SL_MULTIPLIER)
+
+        This ensures that regardless of how wide the stop is, the rupee P&L exposure
+        at stop-loss is always ₹2,500 — not a percentage of capital.
+
+        Step B — Kelly Multiplier (Conviction)
+        ----------------------------------------
+        Half-Kelly fraction scales the unit_size by win-probability conviction:
+
+            final_lots = unit_size × max(0.01, 0.5 × kelly_f)
+
+        where kelly_f = p − ((1 − p) / 1.5)
+        """
         try:
             p = float(regime_context.get("prob", 0.6))
             r_type = regime_context.get("regime", "RANGING")
             provider = regime_context.get("provider", "UNKNOWN")
-            
+
+            # ── Step A: ATR Unit ──────────────────────────────────────────────
+            try:
+                atr = float(await self.r.get("atr") or 20.0) if self.r else 20.0
+            except Exception:
+                atr = 20.0
+            atr = max(atr, 1.0)  # Guard against zero ATR
+
+            # Read MAX_RISK_PER_TRADE from Redis — separate keys for paper vs live
+            # Determine mode: live trading is active when LIVE_CAPITAL_LIMIT > 0
+            try:
+                live_cap = float(await self.r.get("LIVE_CAPITAL_LIMIT") or 0) if self.r else 0
+                if live_cap > 0:
+                    risk_key = "CONFIG:MAX_RISK_PER_TRADE_LIVE"
+                else:
+                    risk_key = "CONFIG:MAX_RISK_PER_TRADE_PAPER"
+                max_risk = float(await self.r.get(risk_key) or MAX_RISK_PER_TRADE) if self.r else MAX_RISK_PER_TRADE
+                max_risk = max(max_risk, 100.0)  # Floor: never less than ₹100
+            except Exception:
+                max_risk = MAX_RISK_PER_TRADE
+
+            unit_size = max_risk / (atr * ATR_SL_MULTIPLIER)
+
+            # ── Step B: Kelly Multiplier ──────────────────────────────────────
             b = 1.5
             kelly_f = p - ((1.0 - p) / b)
-            fractional_kelly = max(0.01, 0.5 * kelly_f)
-            
-            # Allocation execution is handled by the Bridge, we just send weight/lots intent
+            half_kelly = max(0.01, 0.5 * kelly_f)
+
+            final_lots = round(unit_size * half_kelly, 4)
+
             return {
-                "asset": self.asset_id, 
-                "regime": r_type, 
-                "weight": fractional_kelly, 
+                "asset": self.asset_id,
+                "regime": r_type,
+                "lots": final_lots,         # ATR-normalized lot count
+                "weight": half_kelly,        # Raw Half-Kelly fraction (used by heat constraint)
+                "unit_size": round(unit_size, 4),
+                "atr_used": round(atr, 4),
                 "provider": provider,
                 "score": p
             }
         except Exception as e:
             logger.error(f"Logic failure on {self.asset_id}: {e}")
-            return {"asset": self.asset_id, "regime": "RANGING", "weight": 0.01, "provider": "ERROR"}
+            return {"asset": self.asset_id, "regime": "RANGING", "lots": 0.01, "weight": 0.01, "provider": "ERROR"}
 
 # ── Providers: The Decision Engines ───────────────────────────────────────────
 
@@ -201,6 +253,29 @@ class MetaRouter:
             })
 
         if not self.test_mode:
+            # ── A1: Global Portfolio Heat Constraint ───────────────────────────
+            # Sum all fractional kelly weights across the three brains
+            total_heat = sum(cmd.get("weight", 0) for cmd in all_commands if isinstance(cmd, dict))
+            try:
+                heat_limit = float(await self._redis.get("CONFIG:MAX_PORTFOLIO_HEAT") or DEFAULT_MAX_PORTFOLIO_HEAT)
+            except Exception:
+                heat_limit = DEFAULT_MAX_PORTFOLIO_HEAT
+
+            if total_heat > heat_limit and total_heat > 0:
+                scale = heat_limit / total_heat
+                all_commands = [
+                    {**cmd, "weight": round(cmd.get("weight", 0) * scale, 4)}
+                    if isinstance(cmd, dict) else cmd
+                    for cmd in all_commands
+                ]
+                logger.warning(
+                    f"🔥 PORTFOLIO HEAT CAP: total_f={total_heat:.3f} > limit={heat_limit:.3f}. "
+                    f"Scaling all weights by {scale:.3f}."
+                )
+                await self._redis.set("PORTFOLIO_HEAT_CAPPED", "True", ex=60)
+            else:
+                await self._redis.set("PORTFOLIO_HEAT_CAPPED", "False", ex=60)
+
             for cmd in all_commands:
                 await self.mq.send_json(self.cmd_pub, cmd, topic=cmd["asset"])
             
