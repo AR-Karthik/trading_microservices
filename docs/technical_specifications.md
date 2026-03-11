@@ -1,6 +1,8 @@
 # Technical Specifications: Project K.A.R.T.H.I.K.
+## *(Kinetic Algorithmic Real-Time High-Intensity Knight)*
+**Version 0.9**
 
-This document represents the absolute ground-truth technical architecture for the trading system, derived from a line-by-line analysis of the current active codebase (`v6.5`).
+This document represents the absolute ground-truth technical architecture for the trading system, derived from a line-by-line analysis of the current active codebase (`v0.9`).
 
 ## 1. Architectural Blueprint
 The system follows a heavily decoupled, asynchronous microservices architecture that prioritizes Zero-Copy memory sharing, Queue-based multiprocessing, and Pub-Sub messaging.

@@ -277,12 +277,11 @@ cp .env.example .env   # fill in your credentials
 # Start all services
 docker compose up -d
 
-# Or run dashboard only (with mock data)
-pip install -r requirements.txt
-streamlit run dashboard/app.py
+# Start infra + dashboard only (React UI + API)
+docker compose up -d redis timescaledb dashboard_api dashboard_frontend
 ```
 
-Dashboard: `http://localhost:8501`
+Dashboard UI: `http://localhost:8501` | API Docs: `http://localhost:8000/docs`
 
 ---
 

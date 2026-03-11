@@ -1,9 +1,11 @@
 # Functional Specifications: Project K.A.R.T.H.I.K.
+## *(Kinetic Algorithmic Real-Time High-Intensity Knight)*
+**Version 0.9**
 
-This document represents the absolute ground-truth functional specifications for the trading system, derived from a line-by-line analysis of the current active codebase (`v6.5`). It serves as both a blueprint of *what* the system does and a guide on *why* it is configured this way.
+This document represents the absolute ground-truth functional specifications for the trading system, derived from a line-by-line analysis of the current active codebase (`v0.9`). It serves as both a blueprint of *what* the system does and a guide on *why* it is configured this way.
 
 ## 1. System Objective 
-**K.A.R.T.H.I.K.** is an algorithmic trading engine built for speed, modularity, and risk-capped execution. It utilizes a dynamic, pluggable strategy engine, zero-latency shared memory IPC, and a strict three-barrier liquidation system to manage options momentum and mean-reversion workflows.
+**K.A.R.T.H.I.K.** *(Kinetic Algorithmic Real-Time High-Intensity Knight)* is an algorithmic trading engine built for speed, modularity, and risk-capped execution. It utilizes a dynamic, pluggable strategy engine, zero-latency shared memory IPC, and a strict three-barrier liquidation system to manage options momentum and mean-reversion workflows.
 
 ## 2. Meta Router & Regime Orchestration `[meta_router.py]`
 The Meta Router dynamically classifies the market regime and calculates trade allocations.
