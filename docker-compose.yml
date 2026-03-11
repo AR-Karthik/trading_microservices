@@ -65,7 +65,7 @@ services:
     env_file: .env
     cpuset: "1"
     volumes:
-      - /ram_disk:/ram_disk
+      - ./ram_disk:/ram_disk
 
   meta_router:
     image: trading-app:latest
@@ -78,7 +78,7 @@ services:
     env_file: .env
     cpuset: "1"
     volumes:
-      - /ram_disk:/ram_disk
+      - ./ram_disk:/ram_disk
 
   strategy_engine:
     image: trading-app:latest
@@ -95,7 +95,7 @@ services:
     env_file: .env
     cpuset: "2"
     volumes:
-      - /ram_disk:/ram_disk
+      - ./ram_disk:/ram_disk
 
   liquidation_daemon:
     image: trading-app:latest

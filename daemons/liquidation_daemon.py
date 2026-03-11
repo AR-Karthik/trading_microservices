@@ -31,11 +31,12 @@ logging.basicConfig(
 logger = logging.getLogger("LiquidationDaemon")
 
 # Barrier thresholds
-ATR_TP_MULTIPLIER = 2.5
-ATR_SL_MULTIPLIER = 1.0
-STALL_TIMEOUT_SEC = 300       # 5 minutes
-CVD_FLIP_EXIT_THRESHOLD = 5   # consecutive CVD flips → market exit
-BARRIER2_SPREAD_CROSS_PCT = 0.10  # Cross bid-ask by 10% increments per retry
+ATR_TP1_MULTIPLIER = 1.2   # Barrier 1: TP1 partial exit (70%) — Risk-Off Milestone
+ATR_TP_MULTIPLIER  = 2.5   # Barrier 1: TP2 Runner Hard Ceiling
+ATR_SL_MULTIPLIER  = 1.0   # Barrier 1: Base Stop Loss (× expands to 1.5 in high-vol)
+STALL_TIMEOUT_SEC  = 300   # Barrier 2: 5-minute stall timer (shrinks to 180s in low-vol)
+CVD_FLIP_EXIT_THRESHOLD   = 5    # Barrier 3: 5 consecutive CVD flips → market exit
+BARRIER2_SPREAD_CROSS_PCT = 0.10 # Barrier 2: Cross bid-ask by 10% increments per retry
 
 # HTTP 400 emsg substrings that indicate CIRCUIT LIMIT (safe to re-fire)
 CIRCUIT_LIMIT_STRINGS = ["price range", "circuit", "freeze", "price band", "pcl", "ucl"]
@@ -232,8 +233,8 @@ class LiquidationDaemon:
         if "entry_hmm" not in pos:
             pos["entry_hmm"] = entry_hmm
         
-        tp1 = entry + 1.2 * atr       # Target 1 (70% exit) - The "Risk-Off" Milestone
-        tp2 = entry + 2.5 * atr       # Target 2 (Runner Hard Ceiling)
+        tp1 = entry + ATR_TP1_MULTIPLIER * atr  # Target 1 (70% exit) — Risk-Off Milestone
+        tp2 = entry + ATR_TP_MULTIPLIER  * atr  # Target 2 (Runner Hard Ceiling)
         
         if runner_active:
             sl = entry # Move SL to Break-even for runner

@@ -78,9 +78,23 @@ class CloudPublisher:
                 pipe.get("COMPOSITE_ALPHA")
                 pipe.get("STOP_DAY_LOSS_BREACHED_PAPER")
                 pipe.get("STOP_DAY_LOSS_BREACHED_LIVE")
+                
+                # Extended data for v6.5 Analytics 
+                pipe.get("HMM_REGIME_NIFTY")
+                pipe.get("HMM_REGIME_BANKNIFTY")
+                pipe.get("HMM_REGIME_SENSEX")
+                pipe.get("latest_market_state")
+                pipe.get("latest_attributions")
+                
                 results = await pipe.execute()
 
+                # Parse the extended JSON payloads
+                mkt_state_raw = results[12]
+                attr_raw = results[13]
+                mkt_state = json.loads(mkt_state_raw) if mkt_state_raw else {}
+
                 state = {
+                    # User's Explicit Baseline Payload
                     "regime": results[0] or "UNKNOWN",
                     "daily_pnl_paper": float(results[1] or 0),
                     "daily_pnl_live": float(results[2] or 0),
@@ -93,11 +107,33 @@ class CloudPublisher:
                     "is_vm_running": True,
                     "last_heartbeat": datetime.now(IST).isoformat(),
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    
+                    # Extended v6.5 Feature Additions
+                    "regimes": {
+                        "NIFTY": results[9] or "WAITING",
+                        "BANKNIFTY": results[10] or "WAITING",
+                        "SENSEX": results[11] or "WAITING"
+                    },
+                    "vpin": mkt_state.get("vpin", 0),
+                    "greeks": {
+                        "vanna": mkt_state.get("vanna", 0),
+                        "charm": mkt_state.get("charm", 0)
+                    },
+                    "system_health": "HEALTHY"
                 }
 
-                # Write to Firestore
+                # Push to Firestore Live State
                 doc_ref = self.firestore_db.collection("trading_state").document("live")
                 await doc_ref.set(state, merge=True)
+
+                # Write attributions to Firestore (Tab 7 Analysis)
+                if attr_raw:
+                    attributions = json.loads(attr_raw)
+                    for attr in attributions:
+                        attr_ref = self.firestore_db.collection("attributions").document()
+                        await attr_ref.set(attr)
+                    # Clear processed attributions
+                    await self.redis.delete("latest_attributions")
 
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")

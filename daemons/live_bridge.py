@@ -271,6 +271,14 @@ class LiveExecutionEngine:
                 "price": float(execution['price']), "type": "EXECUTION"
             }, topic=f"EXEC.{execution['symbol']}")
             
+            # Publish live P&L and lot count to Redis for cloud_publisher and UI
+            await self.redis.set("DAILY_REALIZED_PNL_LIVE", str(self.total_realized_pnl))
+            # Increment active lots count; decremented on SELL/CLOSE by reconciler
+            if execution["action"] == "BUY":
+                await self.redis.incr("ACTIVE_LOTS_COUNT")
+            elif execution["action"] == "SELL":
+                await self.redis.decr("ACTIVE_LOTS_COUNT")
+            
             # Check kill switch after every trade execution
             await self.check_kill_switch()
 

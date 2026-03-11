@@ -311,6 +311,15 @@ async def execute_orders(pull_socket, pool, mq_manager, redis_client):
             except Exception as e:
                 logger.error(f"Failed to update DAILY_REALIZED_PNL: {e}")
             
+            # GAP FIX: Track active lots count for cloud_publisher
+            try:
+                if execution["action"] == "BUY":
+                    await redis_client.incr("ACTIVE_LOTS_COUNT")
+                elif execution["action"] == "SELL":
+                    await redis_client.decr("ACTIVE_LOTS_COUNT")
+            except Exception as e:
+                logger.error(f"Failed to update ACTIVE_LOTS_COUNT: {e}")
+            
             # Broadcast executed trade
             await mq_manager.send_json(trade_pub_socket, {
                 "id": execution["id"],

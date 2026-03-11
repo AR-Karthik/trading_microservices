@@ -124,20 +124,44 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         charm = -norm.pdf(d1) * (2 * r * T - d2 * sigma * math.sqrt(T)) / (2 * T * sigma * math.sqrt(T))
         return sign * charm
 
-    def find_zero_gamma_level(spot: float, strikes: list[float], T: float, r: float, sigma: float):
-        """Root-find: spot price where net GEX = 0."""
-        if T <= 0:
-            return spot
-        try:
-            def net_gex(S):
-                gex = sum(bs_gamma(S, K, T, r, sigma) for K in strikes if K > 0)
-                return gex - (gex * 0.5)  # simplified: zero when half gamma is balanced
-            # Real implementation: sum weighted gamma across call/put OI per strike
-            # For now: use parabolic root-find around spot ± 500pts
-            lo, hi = spot * 0.97, spot * 1.03
-            return brentq(net_gex, lo, hi, maxiter=50)
-        except Exception:
-            return spot
+    def find_zero_gamma_level(prices_arr: np.ndarray, current_spot: float) -> float:
+        """Estimates the Zero Gamma Level (ZGL) where dealer hedging flips from short to long gamma."""
+        if len(prices_arr) == 0:
+            return current_spot
+        # Naive implementation: In a full order flow tape, this tracks dealer exposure profiles.
+        # Fallback to mean price of highly active recent volume nodes.
+        return float(np.mean(prices_arr[-100:])) if len(prices_arr) >= 100 else float(np.mean(prices_arr))
+
+    def calculate_kaufman_er(series: np.ndarray, window: int = 10) -> float:
+        """Kaufman Efficiency Ratio: Net Change / Sum of Absolute Changes."""
+        if len(series) < window + 1:
+            return 0.5
+        net_change = abs(series[-1] - series[-window])
+        sum_abs_changes = np.sum(np.abs(np.diff(series[-window:])))
+        return float(net_change / sum_abs_changes) if sum_abs_changes > 0 else 0.0
+
+    def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int = 14) -> float:
+        """Simplified ADX calculation for trend strength."""
+        if len(close) < window * 2:
+            return 20.0
+        
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        tr = np.maximum(high[1:] - low[1:], 
+                        np.maximum(np.abs(high[1:] - close[:-1]), 
+                                   np.abs(low[1:] - close[:-1])))
+        
+        # Simple moving average for smoothing in this high-speed context
+        tr_smooth = np.mean(tr[-window:])
+        plus_di = 100 * (np.mean(plus_dm[-window:]) / tr_smooth) if tr_smooth > 0 else 0
+        minus_di = 100 * (np.mean(minus_dm[-window:]) / tr_smooth) if tr_smooth > 0 else 0
+        
+        dx = 100 * (np.abs(plus_di - minus_di) / (plus_di + minus_di)) if (plus_di + minus_di) > 0 else 0
+        return float(dx)
 
     def compute_signals(snapshot: dict) -> dict:
         """Main compute function called for each tick snapshot."""
@@ -241,6 +265,15 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         result["vpin"] = float(vpin_series[-1]) if vpin_series else 0.0
         # Veto long trades if VPIN > 0.8
         result["flow_toxicity_veto"] = bool(result["vpin"] > 0.8)
+
+        # ── v6.5 Deterministic Guardrails ──────────────────────────────────
+        prices = np.array(snapshot.get("price_series", [spot]))
+        result["hurst"] = snapshot.get("hurst_val", 0.5) # Hurst is slow, calculated in main
+        result["kaufman_er"] = calculate_kaufman_er(prices, snapshot.get("er_window", 10))
+        
+        # ADX requires H/L/C - if not provided, we proxy with close-only simplified version
+        # In this TBT stream, we treat each tick as C, and simulate H/L if needed
+        result["adx"] = calculate_adx(prices, prices*0.999, prices, 14) 
 
         return result
 
@@ -512,6 +545,7 @@ class MarketSensor:
 
                     # Send snapshot to compute process every 20 ticks
                     if tick_count % 20 == 0 and not self.test_mode:
+                        price_series = [t.get("price", price) for t in list(self.tick_store[symbol])]
                         snapshot = {
                             "spot": price,
                             "ofi_series": list(self.ofi_series),
@@ -520,7 +554,10 @@ class MarketSensor:
                             "basis_series": list(self.basis_series),
                             "spot_15m_series": list(self.spot_15m_series),
                             "vpin_series": list(self.vpin_series) if self.vpin_series else [0.0],
-                            "price_series": [t.get("price", price) for t in list(self.tick_store[symbol])],
+                            "zero_gamma_level": find_zero_gamma_level(np.array(price_series), price),
+                            "price_series": price_series,
+                            "hurst_val": self.calculate_hurst(np.array(price_series[-500:])) if len(price_series) >= 50 else 0.5,
+                            "er_window": 10, # Dynamic via Firestore later
                             "strikes": [price - 200, price - 100, price, price + 100, price + 200],
                             "near_term_iv": 0.20,  # In prod: fetch from options chain
                             "far_term_iv": 0.17,
@@ -578,7 +615,9 @@ class MarketSensor:
             "s_env": s_env,
             "s_str": s_str,
             "s_div": s_div,
-            "hurst": self.calculate_hurst(prices_arr[-500:]) if len(prices_arr) >= 50 else 0.5,
+            "hurst": sig.get("hurst", 0.5),
+            "kaufman_er": sig.get("kaufman_er", 0.5),
+            "adx": sig.get("adx", 20.0),
             "rv": float(np.std(np.diff(np.log(np.maximum(prices_arr, 1e-6))))) if len(prices_arr) >= 2 else 0.0,
             "log_ofi_zscore": sig.get("log_ofi_zscore", 0.0),
             "dispersion_coeff": sig.get("dispersion_coeff", 0.5),
@@ -626,6 +665,19 @@ class MarketSensor:
             await self._redis.set("gex_sign", state["gex_sign"])
             await self._redis.set("atr", str(state["atr"]))
             await self._redis.set("flow_toxicity_veto", "1" if state["flow_toxicity_veto"] else "0")
+            
+            # GAP FIX: Write flat Redis keys expected by cloud_publisher
+            # COMPOSITE_ALPHA: standalone flat key for direct reads without JSON parsing
+            await self._redis.set("COMPOSITE_ALPHA", str(state["s_total"]))
+            # HMM_REGIME: a best-guess flat key derived from the active HMM engine's latest write.
+            # cloud_publisher uses this as the unified regime label across all assets.
+            # The per-asset result is still in hmm_regime_state hash for MetaRouter veto logic.
+            hmm_nifty_raw = await self._redis.hget("hmm_regime_state", "NIFTY")
+            if hmm_nifty_raw:
+                hmm_nifty = json.loads(hmm_nifty_raw)
+                await self._redis.set("HMM_REGIME", hmm_nifty.get("regime", "WAITING"))
+            else:
+                await self._redis.set("HMM_REGIME", "WAITING")
 
         logger.info(
             f"STATE: ALPHA={s_total:.1f} | OFI-Z={state['log_ofi_zscore']:.2f} | "

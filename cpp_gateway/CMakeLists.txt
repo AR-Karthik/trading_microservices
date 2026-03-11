@@ -6,15 +6,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Dependencies: Protobuf, ZeroMQ, simdjson, uWebSockets
 find_package(Protobuf REQUIRED)
-find_package(ZeroMQ REQUIRED)
+
+# Use PkgConfig for ZeroMQ as libzmq3-dev doesn't always provide ZeroMQConfig.cmake
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(ZMQ REQUIRED libzmq)
 
 # Include directories
 target_include_directories(cpp_gateway PRIVATE include)
 target_include_directories(cpp_gateway PRIVATE proto)
 target_include_directories(cpp_gateway PRIVATE ${PROTOBUF_INCLUDE_DIRS})
-target_include_directories(cpp_gateway PRIVATE /opt/trading/cpp_gateway/deps/uWebSockets/src)
-target_include_directories(cpp_gateway PRIVATE /opt/trading/cpp_gateway/deps/uWebSockets/uSockets/src)
-target_include_directories(cpp_gateway PRIVATE proto)
+target_include_directories(cpp_gateway PRIVATE /usr/local/include/uWebSockets)
+target_include_directories(cpp_gateway PRIVATE /usr/local/include/uSockets)
+target_include_directories(cpp_gateway PRIVATE /usr/local/include)
 
 # Source files (Protobuf generated manually in Docker)
 set(SOURCES
@@ -31,7 +34,7 @@ add_executable(cpp_gateway ${SOURCES})
 target_link_libraries(cpp_gateway
     PRIVATE
     ${PROTOBUF_LIBRARIES}
-    zmq
+    ${ZMQ_LIBRARIES}
     simdjson
     hiredis
     redis++

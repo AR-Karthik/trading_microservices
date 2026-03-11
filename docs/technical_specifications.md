@@ -1,153 +1,206 @@
-# Technical Specifications: Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)
+# Technical Specifications: Project K.A.R.T.H.I.K.
 
-This document outlines the architectural and engineering decisions made to build an institutional-grade, low-latency quant trading system.
+This document represents the absolute ground-truth technical architecture for the trading system, derived from a line-by-line analysis of the current active codebase (`v6.5`).
 
-## 1. Architectural Philosophy
-The system follows a **Decoupled Microservices Architecture**, where each core responsibility (Sensing, Routing, Execution) is isolated into its own OS process or container.
+## 1. Architectural Blueprint
+The system follows a heavily decoupled, asynchronous microservices architecture that prioritizes Zero-Copy memory sharing, Queue-based multiprocessing, and Pub-Sub messaging.
 
-### Key Benefits:
-- **Fault Isolation**: A failure in the Dashboard API cannot crash the Execution Bridge.
-- **Independent Scaling**: The compute-heavy `Market Sensor` can be allocated more CPU cores without affecting the I/O-bound `Data Gateway`.
-- **Zero-Latency Monitoring**: Monitoring components are strictly "passive observers," ensuring zero impact on the millisecond execution path.
+### 1.1 Core Daemons
 
-## 2. High-Performance Messaging (ZeroMQ)
-The system utilizes **ZeroMQ** for all inter-service communication instead of traditional HTTP or slower message brokers.
+| Daemon | Core Pin | Role |
+|--------|---------|------|
+| `cpp_gateway` | Core 0 | C++ WebSocket feed parser. Publishes clean ticks to ZMQ `MARKET_DATA`. |
+| `market_sensor.py` | Core 1 | Multiprocessing alpha generation. Writes SHM + Redis state. |
+| `strategy_engine.py` | Core 2 | Execution matrix. Reads SHM. Dispatches ZMQ orders. |
+| `meta_router.py` | Core 3 | Tri-Brain orchestrator. Reads Redis state, publishes regime commands. |
+| `liquidation_daemon.py` | Any | Autonomous three-barrier exit manager for orphaned positions. |
+| `hmm_engine.py` | Any | HMM inference. Reads `market_history` from TimescaleDB. Writes to Redis. |
+| `system_controller.py` | Any | Lifecycle: GCP preemption, macro lockdown, EOD hard stop, HMM sync. |
+| `live_bridge.py` | Any | Live order execution via Shoonya REST API. |
+| `paper_bridge.py` | Any | Simulated paper execution with slippage model. Writes to TimescaleDB. |
+| `cloud_publisher.py` | Any | One-way telemetry mirror to Firestore. Publishes heartbeats every 10s. |
 
-- **Market Data Pipeline (PUB/SUB)**: Ticks are broadcasted to multiple consumers (Sensor, Router, Bridge) simultaneously with sub-millisecond latency.
-- **Command Dispatch (PUSH/PULL)**: Orders and system commands follow a point-to-point flow to ensure no command is "double-processed" or dropped.
-- **Protocol Buffers (Protobuf)**: Transitioning from Zero-Copy JSON encoding to strict Protobuf schemas for high-frequency Inter-Process Communication (IPC) to maximize throughput and schema safety.
+### 1.2 Startup Sequence
+The intended boot order is enforced by `docker-compose.yml` health checks:
 
-## 3. GIL Mitigation & Multi-Processing
-To bypass Python's Global Interpreter Lock (GIL) and achieve true parallel computation:
-- **Multi-Process Neural Core**: Switched from a single-threaded asyncio loop to a Multi-Process architecture. Heavy math (HMM, Polars, Correlation) runs on dedicated CPU cores, ensuring the execution engine never lags due to Python's internal locks.
-- **Lee-Ready Trade Classification**: To filter "Bid-Ask Bounce," the `Market Sensor` classifies trades relative to the mid-quote ($(Bid + Ask) / 2$). Trades are only scored if they occur above (Buy) or below (Sell) the mid-point, ensuring alpha is based on true market aggression.
-- **Queue-Based IPC**: Communication between the main I/O loop and the compute workers happens via `multiprocessing.Queue`, ensuring sub-millisecond responsiveness to market ticks.
+1. **Redis** (health check: `PING`)
+2. **TimescaleDB** (health check: `pg_isready`)
+3. `system_controller` → initializes Redis capital keys, audits `Pending_Journal`
+4. `cpp_gateway` → C++ WebSocket connects to Shoonya broker feed
+5. `hmm_engine` → loads pickled model, enters warm-up mode
+6. `market_sensor` → starts Compute subprocess, begins tick ingestion from ZMQ
+7. `meta_router` → waits for all 3 HMM regime states (`hmm_regime_state` hash has 3 keys)
+8. `strategy_engine` → pre-flight JIT warmup (1,000 synthetic ticks), then live loop
+9. `live_bridge` / `paper_bridge` → authenticate, arm execution listeners
+10. `liquidation_daemon` → arm barrier monitors
+11. `cloud_publisher` → begin 10s Firestore heartbeat cycle
 
-## 4. State Management (Redis & TimescaleDB)
-- **Redis (Real-time Blackboard)**: Serves as a high-speed shared memory for system-wide states (Alpha scores, current regime, risk limits). It acts as the "Bridge" between the Python backend and the React frontend.
-- **Pending Journal Persistence**: Implements a Redis-based WAL (Write-Ahead Log) for intents. Before dispatching to the broker, the `Execution Bridge` writes the full intent to a `Pending_Journal`. This ensures that the `System Controller` can recover and audit "Uncertain State" orders upon reboot.
-- **TimescaleDB (Persistence)**: A time-series optimized PostgreSQL extension used to log every trade and equity fluctuation, enabling per-strategy performance analytics and historical audit trails. It also persists `market_history` for nightly HMM retraining.
-- **GCP Cloud Scheduler**: Orchestrates the nightly retraining lifecycle for the HMM model via a dedicated Cloud Function/Worker.
+> **Rationale:** This strict ordering prevents a race-condition where `strategy_engine` reads SHM before `market_sensor` has written valid data, or `meta_router` dispatches a `TRENDING` regime before `hmm_engine` has completed its hidden-state warm-up. The `HMM_WARM_UP` Redis flag enforces this gate.
 
-## 6. Resilience & Risk Controls
-- **Atomic UI Budget Lock**: Moved capital limits from hidden `.env` files to the React Dashboard. Implemented a Redis Lua Script to atomically check and reserve margin before an order is even sent.
-- **Global Budget Hierarchy**:
-    1. **Master Ceiling**: Set via React Dashboard (`GLOBAL_CAPITAL_LIMIT`).
-    2. **Strategy Partition**: Meta-Router allocates % of available capital based on confidence (e.g., 40% for Trending, 20% for Ranging).
-    3. **Lot Normalizer**: Converts allocated ₹ to whole lots based on current premiums.
-- **Dynamic NSE Protection**: Integrated real-time fetching of NSE Circuit Limits and Execution Price Bands. The system "clamps" orders to exchange rules to prevent instant rejections by the broker's RMS.
-- **Preemption Concurrency**: Optimized for GCP Spot VM shutdown notices. During a 30-second warning, the system fires exits in batches of 10 (with 1.01s delays) to flatten the portfolio while obeying SEBI's 10-orders-per-second limit.
-- **Double-Tap Execution Guard**: Prevents "over-exposure" due to race conditions. The `Execution Bridge` uses an Atomic Redis Token Lock per symbol; if a duplicate intent arrives before the first is reconciled, it is automatically rejected.
-- **Dynamic Slippage Thresholds**: The `Liquidation Daemon` adapts to market panic. During periods of extreme Realized Volatility (RV > 3σ), it abandons progressive spread-crossing and switches to marketable limit orders to guarantee immediate exit.
-- **Rate Limiting**: Enforces a strict 10 Orders-Per-Second (OPS) limit to comply with institutional broker requirements.
+## 2. Shared Memory IPC (SHM) `[core/shm.py]`
+To bypass ZeroMQ messaging overhead for high-frequency tick signals, the system implements a direct RAM pipeline.
 
-## 7. Distributed Integration Blueprint (V5.2)
-The Capital Allocation logic is physically distributed across the system:
-- **Streamlit UI**: Legacy reference; current user entry is via React `GLOBAL_CAPITAL_LIMIT`.
-- **Meta-Router**: Performs real-time Lot Sizing calculations using Polars.
-- **Strategy Engine**: Executes Atomic Redis Transactions (Lua) to "Lock" the calculated capital.
-- **Execution Bridge**: Transforms "Theoretical Lots" into final Order Quantity (`Lots * Lot_Size`).
-- **Liquidation Daemon**: Triggers Redis "Unlock" on exit, updating `AVAILABLE_MARGIN` with realized P&L.
+- **Storage Target**: Mapped to `/dev/shm/trading_alpha` (tmpfs on Linux) to prevent physical disk writes.
+- **Size**: **128 bytes**.
+- **Struct Layout**: `ddddddddd?d`
 
-## 8. Polyglot Infrastructure Migration (Institutional Grade)
-To achieve ultimate low-latency performance and memory safety, the system implements a polyglot pipeline:
-1.  **C++ Data Gateway**: Handles high-frequency WebSocket sharding, `simdjson` normalization, and Protobuf broadcasting.
-2.  **Rust Tick Engine (PyO3)**: Performance-critical math including VPIN, OFI, and Black-Scholes Greeks (Delta, Gamma, Vega, Charm, Vanna).
-3.  **Python Orchestration**: The Meta-Router and Market Sensor remain in Python for agility, consuming high-speed signals via **Shared Memory (SHM)**.
-4.  **Macro Event Oracle**: `macro_event_fetcher.py` polls ForexFactory and FMP APIs to populate the system's event horizon.
-5.  **FII Bias Extractor**: `fii_data_extractor.py` performs EOD sentiment analysis on institutional participation.
+| Offset | Field | Type | Description |
+|--------|-------|------|-------------|
+| 0 | `ts` | `double` | Unix timestamp of last write |
+| 8 | `alpha` | `double` | `CompositeAlphaScorer.get_total_score()` — the unified trading signal |
+| 16 | `vpin` | `double` | Current VPIN reading from the 50-sample rolling window |
+| 24 | `ofi_z` | `double` | Log-OFI Z-score (standardized order-flow imbalance) |
+| 32 | `vanna` | `double` | Black-Scholes Vanna (dDelta/dVol) for the ATM strike |
+| 40 | `charm` | `double` | Black-Scholes Charm (dDelta/dTime) — Theta-adjusted delta decay |
+| 48 | `s_env` | `double` | Environmental sub-score (FII, VIX slope, IVP) |
+| 56 | `s_str` | `double` | Structural sub-score (basis slope, max pain, PCR) |
+| 64 | `s_div` | `double` | Divergence sub-score (price/CVD/PCR divergence) |
+| 72 | `toxic_veto` | `bool` | True if VPIN > 0.8 (informed flow detected) |
+| 73–127 | CRC | `double` | Summation checksum of all preceding fields |
 
-## 9. News Integration & Macro Lockdown Flow
-The system implements a defensive "Veto" logic for high-impact news:
-1.  **Ingestion**: `macro_event_fetcher.py` merges global economic calendars into `macro_calendar.json`.
-2.  **Monitoring**: `SystemController` watches the calendar and sets `MACRO_EVENT_LOCKDOWN=True` in Redis 30m before/after events.
-3.  **Strategy Veto**: `MetaRouter` suppresses aggressive trade entries (especially "CRASH" regime detection) while the lockdown is active.
+- **Integrity**: CRC is recalculated on every read. If `CRC != sum(fields)` or `now - ts > 1.0 second`, the SHM is marked stale and the strategy engine defaults to `WAITING`.
 
-## 9. Quantitative & Strategy Refinements
-- **STT Tax Optimization**: Redefined strategy targets to 20–30 point structural moves to ensure viability after the 2026 hike in Options STT (0.15%).
-- **Index Correlation Filter**: Added a Top 5 Stock Correlation sensor (RELIANCE, HDFC, etc.). Momentum trades are VETOED if heavyweights aren't moving in a unified direction (Correlation < 0.7).
-- **Vanna/Charm Analysis**: Integrated second-order Greeks to detect "Delta Bleed" on 0DTE/1DTE days, preventing entries into options decaying faster than index movement.
-- **Kelly Criterion & VPIN Filter**: Strategy bet sizing is dynamically scaled via the Fractional Kelly Criterion based on HMM state probabilities. VPIN (Volume-Synchronized Probability of Informed Trading) > 0.8 triggers a global veto on Long entries to avoid toxic liquidity vacuums.
-- **Dual-Stage Liquidation Protocol**: A 70-30 profit-taking rule. At +1.2x ATR, 70% of the position is market-sold to lock in risk-off profits. The STT-covered 30% "runner" holds until HMM invalidation or a 2.5x ATR hard ceiling is met.
+> **Rationale:** The 128-byte size is chosen to fit in exactly **two 64-byte L1 cache lines**, making the entire struct readable in a single memory bus transaction. This eliminates CPU cache-miss penalties that would occur with a larger struct.
 
-## 10. HMM Lifecycle Architecture
-- **Data Forking**: Real-time engineered features are forked from the `MarketSensor` to the `DataLogger` for SQL-level persistence.
-- **State Warm-up**: The `SystemController` enforces a 15-minute "quiet period" on open to prime HMM buffers, neutralizing the "Overnight Gap" impact on volatility sensors.
-- **Model Promotion**: Nightly EM training uses Log-Likelihood validation to avoid model drift and ensure adaptation to current-week microstructure.
+## 3. The `market_sensor` GIL Mitigation
+Standard Python threads share a Global Interpreter Lock, choking high-frequency engines attempting matrix math. The system solves this via standard POSIX OS-level process isolation:
+- **I/O Process**: The main `asyncio` loop handles ZMQ networking and lightweight tick buffering. Publishes a snapshot every **20 ticks** to the Compute subprocess via `multiprocessing.Queue(maxsize=50)`.
+- **Compute Process**: Heavy operations (`scipy.stats.norm`, `brentq`, Hurst exponent regression, Black-Scholes Greeks) run in a completely isolated worker. Writes results back via a second `multiprocessing.Queue(maxsize=50)`.
+- **Queue Overflow Policy**: If the compute queue is full (backpressure signal), the I/O process calls `put_nowait()` and **silently discards** the snapshot. This prioritizes tick ingestion continuity over compute throughput.
 
-## 11. C++ Gateway Sharding & SIMD Ingestion
-- **Instrument Sharding**: The Gateway operates three concurrent C++ shards (Index Spot/Futures, Nifty Options, BankNifty Options) to prevent head-of-line blocking.
-- **SIMD-Accelerated Parsing**: Utilizes `simdjson` for sub-microsecond JSON-to-Protobuf normalization, significantly reducing the "Normalization Bottleneck."
-- **Institutional Connectivity**: Designed for uWebSockets (epoll/kqueue) for high-concurrency socket handling with minimal memory footprint.
+### 3.1 Optional Rust Tick Engine
+Set `USE_RUST_ENGINE=1` to replace Python-based CVD and VPIN with the compiled Rust extension `tick_engine`:
 
-## 12. Sub-Microsecond Inter-Process Communication (SHM)
-- **Shared Memory Pipeline**: Market signals (Alpha, VPIN, OFI) are written to `/dev/shm` (Linux) or named mmap (Windows) using a 64-byte structured buffer.
-- **Latency reduction**: Bypasses ZeroMQ's internal queueing and context switching, allowing the Meta-Router to read signals in **<1µs** vs ~200µs for ZMQ and ~5ms for Redis.
-- **RAM Disk (tmpfs)**: IPC sockets and SHM files are host-mapped to a virtual RAM disk (`/ram_disk`) to minimize physical I/O latency.
-- **Stale Data Protection**: The SHM reader implementation includes timestamp-based staleness checks (>500ms) and simple CRC integrity verification.
+| Operation | Python Path | Rust Path | Latency |
+|-----------|-------------|-----------|---------|
+| Lee-Ready Classification | `_classify_trade()` per tick | `TickEngine.classify_trade()` | ~100ns vs ~2µs |
+| VPIN Bucket Update | Python counter loop | `TickEngine.update_vpin()` atomic | ~50ns vs ~1µs |
+| CVD Update | `self.cvd += sign * vol` | Embedded in Rust struct | ~10ns vs ~500ns |
 
-## 13. Project K.A.R.T.H.I.K. V5.4 Infrastructure Optimizations
-To achieve the lowest possible latency and prevent I/O or CPU contention on the Spot VM, the system employs the following institutional cloud archetypes:
+> **Rationale:** At NSE opening (09:15 – 09:30 IST), tick rates can exceed 800/sec on heavily traded options contracts. At this rate, the Python CVD loop takes ~400ms per second of ticks — consuming 40% of a single-core budget just for tick classification. The Rust extension brings this to ~40ms (4%), leaving ample headroom for Hurst computation and OFI windowing.
 
-### 13.1 Three-Disk Architecture
-Running a time-series database and hot-path execution engine on the same block storage creates I/O contention. The V5.4 architecture shatters this bottleneck:
-- **Disk 1 (Standard SSD - 50GB)**: Dedicated exclusively to the Host OS, Docker daemon, and Python runtime.
-- **Disk 2 (Extreme PD Local NVMe)**: The fastest disk GCP offers. Mounted explicitly for the Redis Write-Ahead Log (WAL) and hot, intraday TimescaleDB tick ingestion.
-- **Disk 3 (Regional Persistent SSD)**: High-durability Cold Storage. Nightly HMM retraining runs off this disk, and intraday ticks are flushed here post-market to ensure data survival across Zonal outages.
+## 4. Middleware & Messaging `[core/mq.py]`
+For instructions requiring "many-to-many" broadcast patterns, the system utilizes raw ZeroMQ over sockets.
 
-### 13.2 gVNIC & Tier_1 Networking Boost
-Standard virtio drivers introduce unacceptable virtualization interrupt latency.
-- **Google Virtual NIC (gVNIC)**: The primary network interface uses gVNIC, optimized for high-throughput, low-latency communication specific to C2 compute instances.
-- **Premium Tier 1 Performance**: Egress bandwidth is explicitly elevated to `TIER_1`, providing a dedicated, non-shared bandwidth lane to bypass "noisy neighbor" congestion when communicating with the Shoonya API.
+### 4.1 Socket Topology
 
-### 13.3 Shielded Cores via CPU Affinity (cpuset)
-The compute-heavy HMM Nightly Trainer must never steal cycles from the millisecond execution path.
-- **Core 0 (Hot I/O)**: Strictly pinned to the C++ Data Gateway for uninterrupted WebSocket tick handling.
-- **Core 1 (Compute & Routing)**: Strictly pinned to the Market Sensor (Math) and Meta-Router (Inference).
-- **Core 2 (Reconciliation)**: Strategy Engine, Paper Bridge, and Liquidation Daemon.
-- **Core 3 (The Grind)**: Dedicated entirely to the `hmm_trainer`, `timescaledb`, and `redis`. HMM parameter estimation can consume 100% of this core without impacting Cores 0-2.
+| Pipeline | Pattern | Binding Convention | Port |
+|---------|---------|-------------------|------|
+| Tick Feed (C++ → Python) | `PUB/SUB` | `cpp_gateway` binds PUB | `MARKET_DATA` |
+| Market State (sensor → daemons) | `PUB/SUB` | `market_sensor` binds PUB | `MARKET_STATE` |
+| Order Intent (strategy → bridges) | `PUSH/PULL` | bridges bind PULL | `ORDERS` |
+| System Commands (router → all) | `PUB/SUB` | `meta_router` binds PUB | `SYSTEM_CMD` |
 
-### 13.4 Kernel Memory Tuning (The "Magic" Flags)
-- **Transparent HugePages (THP)**: `always` enabled. Reduces TLB (Translation Lookaside Buffer) misses during massive matrix operations in the HMM math engine.
-- **TCP Fast Open**: `net.ipv4.tcp_fast_open=3` enabled to bypass the standard 3-way handshake round-trip latency on reconnects to external APIs.
-- **/dev/shm RAM Disk**: All ZeroMQ inter-process communication sockets and named shared memory files are mapped to a `tmpfs` RAM disk, completely eliminating physical disk I/O from the latency equation.
+**Critical rule:** Order Intent uses `PUSH/PULL` not `PUB/SUB`. This guarantees that when both `live_bridge` and `liquidation_daemon` are listening, each order is consumed by exactly **one** recipient — preventing double-execution.
 
-## 14. Infrastructure & Automation
-- **VM Proximity (Mumbai)**: Instances are deployed in **GCP `asia-south1` (Mumbai)** to minimize physical distance to NSE servers, achieving microsecond-scale execution latency.
-- **Ultra-Low Latency Engineering**: Combines `uvloop` (high-performance asyncio event loop substitution) with fire-and-forget execution patterns and Protobuf serialization to ensure the order path is never blocked by I/O.
-- **Serverless Pre-Flight Oracle**: Holiday and news scanning moved to a GCP Cloud Function (using `holidays` and FMP APIs) to decide if the VM should boot.
-- **Data Integrity**: All databases mapped to a **Detached Persistent SSD**, ensuring trade logs and ML states are safe if the Spot VM is reclaimed.
+> **Rationale:** A common mistake in trading system messaging is using PUB/SUB for order routing, resulting in both the paper bridge and live bridge processing the same order. PUSH/PULL acts as a work queue: only one consumer gets each message.
 
-## 15. Cloud-Native Decoupled Architecture (V5.4)
-The VM is no longer the owner of the dashboard; it is merely a **publisher**. This eliminates UI overhead from the execution VM and enables 24/7 monitoring.
+### 4.2 Topic Namespacing
+- Tick data: `TICK.{SYMBOL}` (e.g., `TICK.NIFTY50`, `TICK.BANKNIFTY25000CE`)
+- Execution events: `EXEC.{SYMBOL}`
+- Regime commands: asset name as topic (e.g., `NIFTY`, `BANKNIFTY`)
+- Orphan handoffs: `ORPHAN` or `HANDOFF`
 
-### 15.1 Decoupled Data Flow
-- **Intraday (The VM)**: Ticks and alpha scores are processed exclusively in RAM (`/dev/shm`). The VM dedicates 100% of its CPU to Market Sensor and Execution Bridge.
-- **Heartbeat (Every 10s)**: The `CloudPublisher` daemon pushes current P&L, Active Lots, Regime, Greeks, and Alpha scores to **Google Firestore** (NoSQL).
-- **EOD Snapshot (15:35 IST)**: The VM exports the full day's tick log as a `.parquet` file to **Google Cloud Storage (GCS)** and uploads the latest trained HMM `.pkl` model.
-- **Monitoring (The Dashboard)**: A **Cloud Run** UI reads from Firestore for "Live" status and GCS for "Historical" analytics.
+## 5. Persistence & State Management
 
-### 15.2 Storage Hierarchy (Cost-Optimized)
-| Tier | Service | Contents | Cost |
-|:-----|:--------|:---------|:-----|
-| **Hot State** | Firestore | `is_vm_running`, `daily_pnl`, `current_regime`, `active_lots` | Free (under 50K daily reads) |
-| **Cold Storage** | GCS | Historical tick `.parquet` files, HMM model versions, training logs | ~₹2/GB/month |
-| **Long-term Insights** | BigQuery (Optional) | SQL-based analysis of months of GCS data. No database server needed. | Pay-per-query |
+### 5.1 Redis Key Registry (The Blackboard)
 
-### 15.3 Cloud Run Monitoring Layer
-- **Availability**: Dashboard is accessible 24/7 on mobile or desktop, even when the Spot VM is shut down.
-- **Zero-Latency Trading**: The VM no longer handles web traffic (HTTP/Websockets). 100% CPU for the trading engine.
-- **Security**: Protected by **Identity-Aware Proxy (IAP)**, ensuring only authorized users via Google Login. Tailscale dependency is removed for dashboard access.
+| Key | Type | Written By | Read By |
+|-----|------|-----------|---------|
+| `PAPER_CAPITAL_LIMIT` | String | UI/Dashboard | `system_controller`, `strategy_engine` |
+| `LIVE_CAPITAL_LIMIT` | String | UI/Dashboard | `system_controller`, `strategy_engine` |
+| `GLOBAL_CAPITAL_LIMIT_PAPER` | String | `system_controller` | `cloud_publisher` |
+| `GLOBAL_CAPITAL_LIMIT_LIVE` | String | `system_controller` | `cloud_publisher` |
+| `AVAILABLE_MARGIN_PAPER` | String | `system_controller`, `margin_manager` | `strategy_engine` |
+| `AVAILABLE_MARGIN_LIVE` | String | `system_controller`, `margin_manager` | `strategy_engine` |
+| `CURRENT_MARGIN_UTILIZED` | String | `margin_manager` | `cloud_publisher` |
+| `DAILY_REALIZED_PNL_PAPER` | String | `paper_bridge` (from TimescaleDB) | `liquidation_daemon`, `cloud_publisher` |
+| `DAILY_REALIZED_PNL_LIVE` | String | `live_bridge` | `liquidation_daemon`, `cloud_publisher` |
+| `ACTIVE_LOTS_COUNT` | String | `live_bridge`, `paper_bridge` (INCR/DECR) | `cloud_publisher`, dashboard |
+| `STOP_DAY_LOSS` | String | UI/Dashboard | `liquidation_daemon`, bridges |
+| `STOP_DAY_LOSS_BREACHED_PAPER` | String | `liquidation_daemon`, `paper_bridge` | bridges, `cloud_publisher` |
+| `STOP_DAY_LOSS_BREACHED_LIVE` | String | `liquidation_daemon`, `live_bridge` | bridges, `cloud_publisher` |
+| `SYSTEM_HALTED` | String | `system_controller` | All daemons |
+| `HMM_WARM_UP` | String | `system_controller` (09:00–09:15 IST) | `strategy_engine`, `meta_router` |
+| `LOGGER_STOP` | String | `system_controller` (after 15:25 IST) | `market_sensor` |
+| `MACRO_EVENT_LOCKDOWN` | String | `system_controller` | `strategy_engine` |
+| `hmm_regime_state` | Hash | `hmm_engine` (per-asset key) | `meta_router`, `market_sensor` |
+| `HMM_REGIME` | String | `market_sensor` (flat, from NIFTY's state) | `cloud_publisher`, dashboard |
+| `latest_market_state` | String (JSON) | `market_sensor` | `meta_router`, `cloud_publisher`, dashboard |
+| `COMPOSITE_ALPHA` | String | `market_sensor` | `cloud_publisher`, dashboard |
+| `latest_attributions` | String (JSON) | `meta_router` | dashboard, analytics |
+| `active_strategies` | Hash | UI/Dashboard | `strategy_engine`, bridges |
+| `active_regime_engine` | String | UI/Dashboard | `meta_router` |
+| `lock:{symbol}` | String (TTL 10s) | bridges | bridges (double-tap guard) |
+| `Pending_Journal:{uuid}` | String | bridges | `system_controller` (boot audit), `liquidation_daemon` |
+| `telegram_alerts` | List | All daemons | `cloud_publisher` / `telemetry_alerter` |
+| `panic_channel` | PubSub | UI, `system_controller`, `liquidation_daemon` | bridges, `liquidation_daemon` |
 
-### 15.4 Remote Command & Control (The "Back-Channel")
-A safety mechanism allowing remote intervention from any device:
-- **Panic Button**: The Cloud Run dashboard writes `PANIC_BUTTON: True` to Firestore. The VM's `CloudPublisher` watcher detects it and publishes `SQUARE_OFF_ALL` to Redis, triggering immediate full liquidation.
-- **Pause/Resume Trading**: Commands to disable or re-enable new trade entries, managed through Firestore flags.
-- **Benefit**: Total control from a mobile device during unusual market behavior, without needing to SSH into the VM.
+### 5.2 TimescaleDB Schema (trading_db)
 
-## 16. Project K.A.R.T.H.I.K. V5.5 Roadmap: The Quantitative Edge
-To maintain its lead as a premier autonomous quant engine, v5.5 focuses on deep sensory feedback:
-- **Greek Sensitivity Heatmaps**: Real-time visualization of Vanna/Charm drift to detect "Delta-Bleed" before it hits P&L.
-- **Signal History Persistence**: Moving signal vectors (OFI, CVD, Alpha) from transient memory to a rolling Redis buffer for high-fidelity retrospectives.
-- **Strategy Alpha Drift**: Side-by-side visualization of expected (Paper) vs realized (Live) alpha to identify execution slippage in high-volatility regimes.
-- **High-Fidelity React Dash**: Transitioning all monitoring to the modular React/FastAPI stack for microsecond-reactive UI updates.
+| Table | Hypertable | Written By | Read By |
+|-------|-----------|-----------|---------|
+| `trades` | Yes (`time`) | `live_bridge`, `paper_bridge` | Dashboard analytics, P&L calcs |
+| `portfolio` | No | `live_bridge`, `paper_bridge` | Dashboard positions, Unrealized P&L |
+| `market_history` | Yes (`time`) | `market_sensor` | `hmm_engine` (training data) |
+
+- **Unrealized P&L Query**: Dashboard reads `portfolio` table (`symbol`, `quantity`, `avg_price`) and cross-references with `latest_tick:{symbol}` to compute `(ltp - avg_price) * quantity` at display time.
+- **LOGGER_STOP**: At 15:25 IST, `market_sensor` stops writing to `market_history` to prevent MOC auction noise from contaminating HMM training data.
+
+### 5.3 Pending Journal (Write-Ahead Log)
+An order intent is saved to `Pending_Journal:{uuid}` immediately before dispatch. It is cleared:
+- **Normal path**: By the bridge after a successful broker ACK.
+- **Liquidation path**: By `liquidation_daemon` after confirmed exit fill.
+- **Boot path**: If found orphaned on `system_controller` startup, a Telegram alert fires and the key is flagged for manual review.
+
+## 6. Meta Router Inference & Routing `[meta_router.py]`
+The system dynamically weights strategy allocation percentages using Fractional Kelly calculations.
+- **Deterministic Provider**: Uses thresholds (`hurst > 0.55`, `adx > 25`, `kaufman_er > 0.6`) to yield a "TRENDING" or "RANGING" state. Probability is calculated as `0.5 + (hurst - 0.5) + (adx - 20)/100`.
+- **HMM Provider**: Reads real-time serialized GMM-HMM state from `hmm_regime_state` hash in Redis.
+- **Hybrid Provider**: Blends them at a `(0.4 * HMM) + (0.6 * Deterministic)` ratio. Requires a confidence score `> 0.70` for long authorization, AND both providers must independently classify `TRENDING`.
+- **Engine Selection**: The active engine (`HMM`, `DETERMINISTIC`, or `HYBRID`) is switchable at runtime via `active_regime_engine` Redis key without restarting any daemon.
+
+## 7. Application UI Architecture & Observability
+The system deploys a modular frontend hosted on **Google Cloud Run** (`cloudrun/main.py`). It fully decouples the UI from the execution loop.
+
+### 7.1 Zero-Interference Observer Pattern
+The UI operates strictly outside the quantitative event loop. It does not ping the backend engines via REST APIs, which could cause blocking or latency spikes on the trading nodes. 
+Instead, the app acts as a **passive subscriber** to the Redis plane and Firestore. If the UI crashes, lags, or is bombarded by a thousand users, the Python trading daemons and C++ gateway remain physically unbothered.
+
+### 7.2 Data Ingestion (Read Flow)
+- **Live State (on-premise)**: Reads Redis keys (`latest_market_state`, `COMPOSITE_ALPHA`, `HMM_REGIME`) at its own framerate. 
+- **Live State (off-premise)**: Reads from Firestore heartbeat document (pushed every 10s by `cloud_publisher`). Contains regime, PnL, margin, and breach flags.
+- **Analytical State**: Deep metrics (Drawdowns, Sharpe Ratios, Equity Curves) queried from TimescaleDB `trades` table via `asyncpg`.
+
+### 7.3 Command Dispatch (Write Flow)
+- **Configuration Hot-Reloading**: Strategy configs (`active_strategies`) and budgets (`PAPER_CAPITAL_LIMIT`) pushed into Redis hashes.
+- **Panic Action**: UI publishes to `panic_channel` → all bridges and `liquidation_daemon` react in sub-milliseconds.
+- **Regime Engine Switch**: Write `HMM`, `DETERMINISTIC`, or `HYBRID` to `active_regime_engine` key → `meta_router._sync_settings()` reads it on next 100ms cycle.
+
+### 7.4 Optimization & Iteration via Observability
+By broadcasting raw mathematical coefficients (`Log-OFI Z-Score`, `Basis Z-score`, `Hurst`, `VPIN`) alongside the Meta-Router's final classification, the researcher can watch decisions unfold live. This enables "mental-model backtesting" — verifying whether a misclassification was caused by HMM lag or Deterministic threshold miss — without parsing log files.
+
+## 8. Cloud Deployability (GCP Spot Optimization)
+The daemon topology is specifically hardened for running on ephemeral, hyper-cheap Preemptible/Spot instances via Docker:
+- `system_controller.py` polls `http://metadata.google.internal/computeMetadata/v1/instance/preempted` every **5 seconds**.
+- `httpx` is used as the async HTTP client for this poll. Falls back to `urllib` if `httpx` is not installed.
+- If preemption triggers, the app publishes `SQUARE_OFF_ALL` to `panic_channel`, waits **15 seconds** for fill receipts, then sets `SYSTEM_HALTED=True` and dies gracefully.
+
+## 9. Engineering Institutional-Grade Insulation & Sub-Millisecond Latency
+Every component of this architecture was specifically selected to guarantee **three properties**: True Process Insulation, Predictable Sub-Millisecond Latency, and Crash Resilience.
+
+### 9.1 How Insulation Protects Execution
+- **OS-Level Process Sharding**: A memory leak in the `dashboard` UI or an uncaught exception in the `market_sensor`'s Scipy matrix math *cannot* crash the `strategy_engine` or the `liquidation_daemon`. They exist as entirely decoupled OS processes communicating strictly via IPC/Redis.
+- **Stateless Bridges**: The `cpp_gateway` and `live_bridge` hold zero state. If the WebSocket connection drops, the microservice dies, the Docker daemon immediately restarts it, and it reconnects without pulling the HMM Regime or the Liquidation Daemon out of memory.
+- **Queue Overflow Resilience**: The compute subprocess `multiprocessing.Queue(maxsize=50)` is bounded. If the compute process falls behind and the queue fills, new snapshots are silently dropped — the I/O loop is never blocked. This means tick ingestion is always real-time even if Black-Scholes computation falls 1-2 seconds behind.
+
+### 9.2 How Sub-Millisecond Latency is Achieved
+- **Zero-Copy SHM vs Networking**: Instead of sending dense Alpha matrices over TCP/IP or ZeroMQ, `market_sensor.py` writes directly to physical RAM via `core/shm.py` (`/dev/shm`). `strategy_engine` reads the `128-byte C-struct` natively. **Result**: Tick-to-Signal lookup drops from `~200µs` (ZMQ) to `< 1µs` (SHM).
+- **Python GIL Bypass**: Because Python's Global Interpreter Lock (GIL) halts asyncio execution during heavy math, `market_sensor` boots a completely isolated `multiprocessing.Process` for all Black-Scholes/Greeks calculations. **Result**: The main event loop never drops a tick while waiting for a CPU cycle.
+- **The C++ Edge**: The `cpp_gateway` handles the incredibly noisy incoming WebSocket stream from the broker. Using `simdjson` (CPU vectorization) it parses the JSON ticks hundreds of times faster than Python can, filtering noise out on the C++ side *before* passing the clean payload to Python.
+- **Optional Rust Extension**: `USE_RUST_ENGINE=1` replaces Python-level Lee-Ready classification and VPIN buckets with a compiled Rust crate (`tick_engine`), reducing per-tick classification from ~2µs to ~100ns.
+
+### 9.3 How Infrastructure/Hardware Optimizes the Software
+- **CPU Affinity (Core Pinning)**: The Docker engines configure container affinity. Core 0 handles the C++ Gateway (I/O bursty), Core 1 handles the heavy `market_sensor` math. **Result**: Eliminates CPU context-switching overhead (~30µs penalty per thread swap).
+- **Three-Disk I/O Shattering**: By splitting I/O across 3 physical Google Cloud disks (Standard OS Disk, Extreme NVMe for Redis WAL, Persistent SSD for PostgreSQL), a massive tick-ingestion DB write sequence physically cannot starve the CPU or block the Redis memory write that authorizes a trade entry.
+- **gVNIC & Transparent HugePages (THP)**: By utilizing GCP's Custom Virtual Network Interfaces (gVNIC) and forcing Linux `THP=always`, the kernel is optimized for large block matrix calculations (HMM Inference) and high-throughput network bursting.

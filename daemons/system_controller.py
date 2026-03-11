@@ -20,6 +20,12 @@ from zoneinfo import ZoneInfo
 
 import redis.asyncio as redis
 
+try:
+    import asyncpg
+    _HAS_ASYNCPG = True
+except ImportError:
+    _HAS_ASYNCPG = False
+
 # ── Optional HTTP client ────────────────────────────────────────────────────
 try:
     import httpx
@@ -249,6 +255,8 @@ class SystemController:
             now = datetime.now(tz=IST)
             if now.hour == SHUTDOWN_HH and now.minute == SHUTDOWN_MM:
                 logger.critical(f"🔴 HARD STOP: {SHUTDOWN_HH:02d}:{SHUTDOWN_MM:02d} IST reached.")
+                # ── EOD Summary Report (before square-off so positions are still visible) ──
+                await self._eod_summary_report(now)
                 await self._telegram_alert(
                     f"🔴 HARD STOP at {SHUTDOWN_HH:02d}:{SHUTDOWN_MM:02d} IST. Squaring off all positions."
                 )
@@ -260,6 +268,131 @@ class SystemController:
                 logger.info("Graceful shutdown initiated.")
                 break
             await asyncio.sleep(15)
+
+    # ── EOD Daily Summary ────────────────────────────────────────────────────
+
+    async def _eod_summary_report(self, now: datetime):
+        """
+        Collects end-of-day trading statistics from Redis and TimescaleDB,
+        then pushes a structured summary to the Telegram alert queue.
+        Called once at 16:00 IST before EOD square-off.
+        """
+        date_str = now.strftime("%d-%b-%Y")
+        logger.info(f"Generating EOD summary report for {date_str}...")
+
+        try:
+            # ── Capital & Margin (from Redis) ──────────────────────────────────
+            paper_limit    = float(await self.redis.get("GLOBAL_CAPITAL_LIMIT_PAPER") or 0)
+            live_limit     = float(await self.redis.get("GLOBAL_CAPITAL_LIMIT_LIVE") or 0)
+            avail_paper    = float(await self.redis.get("AVAILABLE_MARGIN_PAPER") or 0)
+            avail_live     = float(await self.redis.get("AVAILABLE_MARGIN_LIVE") or 0)
+            margin_used    = float(await self.redis.get("CURRENT_MARGIN_UTILIZED") or 0)
+
+            deployed_paper = paper_limit - avail_paper
+            deployed_live  = live_limit  - avail_live
+
+            # ── Realized P&L (from Redis — updated by bridges after each fill) ──
+            pnl_paper = float(await self.redis.get("DAILY_REALIZED_PNL_PAPER") or 0)
+            pnl_live  = float(await self.redis.get("DAILY_REALIZED_PNL_LIVE")  or 0)
+
+            # ── Active Lots Remaining ─────────────────────────────────────────
+            active_lots = int(await self.redis.get("ACTIVE_LOTS_COUNT") or 0)
+
+            # ── Trade Count & Open Positions (from TimescaleDB) ───────────────
+            trade_count_paper = 0
+            trade_count_live  = 0
+            open_positions    = []
+
+            db_host = os.getenv("DB_HOST", "localhost")
+            db_dsn  = f"postgres://trading_user:trading_pass@{db_host}:5432/trading_db"
+
+            if _HAS_ASYNCPG:
+                try:
+                    pool = await asyncpg.create_pool(db_dsn, min_size=1, max_size=2, command_timeout=10)
+                    async with pool.acquire() as conn:
+                        # Trade count for today
+                        row = await conn.fetchrow("""
+                            SELECT
+                                COUNT(*) FILTER (WHERE execution_type = 'Paper') AS paper_count,
+                                COUNT(*) FILTER (WHERE execution_type = 'Live')  AS live_count
+                            FROM trades
+                            WHERE time >= CURRENT_DATE
+                        """)
+                        if row:
+                            trade_count_paper = row["paper_count"] or 0
+                            trade_count_live  = row["live_count"]  or 0
+
+                        # Open positions (non-zero quantity)
+                        positions = await conn.fetch("""
+                            SELECT symbol, strategy_id, execution_type, quantity, avg_price, realized_pnl
+                            FROM portfolio
+                            WHERE quantity != 0
+                            ORDER BY execution_type, symbol
+                        """)
+                        for p in positions:
+                            open_positions.append(
+                                f"  {'📄' if p['execution_type'] == 'Paper' else '🟢'} "
+                                f"{p['symbol']} | Qty: {p['quantity']:+d} | "
+                                f"Avg: ₹{float(p['avg_price']):,.2f} | "
+                                f"Strat: {p['strategy_id']}"
+                            )
+                    await pool.close()
+                except Exception as db_err:
+                    logger.error(f"EOD DB query failed: {db_err}")
+                    open_positions = ["  ⚠️ DB unavailable — check manually"]
+
+            # ── Format the Summary Message ────────────────────────────────────
+            pnl_paper_emoji = "🟢" if pnl_paper >= 0 else "🔴"
+            pnl_live_emoji  = "🟢" if pnl_live  >= 0 else "🔴"
+
+            lines = [
+                f"📊 *EOD Daily Summary — {date_str}*",
+                "",
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                "💰 *Capital*",
+                f"  Paper Limit:    ₹{paper_limit:>10,.0f}",
+                f"  Available:      ₹{avail_paper:>10,.0f}",
+                f"  Deployed Today: ₹{deployed_paper:>10,.0f}",
+                "",
+                f"  Live  Limit:    ₹{live_limit:>10,.0f}",
+                f"  Available:      ₹{avail_live:>10,.0f}",
+                f"  Deployed Today: ₹{deployed_live:>10,.0f}",
+                f"  Margin Utilized:₹{margin_used:>10,.0f}",
+                "",
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                "📈 *Realized P&L*",
+                f"  {pnl_paper_emoji} Paper: ₹{pnl_paper:>+10,.2f}",
+                f"  {pnl_live_emoji}  Live:  ₹{pnl_live:>+10,.2f}",
+                "",
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                "📋 *Trades Executed Today*",
+                f"  📄 Paper: {trade_count_paper} trades",
+                f"  🟢 Live:  {trade_count_live} trades",
+                f"  🎯 Active Lots Open: {active_lots}",
+                "",
+            ]
+
+            if open_positions:
+                lines += [
+                    "━━━━━━━━━━━━━━━━━━━━━━━━",
+                    "🔓 *Open Positions (will be squared off)*",
+                ] + open_positions + [""]
+            else:
+                lines += [
+                    "━━━━━━━━━━━━━━━━━━━━━━━━",
+                    "✅ *No open positions.*",
+                    "",
+                ]
+
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+            summary_msg = "\n".join(lines)
+
+            await self._telegram_alert(summary_msg)
+            logger.info("EOD summary report sent to Telegram.")
+
+        except Exception as e:
+            logger.error(f"EOD summary report failed: {e}")
+            await self._telegram_alert(f"⚠️ EOD summary report failed: {e}")
 
     # ── HMM & Data Synchronization ──────────────────────────────────────────
 
