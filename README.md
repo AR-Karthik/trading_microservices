@@ -263,6 +263,7 @@ Copy `.env.example` (rename `.env`) and fill in:
 | `TAILSCALE_AUTH_KEY` | Tailscale reusable auth key |
 | `SHOONYA_USER` / `SHOONYA_PWD` | Shoonya brokerage credentials |
 | `SHOONYA_APP_KEY` / `SHOONYA_VC` | API key and vendor code |
+| `SHOONYA_FACTOR2` | Base32 Static Secret Key for TOTP generation |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Alert notifications |
 
 ---
