@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 
 import redis.asyncio as aioredis
 from dotenv import load_dotenv
+import httpx
 
 load_dotenv()
 
@@ -31,7 +32,7 @@ logger = logging.getLogger("CloudPublisher")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 EOD_SNAPSHOT_HH, EOD_SNAPSHOT_MM = 15, 35
-HEARTBEAT_INTERVAL_S = 10
+HEARTBEAT_INTERVAL_S = 60  # Reduced frequency for hybrid pipeline
 
 
 class CloudPublisher:
@@ -43,23 +44,44 @@ class CloudPublisher:
         self.gcs_bucket = os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models")
         self.firestore_db = None
         self.gcs_client = None
+        self.external_ip = None
         self._eod_done_today = False
 
     async def _init_cloud_clients(self):
         """Lazily initialize Google Cloud clients."""
         try:
             from google.cloud import firestore, storage
+            self._firestore_module = firestore
             self.firestore_db = firestore.AsyncClient()
             self.gcs_client = storage.Client()
             logger.info("Google Cloud clients (Firestore + GCS) initialized.")
+            
+            # Fetch External IP for Hybrid Proxy logic
+            self.external_ip = await self._fetch_external_ip()
+            logger.info(f"Detected External IP: {self.external_ip}")
         except Exception as e:
             logger.error(f"Failed to initialize cloud clients: {e}")
             logger.warning("Cloud publishing will be disabled. Running in local-only mode.")
 
+    async def _fetch_external_ip(self):
+        """Fetch VM's public IP from GCP metadata server."""
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip",
+                    headers={"Metadata-Flavor": "Google"},
+                    timeout=5.0
+                )
+                if resp.status_code == 200:
+                    return resp.text.strip()
+        except Exception as e:
+            logger.error(f"Failed to fetch external IP: {e}")
+        return "127.0.0.1" # Fallback
+
     async def _heartbeat_loop(self):
         """
-        Every 10 seconds, read key metrics from Redis and push to Firestore.
-        The Cloud Run dashboard reads from this Firestore document.
+        Every 60 seconds, update VM status and IP in Firestore.
+        Real-time metrics are now pulled directly from the VM API by the dashboard.
         """
         while True:
             try:
@@ -67,78 +89,59 @@ class CloudPublisher:
                     await asyncio.sleep(HEARTBEAT_INTERVAL_S)
                     continue
 
-                # Gather state from Redis
-                pipe = self.redis.pipeline()
-                pipe.get("HMM_REGIME")
-                pipe.get("DAILY_REALIZED_PNL_PAPER")
-                pipe.get("DAILY_REALIZED_PNL_LIVE")
-                pipe.get("CURRENT_MARGIN_UTILIZED")
-                pipe.get("GLOBAL_CAPITAL_LIMIT")
-                pipe.get("ACTIVE_LOTS_COUNT")
-                pipe.get("COMPOSITE_ALPHA")
-                pipe.get("STOP_DAY_LOSS_BREACHED_PAPER")
-                pipe.get("STOP_DAY_LOSS_BREACHED_LIVE")
+                # Fetch live metrics from Redis for fallback visibility
+                alpha = await self.redis.get("COMPOSITE_ALPHA") or "0.0"
+                regime = await self.redis.get("HMM_REGIME") or "UNKNOWN"
                 
-                # Extended data for v6.5 Analytics 
-                pipe.get("HMM_REGIME_NIFTY")
-                pipe.get("HMM_REGIME_BANKNIFTY")
-                pipe.get("HMM_REGIME_SENSEX")
-                pipe.get("latest_market_state")
-                pipe.get("latest_attributions")
-                
-                results = await pipe.execute()
-
-                # Parse the extended JSON payloads
-                mkt_state_raw = results[12]
-                attr_raw = results[13]
-                mkt_state = json.loads(mkt_state_raw) if mkt_state_raw else {}
-
+                # Minimal state for discovery
                 state = {
-                    # User's Explicit Baseline Payload
-                    "regime": results[0] or "UNKNOWN",
-                    "daily_pnl_paper": float(results[1] or 0),
-                    "daily_pnl_live": float(results[2] or 0),
-                    "margin_utilized": float(results[3] or 0),
-                    "capital_limit": float(results[4] or 0),
-                    "active_lots": int(results[5] or 0),
-                    "composite_alpha": float(results[6] or 0),
-                    "stop_day_loss_breached_paper": results[7] == "True",
-                    "stop_day_loss_breached_live": results[8] == "True",
-                    "is_vm_running": True,
+                    "vm_public_ip": self.external_ip,
+                    "status": "ONLINE",
                     "last_heartbeat": datetime.now(IST).isoformat(),
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                    
-                    # Extended v6.5 Feature Additions
-                    "regimes": {
-                        "NIFTY": results[9] or "WAITING",
-                        "BANKNIFTY": results[10] or "WAITING",
-                        "SENSEX": results[11] or "WAITING"
-                    },
-                    "vpin": mkt_state.get("vpin", 0),
-                    "greeks": {
-                        "vanna": mkt_state.get("vanna", 0),
-                        "charm": mkt_state.get("charm", 0)
-                    },
-                    "system_health": "HEALTHY"
+                    "system_health": "HEALTHY",
+                    "live_alpha": float(alpha),
+                    "live_regime": regime
                 }
 
-                # Push to Firestore Live State
-                doc_ref = self.firestore_db.collection("trading_state").document("live")
+                # Push to Firestore Metadata (Discovery)
+                doc_ref = self.firestore_db.collection("system").document("metadata")
                 await doc_ref.set(state, merge=True)
-
-                # Write attributions to Firestore (Tab 7 Analysis)
-                if attr_raw:
-                    attributions = json.loads(attr_raw)
-                    for attr in attributions:
-                        attr_ref = self.firestore_db.collection("attributions").document()
-                        await attr_ref.set(attr)
-                    # Clear processed attributions
-                    await self.redis.delete("latest_attributions")
+                
+                # Also sync current operating config for visibility when VM is OFF
+                await self._sync_config_to_firestore()
 
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")
 
             await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+
+    async def _sync_config_to_firestore(self):
+        """Syncs the latest trading configuration from Redis to Firestore."""
+        try:
+            if not self.firestore_db or not self._firestore_module:
+                logger.warning("Firestore DB or module not initialized. Skipping config sync.")
+                return
+
+            # Match keys used in dashboard/api/main.py
+            paper_cap = await self.redis.get("PAPER_CAPITAL_LIMIT") or "0"
+            live_cap = await self.redis.get("LIVE_CAPITAL_LIMIT") or "0"
+            regime = await self.redis.get("CONFIG:REGIME_ENGINE") or "UNKNOWN"
+            risk_paper = await self.redis.get("CONFIG:MAX_RISK_PER_TRADE_PAPER") or "0"
+            risk_live = await self.redis.get("CONFIG:MAX_RISK_PER_TRADE_LIVE") or "0"
+
+            config_data = {
+                "paper_capital_limit": float(paper_cap),
+                "live_capital_limit": float(live_cap),
+                "regime_engine": regime,
+                "max_risk_paper": float(risk_paper),
+                "max_risk_live": float(risk_live),
+                "updated_at": self._firestore_module.SERVER_TIMESTAMP
+            }
+            self.firestore_db.collection("system").document("config").set(config_data, merge=True)
+            # logger.info("Config synced to Firestore.")
+        except Exception as e:
+            logger.error(f"Config sync failed: {e}")
 
     async def _command_watcher(self):
         """

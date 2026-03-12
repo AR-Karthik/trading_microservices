@@ -86,6 +86,34 @@ async def init_db(pool):
         except Exception:
             pass
 
+        # 4. GAP FIX (Audit Finding 22): Equity Curve for Charting
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS equity_curve (
+                time TIMESTAMPTZ NOT NULL,
+                execution_type TEXT NOT NULL,
+                equity NUMERIC(15, 2) NOT NULL,
+                drawdown NUMERIC(15, 2) NOT NULL,
+                PRIMARY KEY (time, execution_type)
+            );
+        """)
+        try:
+             await conn.execute("SELECT create_hypertable('equity_curve', 'time', if_not_exists => TRUE);")
+        except Exception:
+            pass
+
+        # 5. GAP FIX (Audit Finding 22): Simulation Runs for What-If Analysis
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS simulation_runs (
+                run_id UUID PRIMARY KEY,
+                time TIMESTAMPTZ NOT NULL,
+                engine TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                pnl NUMERIC(15, 2) NOT NULL,
+                trades INTEGER NOT NULL,
+                config_snapshot JSONB
+            );
+        """)
+
         logger.info("Database schema initialized.")
 
 async def calculate_slippage_and_fees(order):

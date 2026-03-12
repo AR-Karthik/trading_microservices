@@ -49,15 +49,29 @@ logger = logging.getLogger("DataGateway")
 IST = ZoneInfo("Asia/Kolkata")
 
 # Symbols simulated / watched
-SYMBOLS_UNDERLYING = ["NIFTY50", "BANKNIFTY", "RELIANCE", "HDFC", "INFY", "TCS", "ICICIBANK", "SENSEX"]
+SYMBOLS_UNDERLYING = ["NIFTY50", "BANKNIFTY", "SENSEX", "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "ITC", "SBIN", "AXISBANK", "KOTAKBANK", "LT"]
 
 # Shoonya API Tokens Mapping
 TOKEN_TO_SYMBOL = {
     "26000": "NIFTY50",
     "26009": "BANKNIFTY",
-    "1":     "SENSEX"
+    "2885":  "RELIANCE",
+    "1333":  "HDFCBANK",
+    "1594":  "INFY",
+    "11536": "TCS",
+    "4963":  "ICICIBANK",
+    "1":     "SENSEX",
+    "1660":  "ITC",
+    "3045":  "SBIN",
+    "5900":  "AXISBANK",
+    "1922":  "KOTAKBANK",
+    "11483": "LT"
 }
-SHOONYA_SUBSCRIPTIONS = ["NSE|26000", "NSE|26009", "BSE|1"]
+SHOONYA_SUBSCRIPTIONS = [
+    "NSE|26000", "NSE|26009", "NSE|2885", "NSE|1333", 
+    "NSE|1594", "NSE|11536", "NSE|4963", "BSE|1",
+    "NSE|1660", "NSE|3045", "NSE|5900", "NSE|1922", "NSE|11483"
+]
 
 # Default dynamic lot sizes (updated from broker at 09:01 IST)
 DEFAULT_LOT_SIZES = {"NIFTY50": 65, "BANKNIFTY": 30}
@@ -86,7 +100,7 @@ class DataGateway:
 
         self._prices = {
             "NIFTY50": 22350.0, "BANKNIFTY": 47200.0, "SENSEX": 73000.0,
-            "RELIANCE": 1480.0, "HDFC": 1680.0,
+            "RELIANCE": 1480.0, "HDFCBANK": 1680.0,
             "INFY": 1820.0, "TCS": 3940.0, "ICICIBANK": 1230.0
         }
         self._oi = {s: random.randint(800_000, 1_500_000) for s in SYMBOLS_UNDERLYING}
@@ -99,6 +113,8 @@ class DataGateway:
         ws_host = host.replace("https", "wss").replace("NorenWClientTP", "NorenWSTP/")
         self.api = NorenApi(host=host, websocket=ws_host)
         self.tick_queue = asyncio.Queue()
+        self.active_option_tokens = {} # token -> symbol (e.g. "12345" -> "NIFTY26MAR22350CE")
+        self.last_expiry_sync = 0
 
     # ── Authentication ───────────────────────────────────────────────────────
 
@@ -109,19 +125,28 @@ class DataGateway:
         vc = os.getenv("SHOONYA_VC")
         app_key = os.getenv("SHOONYA_APP_KEY")
         imei = os.getenv("SHOONYA_IMEI")
+        sim_mode = os.getenv("SIMULATION_MODE", "false").lower() == "true"
+
+        if sim_mode:
+            logger.warning("⚠️ SIMULATION_MODE active. Skipping Shoonya login.")
+            return True
 
         if not all([user, pwd, factor2, vc, app_key, imei]):
             logger.error("Missing Shoonya credentials in .env file.")
             return False
 
-        totp = pyotp.TOTP(factor2).now()
-        res = self.api.login(userid=user, password=pwd, twoFA=totp, vendor_code=vc, api_secret=app_key, imei=imei)
+        try:
+            totp = pyotp.TOTP(factor2).now()
+            res = self.api.login(userid=user, password=pwd, twoFA=totp, vendor_code=vc, api_secret=app_key, imei=imei)
 
-        if res and res.get("stat") == "Ok":
-            logger.info("✅ Shoonya Login OK")
-            return True
-        else:
-            logger.error(f"❌ Shoonya Login failed: {res}")
+            if res and res.get("stat") == "Ok":
+                logger.info("✅ Shoonya Login OK")
+                return True
+            else:
+                logger.error(f"❌ Shoonya Login failed: {res}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Shoonya Login exception: {e}")
             return False
 
     # ── Gateway Startup ──────────────────────────────────────────────────────
@@ -135,6 +160,7 @@ class DataGateway:
             self._lot_size_scheduler(),
             self._staleness_watchdog(),
             self._circuit_breaker_monitor(),
+            self._dynamic_subscription_manager(),
         )
 
     # ── Strike Selection (SRS Phase 2) ───────────────────────────────────────
@@ -168,6 +194,7 @@ class DataGateway:
         Uses asyncio.Queue to bridge the synchronous callback to the async event loop.
         """
         logger.info("Starting live Shoonya WebSocket integration...")
+        sim_mode = os.getenv("SIMULATION_MODE", "false").lower() == "true"
 
         if not self._login():
             logger.error("Could not log in to Shoonya. Tick stream will not start.")
@@ -210,10 +237,11 @@ class DataGateway:
             return feed_opened.wait(20.0)
             
         # Wait for socket to open with a generous timeout for staging environments
-        await asyncio.to_thread(_wait_for_feed)
-        if not feed_opened.is_set():
-            logger.error("WebSocket failed to connect within 20 seconds. Streaming aborted.")
-            return
+        if not sim_mode:
+            await asyncio.to_thread(_wait_for_feed)
+            if not feed_opened.is_set():
+                logger.error("WebSocket failed to connect within 20 seconds. Falling back to simulation if requested.")
+                if not sim_mode: return
 
         while True:
             if self._system_halted:
@@ -221,14 +249,21 @@ class DataGateway:
                 continue
 
             try:
-                # Read from queue
-                raw_tick = await self.tick_queue.get()
+                # Read from queue or simulate
+                if sim_mode:
+                    await asyncio.sleep(random.uniform(0.1, 0.5))
+                    symbol = random.choice(SYMBOLS_UNDERLYING)
+                    base_price = self._prices.get(symbol, 1000.0)
+                    price = base_price * (1 + random.uniform(-0.0005, 0.0005))
+                    raw_tick = {'t': 'tk', 'tk': next(k for k,v in TOKEN_TO_SYMBOL.items() if v == symbol), 'lp': str(price), 'v': str(random.randint(1, 100))}
+                else:
+                    raw_tick = await self.tick_queue.get()
 
                 if raw_tick.get('t') not in ('tk', 'tf'):
                     continue
 
                 token = raw_tick.get('tk')
-                symbol = TOKEN_TO_SYMBOL.get(token)
+                symbol = TOKEN_TO_SYMBOL.get(token) or self.active_option_tokens.get(token)
 
                 if not symbol:
                     continue
@@ -294,6 +329,88 @@ class DataGateway:
             except Exception as e:
                 logger.error(f"Tick stream processing error: {e}")
                 await asyncio.sleep(0.1)
+
+    # ── Dynamic Option Subscriptions ──────────────────────────────────────────
+
+    async def _dynamic_subscription_manager(self):
+        """Periodically refreshes ATM option subscriptions based on spot price."""
+        logger.info("Dynamic option subscription manager active.")
+        while True:
+            if self._system_halted:
+                await asyncio.sleep(10)
+                continue
+                
+            try:
+                # 1. Selection logic for NIFTY & BANKNIFTY
+                for idx in ["NIFTY50", "BANKNIFTY"]:
+                    spot = self._prices.get(idx)
+                    if not spot: continue
+                    
+                    # Fetch Expiry (Once per day or if stale)
+                    now_ts = datetime.now().timestamp()
+                    if now_ts - self.last_expiry_sync > 3600: # 1h
+                        await self._sync_expiries()
+                        self.last_expiry_sync = now_ts
+                    
+                    # Select ideal strikes
+                    ce_strike = self.get_optimal_strike(spot, "call")
+                    pe_strike = self.get_optimal_strike(spot, "put")
+                    
+                    # Construct and Subscribe
+                    await self._ensure_option_subscription(idx, ce_strike, "CE")
+                    await self._ensure_option_subscription(idx, pe_strike, "PE")
+                    
+            except Exception as e:
+                logger.error(f"Subscription manager error: {e}")
+            
+            await asyncio.sleep(300) # Every 5 mins
+
+    async def _sync_expiries(self):
+        """Fetches the nearest expiry for indices from Shoonya."""
+        if os.getenv("SIMULATION_MODE", "false").lower() == "true":
+            return
+            
+        try:
+            # Fetch for NIFTY as baseline
+            res = self.api.get_option_chain(exchange='NFO', tradingsymbol='NIFTY', strike=22000, count=1)
+            if res and isinstance(res, dict) and res.get('stat') == 'Ok':
+                # Example response: {'stat': 'Ok', 'values': [{'exDate': '26-MAR-2026', ...}]}
+                values = res.get('values', [])
+                if values:
+                    expiry = values[0].get('exDate') # e.g. "26-MAR-2026"
+                    # Format for scrip search: "26MAR"
+                    parts = expiry.split('-')
+                    formatted = f"{parts[0]}{parts[1]}"
+                    await self.redis_client.set("CURRENT_EXPIRY_DATE", formatted)
+                    logger.info(f"Sync'd current expiry: {formatted}")
+        except Exception as e:
+            logger.error(f"Expiry sync failed: {e}")
+
+    async def _ensure_option_subscription(self, idx: str, strike: float, otype: str):
+        """Finds token for strike/type and subscribes if not active."""
+        if os.getenv("SIMULATION_MODE", "false").lower() == "true":
+            # Generate fake token for simulation
+            fake_token = f"OPT_{idx}_{int(strike)}_{otype}"
+            self.active_option_tokens[fake_token] = f"{idx}_{int(strike)}_{otype}"
+            return
+
+        expiry = await self.redis_client.get("CURRENT_EXPIRY_DATE") or "26MAR"
+        search_text = f"{idx} {expiry} {int(strike)} {otype}"
+        
+        try:
+            res = self.api.search_scrip(exchange='NFO', searchtext=search_text)
+            if res and res.get('stat') == 'Ok':
+                values = res.get('values', [])
+                if values:
+                    token = values[0].get('token')
+                    tsym = values[0].get('tsym')
+                    
+                    if token not in self.active_option_tokens:
+                        logger.info(f"New ATM Option found: {tsym} (Token: {token})")
+                        self.active_option_tokens[token] = tsym
+                        self.api.subscribe(f"NFO|{token}")
+        except Exception as e:
+            logger.error(f"Option subscription failed for {search_text}: {e}")
 
     # ── Lot Size Scheduler ───────────────────────────────────────────────────
 

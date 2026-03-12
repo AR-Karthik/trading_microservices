@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import redis
 import os
 import json
@@ -114,6 +115,32 @@ def get_state():
         "cvd_flips": ms.get("cvd_flip_ticks", 0)
     }
 
+    # Extract Power Five Matrix from Z-Scores in Redis
+    # These are populated by MarketSensor
+    power_five = {}
+    for idx in ["NIFTY", "BANKNIFTY", "SENSEX"]:
+        power_five[idx] = {}
+        # Fetch the top 5 weighted components for each index
+        components = {
+            "NIFTY": ["HDFCBANK", "RELIANCE", "ICICIBANK", "INFY", "ITC"],
+            "BANKNIFTY": ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"],
+            "SENSEX": ["HDFCBANK", "RELIANCE", "ICICIBANK", "ITC", "LT"]
+        }[idx]
+        
+        # Fetch the top 5 weighted components for each index from power_five_matrix hash
+        for sym in components:
+            raw = r.hget("power_five_matrix", sym)
+            if raw:
+                try:
+                    data = json.loads(raw)
+                    power_five[idx][sym] = data.get("z_score", 0.0)
+                except:
+                    power_five[idx][sym] = 0.0
+            else:
+                # Fallback to old zscore key if hash not yet populated
+                z_raw = r.get(f"zscore:{sym}")
+                power_five[idx][sym] = round(float(z_raw or 0), 2)
+
     return {
         "alpha_score": ms.get("s_total", 0.0),
         "hmm_regime": r.get("hmm_regime") or "UNKNOWN",
@@ -125,34 +152,12 @@ def get_state():
         "paper_capital_limit": float(r.get("PAPER_CAPITAL_LIMIT") or 0),
         "live_capital_limit": float(r.get("LIVE_CAPITAL_LIMIT") or 0),
         "signals": deep_signals,
-        "power_five": {
-            "NIFTY": {
-                "HDFCBANK": round(random.uniform(-2, 2), 1),
-                "RELIANCE": round(random.uniform(-2, 2), 1),
-                "ICICIBANK": round(random.uniform(-2, 2), 1),
-                "INFY": round(random.uniform(-2, 2), 1),
-                "ITC": round(random.uniform(-2, 2), 1),
-            },
-            "BANKNIFTY": {
-                "HDFCBANK": round(random.uniform(-2, 2), 1),
-                "ICICIBANK": round(random.uniform(-2, 2), 1),
-                "SBIN": round(random.uniform(-2, 2), 1),
-                "AXISBANK": round(random.uniform(-2, 2), 1),
-                "KOTAKBANK": round(random.uniform(-2, 2), 1),
-            },
-            "SENSEX": {
-                "HDFCBANK": round(random.uniform(-2, 2), 1),
-                "RELIANCE": round(random.uniform(-2, 2), 1),
-                "ICICIBANK": round(random.uniform(-2, 2), 1),
-                "ITC": round(random.uniform(-2, 2), 1),
-                "LT": round(random.uniform(-2, 2), 1),
-            }
-        },
-        "exit_path_70_30": {
-            "tp1": ms.get("tp1_price", 0.0),
-            "tp2": ms.get("tp2_price", 0.0),
-            "progress": ms.get("exit_progress", 45) # percentage
-        }
+        "power_five": power_five,
+        "exit_path_70_30": ms.get("exit_path_70_30", {
+            "tp1": 0.0,
+            "tp2": 0.0,
+            "progress": 0.0
+        })
     }
 
 @app.get("/strategies", response_model=List[StrategyStatus])
@@ -211,19 +216,37 @@ def update_capital(req: CapitalRequest):
 # --- NEW: Tab 7: Engine Simulation ---
 @app.get("/regime/simulation")
 def get_regime_simulation():
-    # Return mock comparative performance for the day
+    r = get_redis()
+    engines = ["HMM", "DETERMINISTIC", "HYBRID"]
+    assets = ["NIFTY", "BANKNIFTY", "SENSEX"]
+    
+    ranking = []
+    equity_growth = [] # Simplified history
+    
+    for eng in engines:
+        total_pnl = 0
+        total_trades = 0
+        for asset in assets:
+            # Derived from shadow_lots and price movements (pseudo-PNL)
+            # In a full sys, we'd have shadow_pnl keys. 
+            # For now, we fetch from a summary hash populated by Sidecar/MetaRouter
+            pnl_val = r.hget("shadow_pnl_summary", f"{eng}:{asset}")
+            total_pnl += float(pnl_val or 0)
+            total_trades += int(r.hget("shadow_trade_count", f"{eng}:{asset}") or 0)
+        
+        ranking.append({
+            "engine": eng, 
+            "pnl": round(total_pnl, 2), 
+            "drawdown": round(total_pnl * 0.1, 2), # Approx
+            "trades": total_trades
+        })
+
+    # Pull last 5 entries from history for the growth chart
+    # (In prod, we'd use a Timescale query)
     return {
-        "engine_ranking": [
-            {"engine": "HMM", "pnl": 5200, "drawdown": 1200, "trades": 12},
-            {"engine": "Deterministic", "pnl": -800, "drawdown": 4500, "trades": 28},
-            {"engine": "Hybrid", "pnl": 3400, "drawdown": 500, "trades": 8}
-        ],
+        "engine_ranking": ranking,
         "equity_growth": [
-            {"time": "09:15", "HMM": 0, "Deterministic": 0, "Hybrid": 0},
-            {"time": "10:00", "HMM": 1200, "Deterministic": -500, "Hybrid": 800},
-            {"time": "11:00", "HMM": 2500, "Deterministic": -1200, "Hybrid": 1500},
-            {"time": "12:00", "HMM": 3800, "Deterministic": 400, "Hybrid": 2200},
-            {"time": "13:00", "HMM": 5200, "Deterministic": -800, "Hybrid": 3400}
+            {"time": "LIVE", "HMM": ranking[0]["pnl"], "Deterministic": ranking[1]["pnl"], "Hybrid": ranking[2]["pnl"]}
         ]
     }
 
@@ -471,6 +494,11 @@ def get_sizing_inspector():
         "unit_size_base": round(unit_size, 4),
         "assets": assets_data
     }
+
+
+# --- Static Files (Serve Frontend) ---
+# NOTE: Mount this AFTER all API routes to avoid shadowing
+app.mount("/", StaticFiles(directory="dashboard/frontend", html=True), name="static")
 
 
 if __name__ == "__main__":

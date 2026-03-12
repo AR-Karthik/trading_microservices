@@ -1,34 +1,92 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>🦸‍♂️ PROJECT K.A.R.T.H.I.K.</title>
+    <title>⚡ PROJECT K.A.R.T.H.I.K. </title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap"
+        rel="stylesheet">
     <style>
-        body { font-family: 'Inter', sans-serif; background-color: #05070a; color: #e6edf3; -webkit-tap-highlight-color: transparent; }
-        .glass { background: rgba(13, 17, 23, 0.7); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(48, 54, 61, 0.4); }
-        .accent-glow { box-shadow: 0 0 30px rgba(0, 210, 255, 0.15); }
-        .mono { font-family: 'JetBrains Mono', monospace; }
-        @keyframes pulse-soft { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-        .animate-pulse-soft { animation: pulse-soft 2s infinite; }
-        .safe-bottom { padding-bottom: calc(env(safe-area-inset-bottom) + 5rem); }
-        .scroll-hide::-webkit-scrollbar { display: none; }
-        .grid-signal { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.75rem; }
+        :root {
+            --theme-accent: #00D2FF;
+            --theme-accent-rgb: 0, 210, 255;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #000000;
+            color: #e6edf3;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .glass {
+            background: rgba(13, 17, 23, 0.8);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(48, 54, 61, 0.5);
+        }
+
+        .oled-card {
+            background: #0a0a0a;
+            border: 1px solid #1a1a1a;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .oled-card:hover {
+            border-color: var(--theme-accent);
+            box-shadow: 0 0 20px rgba(var(--theme-accent-rgb), 0.1);
+        }
+
+        .mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .tab-active {
+            color: var(--theme-accent);
+            border-bottom: 2px solid var(--theme-accent);
+        }
+
+        @keyframes pulse-red {
+
+            0%,
+            100% {
+                box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.4);
+            }
+
+            50% {
+                box-shadow: 0 0 20px 0 rgba(248, 81, 73, 0.4);
+            }
+        }
+
+        .animate-panic {
+            animation: pulse-red 2s infinite;
+        }
+
+        .scroll-hide::-webkit-scrollbar {
+            display: none;
+        }
+
+        .z-matrix {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+            gap: 0.5rem;
+        }
     </style>
     <script>
         tailwind.config = {
             theme: {
                 extend: {
                     colors: {
-                        dark: '#05070a',
-                        card: '#0d1117',
-                        accent: '#00D2FF',
+                        dark: '#000000',
+                        card: '#0a0a0a',
+                        accent: 'var(--theme-accent)',
                         success: '#3fb950',
                         danger: '#f85149',
                         warning: '#d2990d',
@@ -38,340 +96,703 @@
         }
     </script>
 </head>
+
 <body class="overflow-x-hidden">
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useRef } = React;
+        const { useState, useEffect, useRef, memo } = React;
+
+        const TabIcon = ({ name, active }) => {
+            const icons = {
+                warroom: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>,
+                playground: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg>,
+                evolution: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>,
+                audit: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" /></svg>,
+                health: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" /></svg>,
+                history: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>,
+                sim: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" /></svg>
+            };
+            return <div className={active ? 'text-accent' : 'text-gray-500'}>{icons[name]}</div>;
+        };
+
+        const formatCurrency = (v) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(v);
+
+        // --- SUB-COMPONENTS (Lifted Outside) ---
+
+        const WarRoom = memo(({ state, positions, mode, handlePanic }) => {
+            const [selectedIdx, setSelectedIdx] = useState('NIFTY');
+            const powerData = state.power_five?.[selectedIdx] || {};
+
+            return (
+                <div className="space-y-6 animate-in fade-in duration-500">
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div className="oled-card p-5 rounded-2xl flex flex-col justify-between h-48">
+                            <div className="flex justify-between items-center mb-2">
+                                <h3 className="text-[10px] font-black uppercase text-gray-500">Power Five Matrix (Z)</h3>
+                                <div className="flex gap-2">
+                                    {['NIFTY', 'BANKNIFTY', 'SENSEX'].map(idx => (
+                                        <button key={idx} onClick={() => setSelectedIdx(idx)} className={`text-[8px] font-black px-1.5 py-0.5 rounded ${selectedIdx === idx ? 'bg-accent text-dark' : 'text-gray-600 hover:text-gray-400'}`}>
+                                            {idx === 'BANKNIFTY' ? 'BN' : idx[0]}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                            <div className="z-matrix mt-2">
+                                {Object.entries(powerData).map(([sym, z]) => (
+                                    <div key={sym} className="text-center">
+                                        <div className={`text-md font-black mono ${z > 1.5 ? 'text-success' : (z < -1.5 ? 'text-danger' : 'text-accent')}`}>{z > 0 ? '+' : ''}{(z || 0).toFixed(1)}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="oled-card p-5 rounded-2xl flex flex-col items-center justify-center h-48 border-l-4 border-accent">
+                            <span className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-2">Regime Orchestrator</span>
+                            <div className="text-3xl font-black uppercase text-white">{state.hmm_regime}</div>
+                            <div className={`mt-2 px-3 py-1 rounded text-[10px] font-bold ${state.alpha_score > 0 ? 'bg-success/20 text-success' : 'bg-danger/20 text-danger'}`}>Alpha: {(state.alpha_score || 0).toFixed(1)}</div>
+                        </div>
+
+                        <div className="oled-card p-5 rounded-2xl h-48">
+                            <div className="flex justify-between items-center mb-4">
+                                <h3 className="text-[10px] font-black uppercase text-gray-500">70:30 Exit Path</h3>
+                                <span className="text-[9px] font-bold text-accent">LTP: Tracking...</span>
+                            </div>
+                            <div className="relative w-full h-4 bg-white/5 rounded-full overflow-hidden mb-6">
+                                <div className="absolute left-0 h-full bg-accent transition-all duration-1000" style={{ width: `${state.exit_path_70_30?.progress || 0}%` }}></div>
+                                <div className="absolute left-[70%] top-0 h-full w-[2px] bg-white border-none shadow-[0_0_10px_white]"></div>
+                            </div>
+                            <div className="flex justify-between text-[10px] mono">
+                                <div className="text-gray-400">Entry: <span className="text-white">---</span></div>
+                                <div className="text-gray-400">TP1: <span className="text-success">{(state.exit_path_70_30?.tp1 || 0).toFixed(1)}</span></div>
+                                <div className="text-gray-400">TP2: <span className="text-accent">{(state.exit_path_70_30?.tp2 || 0).toFixed(1)}</span></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div className="oled-card rounded-2xl p-6">
+                            <h3 className="text-xs font-black uppercase mb-6 flex justify-between">
+                                <span>Active Engagements</span>
+                                <span className="text-accent">{positions.length}</span>
+                            </h3>
+                            <div className="space-y-4 max-h-96 overflow-y-auto scroll-hide">
+                                {positions.map((p, i) => (
+                                    <div key={i} className="flex justify-between items-center border-b border-white/5 pb-4">
+                                        <div>
+                                            <div className="font-bold text-sm tracking-tight">{p.symbol}</div>
+                                            <div className="text-[10px] text-gray-500 uppercase font-black">{p.strategy_id}</div>
+                                        </div>
+                                        <div className="text-right">
+                                            <div className="mono font-bold text-sm">{formatCurrency(p.unrealized_pnl)}</div>
+                                            <div className={`text-[10px] font-bold ${p.quantity > 0 ? 'text-success' : 'text-danger'}`}>{p.quantity > 0 ? 'LONG' : 'SHORT'} {Math.abs(p.quantity)}</div>
+                                        </div>
+                                    </div>
+                                ))}
+                                {positions.length === 0 && <div className="text-center py-20 text-gray-700 font-bold uppercase text-[10px] tracking-widest">Awaiting Signal...</div>}
+                            </div>
+                        </div>
+
+                        <div className="space-y-6">
+                            <div className="oled-card p-6 rounded-2xl border-l-4 border-danger animate-panic">
+                                <h3 className="text-xs font-black text-danger uppercase mb-4">Tactical Emergency</h3>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <button onClick={handlePanic} className="bg-danger text-white py-4 rounded-xl font-black text-xs uppercase hover:brightness-125 transition-all focus:ring-4 ring-danger/20">Liquidate All</button>
+                                    <button className="bg-white/5 border border-white/10 text-gray-400 py-4 rounded-xl font-black text-xs uppercase cursor-not-allowed">Halt VM</button>
+                                </div>
+                            </div>
+                            <div className="oled-card p-6 rounded-2xl">
+                                <h3 className="text-xs font-black text-gray-500 uppercase mb-4">Capital Allocation</h3>
+                                <div className="space-y-4">
+                                    <div className="flex justify-between items-end">
+                                        <span className="text-[10px] text-gray-400 font-bold uppercase">Margin Avail ({mode})</span>
+                                        <span className="text-xl font-black mono text-white">{formatCurrency(mode === 'Paper' ? state.available_margin_paper : state.available_margin_live)}</span>
+                                    </div>
+                                    <div className="w-full bg-white/5 h-2 rounded-full"><div className="bg-success h-full rounded-full" style={{ width: '85%' }}></div></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        });
+
+        const Playground = memo(({ localEngine, setLocalEngine, localCapital, setLocalCapital, maxLoss, setMaxLoss, hurst, setHurst, confidence, setConfidence, vpin, setVpin, handleHotSwap, mode }) => (
+            <div className="space-y-6 oled-card p-8 rounded-3xl animate-in slide-in-from-bottom-5 duration-500">
+                <div className="flex justify-between items-start mb-8">
+                    <div>
+                        <h3 className="text-xl font-black text-white">Regime Orchestrator</h3>
+                        <p className="text-xs text-gray-500 mt-1 uppercase font-bold tracking-widest">Modular V6.2 Logic Control</p>
+                    </div>
+                    <button onClick={handleHotSwap} className="bg-accent text-dark px-8 py-3 rounded-full font-black text-[12px] uppercase shadow-lg shadow-accent/20 hover:scale-105 active:scale-95 transition-all">Apply & Hot-Swap</button>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-12">
+                    <div className="space-y-10">
+                        <div className="grid grid-cols-2 gap-6">
+                            <div>
+                                <label className="text-[10px] font-black uppercase text-gray-500 block mb-4">Engine Selector</label>
+                                <select value={localEngine} onChange={(e) => setLocalEngine(e.target.value)} className="w-full bg-white/5 border border-white/10 p-4 rounded-2xl text-xs font-bold text-white outline-none active:border-accent">
+                                    <option value="HMM">HMM (Probabilistic)</option>
+                                    <option value="Deterministic">Deterministic (Z-Score)</option>
+                                    <option value="Hybrid">Hybrid (Consensus Mode)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label className="text-[10px] font-black uppercase text-gray-500 block mb-4">Base Capital (₹)</label>
+                                <input 
+                                    type="text" 
+                                    value={localCapital} 
+                                    onChange={(e) => {
+                                        const val = e.target.value.replace(/[^0-9]/g, '');
+                                        setLocalCapital(val);
+                                    }} 
+                                    onBlur={(e) => {
+                                        if (e.target.value === '') setLocalCapital(0);
+                                    }}
+                                    className="w-full bg-white/5 border border-white/10 p-4 rounded-2xl text-xs font-bold text-white outline-none focus:border-accent" 
+                                />
+                                <div className="text-[8px] mt-2 text-gray-600 font-bold uppercase tracking-widest">{mode === 'Paper' ? 'Paper Budget' : 'Live Actual Budget'}</div>
+                            </div>
+                            <div>
+                                <label className="text-[10px] font-black uppercase text-gray-500 block mb-4">
+                                    {mode === 'Paper' ? 'Paper' : 'Live'} Max Loss / Trade (₹)
+                                    <span className="ml-2 text-accent mono">{Number(maxLoss).toLocaleString('en-IN')}</span>
+                                </label>
+                                <input
+                                    type="text"
+                                    value={maxLoss}
+                                    onChange={(e) => {
+                                        const val = e.target.value.replace(/[^0-9]/g, '');
+                                        setMaxLoss(val);
+                                    }}
+                                    onBlur={(e) => { if (e.target.value === '') setMaxLoss('2500'); }}
+                                    className="w-full bg-white/5 border border-white/10 p-4 rounded-2xl text-xs font-bold text-white outline-none focus:border-accent"
+                                />
+                                <div className="text-[8px] mt-2 text-gray-600 font-bold uppercase tracking-widest">Hybrid Sizing: ₹ / (ATR × 1.0)</div>
+                            </div>
+                        </div>
+                        <div className="space-y-8">
+                            {[
+                                { label: 'Hurst Threshold', val: hurst, set: setHurst, min: 0.4, max: 0.7 },
+                                { label: 'Hybrid Confidence Floor', val: confidence, set: setConfidence, min: 0.5, max: 0.95 },
+                                { label: 'VPIN Toxicity Limit', val: vpin, set: setVpin, min: 0.5, max: 1.0 }
+                            ].map(s => (
+                                <div key={s.label}>
+                                    <div className="flex justify-between text-[10px] font-black uppercase text-gray-400 mb-2">
+                                        <span>{s.label}</span>
+                                        <span className="text-accent">{s.val.toFixed(2)}</span>
+                                    </div>
+                                    <input type="range" className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-accent" min={s.min} max={s.max} step="0.01" value={s.val} onChange={(e) => s.set(Number(e.target.value))} />
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="bg-accent/5 rounded-3xl p-8 border border-accent/10 flex flex-col">
+                        <h4 className="text-[10px] font-black uppercase text-accent mb-4">Simulation Context</h4>
+                        <div className="space-y-6 italic text-[11px] leading-relaxed text-gray-400 flex-1">
+                            <p>You are currently managing the <strong>{localEngine}</strong> engine with a <strong>{mode}</strong> theoretical capital of <strong>{formatCurrency(localCapital)}</strong>.</p>
+                            <p>Hot-swapping will immediately redirect the Meta-Router signal stream to use these parameters. Live trading is ONLY enabled when Actual Capital {'>'} 0.</p>
+                        </div>
+                        <div className="mt-8 pt-6 border-t border-white/5 text-[9px] text-gray-600 font-bold uppercase">
+                            Risk Warning: Parameter shifts during market hours may cause slippage in position realignment.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        ));
+
+        const SimulationTab = memo(({ simulation }) => (
+            <div className="space-y-8 animate-in zoom-in-95 duration-500">
+                <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+                    {(simulation.engine_ranking || []).map((r, i) => (
+                        <div key={i} className={`oled-card p-6 rounded-2xl border-t-4 ${r.pnl > 0 ? 'border-success' : 'border-danger'}`}>
+                            <div className="text-[10px] text-gray-500 font-bold uppercase mb-2">{r.engine} Engine</div>
+                            <div className={`text-2xl font-black mono ${r.pnl > 0 ? 'text-success' : 'text-danger'}`}>{formatCurrency(r.pnl)}</div>
+                            <div className="text-[9px] text-gray-600 mt-4 flex justify-between">
+                                <span>Max DD: ₹{r.drawdown}</span>
+                                <span>Trades: {r.trades}</span>
+                            </div>
+                        </div>
+                    ))}
+                    <div className="oled-card p-6 rounded-2xl bg-accent/5 flex flex-col justify-center">
+                        <div className="text-[9px] text-accent font-black uppercase tracking-widest mb-1">Optimal Engine</div>
+                        <div className="text-lg font-bold text-white">Hybrid Consensys</div>
+                    </div>
+                </div>
+
+                <div className="oled-card p-8 rounded-3xl">
+                    <h3 className="text-xs font-black uppercase text-gray-500 mb-8">What-If: Engine Equity Growth (Today)</h3>
+                    <div className="h-64 flex items-end gap-1 px-4 relative">
+                        {(simulation.equity_growth || []).map((d, i) => (
+                            <div key={i} className="flex-1 flex flex-col justify-end gap-0.5 group relative">
+                                <div className="bg-success/40 w-full rounded-t-sm" style={{ height: `${(d.HMM / 6000) * 100}%` }} title={`HMM: ${d.HMM}`}></div>
+                                <div className="bg-accent/40 w-full" style={{ height: `${(d.Hybrid / 6000) * 100}%` }} title={`Hybrid: ${d.Hybrid}`}></div>
+                                <div className="bg-danger/40 w-full" style={{ height: `${Math.max(2, (d.Deterministic / 6000) * 100)}%` }} title={`Det: ${d.Deterministic}`}></div>
+                                <span className="absolute -bottom-6 left-0 text-[8px] font-bold text-gray-600 whitespace-nowrap">{d.time}</span>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="mt-12 flex gap-8 justify-center">
+                        <div className="flex items-center gap-2 text-[10px] font-bold"><div className="w-3 h-3 bg-success/40"></div> HMM</div>
+                        <div className="flex items-center gap-3 text-[10px] font-bold"><div className="w-3 h-3 bg-accent/40"></div> Hybrid</div>
+                        <div className="flex items-center gap-2 text-[10px] font-bold"><div className="w-3 h-3 bg-danger/40"></div> Deterministic</div>
+                    </div>
+                </div>
+            </div>
+        ));
+
+        const Evolution = memo(({ evolution }) => (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 animate-in zoom-in-95 duration-500">
+                <div className="oled-card p-6 rounded-3xl">
+                    <h3 className="text-xs font-black uppercase text-gray-500 mb-6">HMM Leaderboard (Last 30 Docs)</h3>
+                    <table className="w-full text-left text-[11px]">
+                        <thead>
+                            <tr className="text-gray-500 border-b border-white/5 uppercase">
+                                <th className="pb-4">Version</th>
+                                <th className="pb-4">Log-LL</th>
+                                <th className="pb-4">Shadow P/L</th>
+                                <th className="pb-4">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody className="mono">
+                            {(evolution.leaderboard || []).map((m, i) => (
+                                <tr key={i} className="border-b border-white/5 hover:bg-white/5 transition-colors">
+                                    <td className="py-4 font-bold">{m.version}</td>
+                                    <td className="py-4">{m.log_likelihood}</td>
+                                    <td className={`py-4 ${m.shadow_pnl > 0 ? 'text-success' : 'text-danger'}`}>{formatCurrency(m.shadow_pnl)}</td>
+                                    <td className="py-4"><span className={`px-2 py-0.5 rounded ${m.status === 'LIVE' ? 'bg-accent/20 text-accent' : 'text-gray-600'}`}>{m.status}</span></td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div className="space-y-8">
+                    <div className="oled-card p-6 rounded-3xl text-center">
+                        <h3 className="text-xs font-black uppercase text-gray-500 mb-6">Transition Matrix Heatmap</h3>
+                        <div className="grid grid-cols-3 gap-2 max-w-[300px] mx-auto">
+                            {(evolution.transition_matrix || []).flat().map((v, i) => (
+                                <div key={i} className="aspect-square flex items-center justify-center rounded-lg mono text-xs font-bold transition-all hover:scale-110" style={{ backgroundColor: `rgba(var(--theme-accent-rgb), ${v})`, color: v > 0.5 ? '#000' : '#fff' }}>
+                                    {Math.round(v * 100)}%
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                    <div className="oled-card p-6 rounded-3xl flex justify-between items-center shadow-2xl shadow-success/10 border-success/20">
+                        <div>
+                            <h3 className="text-xs font-black text-gray-500 uppercase">Data Mix Gauge</h3>
+                            <div className="text-lg font-bold mt-1 text-white">{(evolution.data_mix?.live || 0)}% Live DNA / {(evolution.data_mix?.seed || 0)}% Seed</div>
+                        </div>
+                        <button className="bg-success text-dark px-6 py-3 rounded-xl font-black text-[10px] uppercase shadow-lg hover:scale-105 active:scale-95 transition-all">Approve v1.4.3-rc1</button>
+                    </div>
+                </div>
+            </div>
+        ));
+
+        const Performance = memo(({ attribution }) => (
+            <div className="space-y-8 animate-in fade-in duration-500 pb-20">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                    <div className="oled-card p-8 rounded-3xl">
+                        <h3 className="text-xs font-black uppercase text-gray-500 mb-8">P&L Stacked Bar (Daily Breakdown)</h3>
+                        <div className="flex items-end gap-2 h-48 px-4">
+                            {(attribution.pnl_stack || []).map((d, i) => (
+                                <div key={i} className="flex-1 flex flex-col items-center group relative">
+                                    <div className="w-full bg-accent/30 h-10 rounded-t-sm" title="Momentum"></div>
+                                    <div className="w-full bg-success/40 h-14" title="Fade"></div>
+                                    <div className="w-full bg-warning/30 h-6" title="A-VWAP"></div>
+                                    <span className="text-[8px] text-gray-600 mt-2 rotate-45">{d.date.slice(5)}</span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="oled-card p-8 rounded-3xl">
+                        <h3 className="text-xs font-black uppercase text-gray-500 mb-8">Signal Efficiency Scatter</h3>
+                        <div className="relative h-48 border-l border-b border-white/10">
+                            {(attribution.efficiency || []).map((e, i) => (
+                                <div key={i} className="absolute rounded-full flex items-center justify-center text-[8px] font-black text-dark group hover:brightness-125 transition-all shadow-lg"
+                                    style={{
+                                        left: `${(e.win_rate - 0.4) * 200}%`,
+                                        bottom: `${(e.profit_factor - 1.0) * 50}%`,
+                                        width: `${e.frequency}px`, height: `${e.frequency}px`,
+                                        backgroundColor: e.profit_factor > 1.5 ? '#00D2FF' : '#f85149'
+                                    }}>
+                                    <span className="opacity-0 group-hover:opacity-100 transition-opacity bg-white p-2 rounded -top-10 absolute whitespace-nowrap text-dark shadow-xl z-50 font-bold">{e.name}: PF {e.profit_factor} | WR {Math.round(e.win_rate * 100)}%</span>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="flex justify-between text-[8px] font-bold text-gray-600 px-1 mt-2">
+                            <span>Win Rate (0.4 - 0.8)</span>
+                            <span>Signal Edge Index</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        ));
+
+        const Health = memo(({ telemetry }) => (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-in slide-in-from-right-5 duration-500">
+                <div className="oled-card p-8 rounded-3xl col-span-2 space-y-12 shadow-xl">
+                    <div className="flex justify-between items-center">
+                        <h3 className="text-xs font-black text-gray-500 uppercase">NSE vs BSE Latency race</h3>
+                        <span className="text-[10px] text-accent mono">Jitter: {'<'} 0.2ms</span>
+                    </div>
+                    <div className="space-y-10">
+                        <div>
+                            <div className="flex justify-between text-[10px] font-black mb-2 uppercase"><span>NSE Ingest (Colo)</span> <span className="text-success">{(telemetry.nse_latency_ms || 0).toFixed(1)}ms</span></div>
+                            <div className="w-full bg-white/5 h-1.5 rounded-full"><div className="bg-success h-full rounded-full transition-all duration-300 shadow-[0_0_10px_#3fb950]" style={{ width: `${((telemetry.nse_latency_ms || 0) / 30) * 100}%` }}></div></div>
+                        </div>
+                        <div>
+                            <div className="flex justify-between text-[10px] font-black mb-2 uppercase"><span>BSE Ingest (Colo)</span> <span className="text-warning">{(telemetry.bse_latency_ms || 0).toFixed(1)}ms</span></div>
+                            <div className="w-full bg-white/5 h-1.5 rounded-full"><div className="bg-warning h-full rounded-full transition-all duration-300 shadow-[0_0_10px_#d2990d]" style={{ width: `${((telemetry.bse_latency_ms || 0) / 30) * 100}%` }}></div></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="space-y-6">
+                    <div className="oled-card p-6 rounded-3xl border-danger/10">
+                        <h3 className="text-[10px] font-black text-gray-500 uppercase mb-2">Slippage Leakage</h3>
+                        <div className="text-4xl font-black text-danger mono tracking-tighter">₹{(telemetry.slippage_leakage_inr || 0).toFixed(0)}</div>
+                        <p className="text-[9px] text-gray-600 mt-1 uppercase font-bold">Lost to execution latency</p>
+                    </div>
+                    <div className="oled-card p-6 rounded-3xl border-white/5">
+                        <h3 className="text-[10px] font-black text-gray-500 uppercase mb-4">Core Load Heatmap</h3>
+                        <div className="flex gap-2">
+                            {(telemetry.cpu_cores || []).map((c, i) => (
+                                <div key={i} className="flex-1 aspect-square rounded-xl flex items-center justify-center mono text-[10px] font-bold transition-all shadow-inner" style={{ backgroundColor: `rgba(var(--theme-accent-rgb), ${c / 100})`, color: c > 50 ? '#000' : '#fff' }}>
+                                    C{i + 1}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        ));
+
+        // ── Signal Attribution UI (v8.0) ─────────────────────────────────────
+        const BARRIER_COLORS = {
+            UPPER:    { bg: 'rgba(63,185,80,0.7)',   text: 'text-success',  label: '▲ Upper (TP Hit)' },
+            LOWER:    { bg: 'rgba(248,81,73,0.7)',   text: 'text-danger',   label: '▼ Lower (SL Hit)' },
+            VERTICAL: { bg: 'rgba(210,153,13,0.7)',  text: 'text-warning',  label: '| Vertical (Stall)' },
+            PANIC:    { bg: 'rgba(200,50,255,0.7)',  text: 'text-purple-400', label: '⚡ Panic (RV Spike)' },
+        };
+
+        const SignalAttribution = memo(({ barrierData, sizing }) => {
+            const summary = barrierData.summary || { UPPER: 0, LOWER: 0, VERTICAL: 0, PANIC: 0 };
+            const feed    = barrierData.feed    || [];
+            const total   = barrierData.total   || 0;
+            const assets  = sizing.assets       || [];
+
+            // Simple inline donut via SVG
+            const DONUT_R = 60, CIRC = 2 * Math.PI * DONUT_R;
+            const keys = ['UPPER', 'LOWER', 'VERTICAL', 'PANIC'];
+            let offset = 0;
+            const slices = keys.map(k => {
+                const frac = total > 0 ? summary[k] / total : 0.25;
+                const dash  = frac * CIRC;
+                const slice = { key: k, dash, offset, color: BARRIER_COLORS[k].bg };
+                offset += dash;
+                return slice;
+            });
+
+            return (
+                <div className="space-y-8 animate-in fade-in duration-500 pb-20">
+
+                    {/* Row 1: Donut + Sizing Inspector */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+
+                        {/* Barrier Donut Chart */}
+                        <div className="oled-card p-8 rounded-3xl flex flex-col items-center">
+                            <h3 className="text-xs font-black uppercase text-gray-500 mb-6 self-start">
+                                Barrier Attribution Breakdown
+                            </h3>
+                            <svg width="160" height="160" viewBox="0 0 160 160">
+                                <circle cx="80" cy="80" r={DONUT_R} fill="none" stroke="#111" strokeWidth="28"/>
+                                {slices.map(s => (
+                                    <circle key={s.key} cx="80" cy="80" r={DONUT_R} fill="none"
+                                        stroke={s.color} strokeWidth="28"
+                                        strokeDasharray={`${s.dash} ${CIRC - s.dash}`}
+                                        strokeDashoffset={-s.offset}
+                                        style={{ transform: 'rotate(-90deg)', transformOrigin: '80px 80px' }}/>
+                                ))}
+                                <text x="80" y="80" textAnchor="middle" dominantBaseline="middle"
+                                    className="mono" style={{ fill: '#e6edf3', fontSize: '22px', fontWeight: 800 }}>
+                                    {total}
+                                </text>
+                                <text x="80" y="98" textAnchor="middle"
+                                    style={{ fill: '#666', fontSize: '9px', fontWeight: 700 }}>TOTAL</text>
+                            </svg>
+                            <div className="grid grid-cols-2 gap-x-8 gap-y-2 mt-4 w-full max-w-xs">
+                                {keys.map(k => (
+                                    <div key={k} className="flex items-center gap-2">
+                                        <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: BARRIER_COLORS[k].bg }}></div>
+                                        <span className="text-[10px] font-bold text-gray-400">{BARRIER_COLORS[k].label.split('(')[0].trim()}</span>
+                                        <span className={`text-[11px] font-black mono ml-auto ${BARRIER_COLORS[k].text}`}>{summary[k]}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Sizing Inspector */}
+                        <div className="oled-card p-8 rounded-3xl">
+                            <h3 className="text-xs font-black uppercase text-gray-500 mb-6">
+                                Hybrid Sizing Inspector <span className="text-accent">₹2,500 / ATR×f</span>
+                            </h3>
+                            <div className="mb-4 text-[10px] text-gray-500">
+                                <span className="mono">current_atr=</span>
+                                <span className="mono text-accent">{(sizing.current_atr || 20).toFixed(2)}</span>
+                                &nbsp;&nbsp;
+                                <span className="mono">unit_base=</span>
+                                <span className="mono text-accent">{(sizing.unit_size_base || 0).toFixed(2)}</span> lots
+                            </div>
+                            <table className="w-full text-left text-[11px]">
+                                <thead>
+                                    <tr className="text-gray-500 border-b border-white/5 uppercase text-[9px]">
+                                        <th className="pb-3">Asset</th>
+                                        <th className="pb-3">Score</th>
+                                        <th className="pb-3">f (Half-Kelly)</th>
+                                        <th className="pb-3">Final Lots</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="mono">
+                                    {assets.map((a, i) => (
+                                        <tr key={i} className="border-b border-white/5 hover:bg-white/5 transition-colors">
+                                            <td className="py-3 font-bold text-accent">{a.asset}</td>
+                                            <td className="py-3">{(a.score || 0).toFixed(3)}</td>
+                                            <td className="py-3">{(a.weight || 0).toFixed(4)}</td>
+                                            <td className={`py-3 font-black ${a.lots > 5 ? 'text-success' : 'text-white'}`}>{(a.lots || 0).toFixed(2)}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    {/* Row 2: Recent Exit Feed */}
+                    <div className="oled-card p-8 rounded-3xl">
+                        <h3 className="text-xs font-black uppercase text-gray-500 mb-6">
+                            Recent Exit Feed <span className="text-gray-600">(last 20 exits · live)</span>
+                        </h3>
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-left text-[11px] min-w-[600px]">
+                                <thead>
+                                    <tr className="text-gray-500 border-b border-white/5 uppercase text-[9px]">
+                                        <th className="pb-3">Time</th>
+                                        <th className="pb-3">Symbol</th>
+                                        <th className="pb-3">Barrier</th>
+                                        <th className="pb-3">Trigger</th>
+                                        <th className="pb-3">Exit Price</th>
+                                        <th className="pb-3">P&L Pts</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="mono">
+                                    {feed.length === 0 && (
+                                        <tr><td colSpan="6" className="text-center py-12 text-gray-700 uppercase text-[10px] tracking-widest font-bold">No exits recorded this session</td></tr>
+                                    )}
+                                    {feed.map((ex, i) => {
+                                        const bc = BARRIER_COLORS[ex.barrier] || BARRIER_COLORS.LOWER;
+                                        return (
+                                            <tr key={i} className="border-b border-white/5 hover:bg-white/5 transition-colors">
+                                                <td className="py-3 text-gray-500">{ex.time}</td>
+                                                <td className="py-3 font-bold text-white">{ex.symbol}</td>
+                                                <td className="py-3">
+                                                    <span className={`px-2 py-0.5 rounded-full text-[9px] font-black ${bc.text}`}
+                                                        style={{ background: bc.bg.replace('0.7', '0.15') }}>
+                                                        {ex.barrier}
+                                                    </span>
+                                                </td>
+                                                <td className="py-3 text-gray-400 max-w-[200px] truncate">{ex.reason}</td>
+                                                <td className="py-3">{(ex.exit_price || 0).toFixed(2)}</td>
+                                                <td className={`py-3 font-black ${ex.pnl_pts >= 0 ? 'text-success' : 'text-danger'}`}>
+                                                    {ex.pnl_pts >= 0 ? '+' : ''}{(ex.pnl_pts || 0).toFixed(1)}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            );
+        });
+
 
         const Dashboard = () => {
             const [mode, setMode] = useState('Paper');
-            const [activeTab, setActiveTab] = useState('overview');
-            const [isDesktop, setIsDesktop] = useState(window.innerWidth >= 1024);
+            const [activeTab, setActiveTab] = useState('warroom');
             const [state, setState] = useState({
-                alpha_score: 0,
-                hmm_regime: 'UNKNOWN',
-                gex_sign: 'UNKNOWN',
-                system_halted: false,
-                macro_lockdown: false,
-                available_margin_paper: 0,
-                available_margin_live: 0,
-                signals: {}
+                alpha_score: 0, hmm_regime: 'UNKNOWN', gex_sign: 'UNKNOWN',
+                system_halted: false, macro_lockdown: false,
+                available_margin_paper: 0, available_margin_live: 0,
+                signals: {}, power_five: {}, exit_path_70_30: { tp1: 0, tp2: 0, progress: 0 }
             });
             const [positions, setPositions] = useState([]);
-            const [strategies, setStrategies] = useState([]);
-            const [analytics, setAnalytics] = useState({ equity_curve: [], total_pnl: 0 });
-            const chartRef = useRef(null);
-            const chartInstance = useRef(null);
+            const [evolution, setEvolution] = useState({ leaderboard: [], transition_matrix: [], data_mix: { seed: 50, live: 50 } });
+            const [telemetry, setTelemetry] = useState({ nse_latency_ms: 0, bse_latency_ms: 0, slippage_leakage_inr: 0, cpu_cores: [0, 0, 0] });
+            const [attribution, setAttribution] = useState({ pnl_stack: [], efficiency: [] });
+            const [simulation, setSimulation] = useState({ engine_ranking: [], equity_growth: [] });
+            const [barrierData, setBarrierData] = useState({ summary: { UPPER: 0, LOWER: 0, VERTICAL: 0, PANIC: 0 }, feed: [], total: 0 });
+            const [sizing, setSizing] = useState({ current_atr: 20, max_risk_per_trade: 2500, unit_size_base: 125, assets: [] });
+            const [paperMaxLoss, setPaperMaxLoss] = useState("2500"); // Paper max loss/trade (₹)
+            const [liveMaxLoss,  setLiveMaxLoss]  = useState("2500"); // Live max loss/trade  (₹)
 
-            const API_BASE = window.location.hostname === 'localhost' ? 'http://localhost:8000' : '';
+            // Interactive Orchestrator State (Local Only)
+            const [localEngine, setLocalEngine] = useState('Hybrid');
+            const [paperCapital, setPaperCapital] = useState("1000000"); // Default 1M Paper
+            const [liveCapital, setLiveCapital] = useState("0");        // Default 0 Live (Safe)
+            const [hurst, setHurst] = useState(0.55);
+            const [confidence, setConfidence] = useState(0.70);
+            const [vpin, setVpin] = useState(0.82);
 
-            useEffect(() => {
-                const handleResize = () => setIsDesktop(window.innerWidth >= 1024);
-                window.addEventListener('resize', handleResize);
-                return () => window.removeEventListener('resize', handleResize);
-            }, []);
+            const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? 'http://127.0.0.1:8000' : '';
 
             const fetchData = async () => {
                 try {
-                    const [stateRes, portRes, stratRes, analRes] = await Promise.all([
-                        fetch(`${API_BASE}/state`),
-                        fetch(`${API_BASE}/portfolio?mode=${mode}`),
-                        fetch(`${API_BASE}/strategies`),
-                        fetch(`${API_BASE}/analytics?mode=${mode}`)
+                    const [s, p, e, t, a, sim, ba, sz] = await Promise.all([
+                        fetch(`${API_BASE}/state`).then(r => r.json()),
+                        fetch(`${API_BASE}/portfolio?mode=${mode}`).then(r => r.json()),
+                        fetch(`${API_BASE}/models/evolution`).then(r => r.json()),
+                        fetch(`${API_BASE}/health/telemetry`).then(r => r.json()),
+                        fetch(`${API_BASE}/attribution/strategy`).then(r => r.json()),
+                        fetch(`${API_BASE}/regime/simulation`).then(r => r.json()),
+                        fetch(`${API_BASE}/barriers/attribution`).then(r => r.json()),
+                        fetch(`${API_BASE}/sizing/inspector`).then(r => r.json()),
                     ]);
-                    setState(await stateRes.json());
-                    setPositions(await portRes.json());
-                    setStrategies(await stratRes.json());
-                    setAnalytics(await analRes.json());
-                } catch (err) {
-                    console.error("Fetch failed", err);
-                }
+                    setState(s);
+                    // Update capitals from backend only on initial load or if they match the default
+                    // In a production system, we'd use a 'lastSync' timestamp to avoid overwriting user edits
+                    if (state.paper_capital_limit === 0 && paperCapital === "1000000") {
+                         setPaperCapital(s.paper_capital_limit.toString());
+                    }
+                    if (state.live_capital_limit === 0 && liveCapital === "0") {
+                         setLiveCapital(s.live_capital_limit.toString());
+                    }
+                    
+                    setPositions(p);
+                    setEvolution(e);
+                    setTelemetry(t);
+                    setAttribution(a);
+                    setSimulation(sim);
+                    setBarrierData(ba);
+                    setSizing(sz);
+                } catch (err) { console.error("Poll failed", err); }
             };
 
             useEffect(() => {
-                fetchData();
-                const interval = setInterval(fetchData, 3000);
-                return () => clearInterval(interval);
+                const colors = mode === 'Paper' ? { hex: '#00D2FF', rgb: '0, 210, 255' } : { hex: '#3fb950', rgb: '63, 185, 80' };
+                document.documentElement.style.setProperty('--theme-accent', colors.hex);
+                document.documentElement.style.setProperty('--theme-accent-rgb', colors.rgb);
             }, [mode]);
 
             useEffect(() => {
-                if (chartRef.current && analytics.equity_curve.length > 0) {
-                    if (chartInstance.current) chartInstance.current.destroy();
-                    const ctx = chartRef.current.getContext('2d');
-                    chartInstance.current = new Chart(ctx, {
-                        type: 'line',
-                        data: {
-                            labels: analytics.equity_curve.map(d => new Date(d.time).toLocaleTimeString()),
-                            datasets: [{
-                                label: 'Net Equity',
-                                data: analytics.equity_curve.map(d => d.equity),
-                                borderColor: '#00D2FF',
-                                backgroundColor: 'rgba(0, 210, 255, 0.1)',
-                                fill: true,
-                                tension: 0.4,
-                                pointRadius: 0
-                            }]
-                        },
-                        options: {
-                            responsive: true,
-                            maintainAspectRatio: false,
-                            plugins: { legend: { display: false } },
-                            scales: {
-                                x: { display: false },
-                                y: { grid: { color: 'rgba(255,255,255,0.05)' }, border: { display: false } }
-                            }
-                        }
-                    });
-                }
-            }, [analytics.equity_curve]);
+                fetchData();
+                const i = setInterval(fetchData, 1000);
+                return () => clearInterval(i);
+            }, [mode]);
 
             const handlePanic = async () => {
-                if(confirm(`⚠️ CAUTION: Square off ALL ${mode} positions?`)) {
+                if (confirm(`🚨 KILL SWITCH: Liquidate all ${mode} positions?`)) {
                     await fetch(`${API_BASE}/panic?mode=${mode}`, { method: 'POST' });
                 }
             };
 
-            const formatCurrency = (val) => {
-                return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(val);
+            const handleHotSwap = async () => {
+                const config = { 
+                    engine: localEngine, 
+                    paper_capital: Number(paperCapital), 
+                    live_capital: Number(liveCapital), 
+                    hurst_threshold: hurst, 
+                    hybrid_confidence: confidence, 
+                    vpin_toxicity: vpin,
+                    paper_max_risk: Number(paperMaxLoss) || 2500,
+                    live_max_risk:  Number(liveMaxLoss)  || 2500
+                };
+                await fetch(`${API_BASE}/regime/config`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                alert("🚀 HOT-SWAP SUCCESSFUL: Meta-Router re-aligned with split capital pools.");
             };
 
-            const SignalItem = ({ label, value, color }) => (
-                <div className="bg-white/5 p-3 rounded-xl border border-white/5">
-                    <div className="text-[9px] text-gray-500 uppercase font-black mb-1">{label}</div>
-                    <div className={`text-xs font-bold mono ${color || 'text-gray-200'}`}>{value}</div>
-                </div>
-            );
-
-            const DesktopLayout = () => (
-                <div className="flex h-screen overflow-hidden">
-                    {/* Sidebar */}
-                    <aside className="w-64 glass border-r border-white/10 flex flex-col p-6 z-50">
-                        <div className="mb-10">
-                            <h1 className="text-xl font-black tracking-tighter text-accent leading-none">🦸‍♂️ PROJECT K.A.R.T.H.I.K.</h1>
-                            <div className="text-[7px] text-gray-500 font-bold uppercase tracking-widest mt-1">Kinetic Alpha Regime Tracking & High-frequency Institutional Kernel</div>
+            return (
+                <div className="flex flex-col h-screen select-none">
+                    <nav className="glass bg-black/95 p-4 sticky top-0 z-[100] border-b border-white/10 flex justify-between items-center px-8">
+                        <div className="flex items-center gap-12">
+                            <div className="mr-8">
+                                <h1 className="text-xl font-black tracking-tighter text-white">🦸‍♂️ K.A.R.T.H.I.K. <span className="text-[9px] bg-accent/20 text-accent px-2 py-0.5 rounded ml-2">v8.0</span></h1>
+                                <div className="text-[8px] text-gray-600 font-black uppercase tracking-[0.2em] mt-0.5 leading-none">Quantum Alpha Kernel</div>
+                            </div>
+                            <div className="flex gap-10">
+                                {[
+                                    { id: 'warroom', label: 'War Room' },
+                                    { id: 'playground', label: 'Orchestrator' },
+                                    { id: 'sim', label: 'Simulation' },
+                                    { id: 'evolution', label: 'Evolution' },
+                                    { id: 'audit', label: 'Audit' },
+                                    { id: 'health', label: 'Health' },
+                                    { id: 'attribution', label: 'Attribution' },
+                                ].map(tab => (
+                                    <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-3 pb-2 border-b-2 transition-all group ${activeTab === tab.id ? 'border-accent text-accent' : 'border-transparent text-gray-500 hover:text-gray-300 hover:border-white/20'}`}>
+                                        <TabIcon name={tab.id} active={activeTab === tab.id} />
+                                        <span className={`text-[11px] uppercase font-black tracking-tight ${activeTab === tab.id ? 'text-accent' : ''}`}>{tab.label}</span>
+                                    </button>
+                                ))}
+                            </div>
                         </div>
-
-                        <nav className="flex-1 space-y-2">
-                            {['overview', 'strategies', 'portfolio', 'analytics'].map(tab => (
-                                <button key={tab} 
-                                    onClick={() => setActiveTab(tab)}
-                                    className={`w-full text-left px-4 py-3 rounded-xl text-xs font-bold uppercase tracking-wider transition-all ${activeTab === tab ? 'bg-accent/10 text-accent border border-accent/20' : 'text-gray-500 hover:text-gray-300'}`}
-                                >
-                                    {tab}
-                                </button>
-                            ))}
-                        </nav>
-
-                        <div className="mt-auto pt-6 border-t border-white/5 space-y-4">
-                            <button 
-                                onClick={() => setMode(mode === 'Paper' ? 'Actual' : 'Paper')}
-                                className={`w-full py-3 rounded-xl text-[10px] font-black uppercase border transition-all ${mode === 'Paper' ? 'border-accent text-accent bg-accent/5' : 'border-success text-success bg-success/5'}`}
-                            >
-                                MODE: {mode}
-                            </button>
-                            <button onClick={handlePanic} className="w-full bg-danger/20 text-danger border border-danger/30 py-3 rounded-xl text-[10px] font-black uppercase hover:bg-danger hover:text-white transition-all">
-                                PANIC SHUTDOWN
+                        <div className="flex gap-6 items-center">
+                             <div className="flex flex-col items-end">
+                                <span className="text-[8px] font-black text-gray-600 uppercase">Capital Locked ({mode})</span>
+                                <span className={`text-xs font-bold mono ${mode === 'Paper' ? 'text-accent' : 'text-success'}`}>{formatCurrency(Number(mode === 'Paper' ? paperCapital : liveCapital))}</span>
+                             </div>
+                            <button onClick={() => setMode(mode === 'Paper' ? 'Actual' : 'Paper')} className={`px-6 py-2 rounded-full text-[10px] font-black border-2 transition-all hover:scale-105 active:scale-95 ${mode === 'Paper' ? 'border-accent text-accent bg-accent/5 shadow-[0_0_15px_rgba(0,210,255,0.1)]' : 'border-success text-success bg-success/5 shadow-[0_0_15px_rgba(63,185,80,0.1)]'}`}>
+                                {mode.toUpperCase()} MODE
                             </button>
                         </div>
-                    </aside>
-
-                    {/* Main Content */}
-                    <main className="flex-1 overflow-y-auto bg-dark p-8 space-y-8 scroll-hide">
-                        {/* Header Stats */}
-                        <div className="grid grid-cols-4 gap-4">
-                            <div className="glass p-6 rounded-2xl">
-                                <span className="text-[10px] text-gray-500 uppercase font-black block mb-2">Alpha Momentum</span>
-                                <span className="text-4xl font-black mono text-accent">{state.alpha_score.toFixed(1)}</span>
-                            </div>
-                            <div className="glass p-6 rounded-2xl">
-                                <span className="text-[10px] text-gray-500 uppercase font-black block mb-2">HMM Regime</span>
-                                <span className={`text-xl font-bold uppercase ${state.hmm_regime === 'TRENDING' ? 'text-success' : 'text-warning'}`}>{state.hmm_regime}</span>
-                            </div>
-                            <div className="glass p-6 rounded-2xl">
-                                <span className="text-[10px] text-gray-500 uppercase font-black block mb-2">Daily P/L</span>
-                                <span className={`text-xl font-bold mono ${analytics.total_pnl >= 0 ? 'text-success' : 'text-danger'}`}>{formatCurrency(analytics.total_pnl)}</span>
-                            </div>
-                            <div className="glass p-6 rounded-2xl">
-                                <span className="text-[10px] text-gray-500 uppercase font-black block mb-2">GEX Profile</span>
-                                <span className={`text-xl font-bold ${state.gex_sign === 'NEGATIVE' ? 'text-danger' : 'text-success'}`}>{state.gex_sign}</span>
-                            </div>
-                        </div>
-
-                        <div className="grid grid-cols-12 gap-8">
-                            {/* Left Panel: Analytics & Signals */}
-                            <div className="col-span-8 space-y-8">
-                                <div className="glass p-6 rounded-3xl h-64 overflow-hidden relative">
-                                    <h3 className="text-xs font-black uppercase text-gray-500 mb-4 px-2">Performance Curve</h3>
-                                    <canvas ref={chartRef}></canvas>
-                                </div>
-
-                                <div className="glass p-6 rounded-3xl">
-                                    <h3 className="text-xs font-black uppercase text-gray-500 mb-6 px-1">Signal Microstructure</h3>
-                                    <div className="grid-signal">
-                                        <SignalItem label="Log OFI (Z)" value={state.signals.log_ofi_z?.toFixed(2)} color={Math.abs(state.signals.log_ofi_z) > 1.5 ? 'text-accent' : ''} />
-                                        <SignalItem label="Dispersion" value={state.signals.dispersion?.toFixed(2)} />
-                                        <SignalItem label="Hurst Exp" value={state.signals.hurst?.toFixed(2)} color={state.signals.hurst > 0.6 ? 'text-success' : ''} />
-                                        <SignalItem label="Vanna (Vega-Delta)" value={state.signals.vanna?.toFixed(4)} />
-                                        <SignalItem label="Charm (Delta-Decay)" value={state.signals.charm?.toFixed(4)} color={state.signals.charm < -0.05 ? 'text-danger' : ''} />
-                                        <SignalItem label="RV (Implied)" value={state.signals.rv?.toFixed(4)} />
-                                        <SignalItem label="CVD Flips" value={state.signals.cvd_flips} color={state.signals.cvd_flips > 5 ? 'text-warning' : ''} />
-                                        <SignalItem label="ATR (Volatility)" value={state.signals.atr?.toFixed(2)} />
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Right Panel: Strategy & Positions */}
-                            <div className="col-span-4 space-y-8">
-                                <div className="glass p-6 rounded-3xl">
-                                    <h3 className="text-xs font-black uppercase text-gray-500 mb-4">Strat Daemons</h3>
-                                    <div className="space-y-2">
-                                        {strategies.map(s => (
-                                            <div key={s.name} className="flex justify-between items-center p-3 rounded-xl bg-white/5 border border-white/5">
-                                                <span className="text-[10px] font-black uppercase tracking-tight">{s.name}</span>
-                                                <span className={`text-[9px] font-bold px-2 py-0.5 rounded-md ${s.status === 'ACTIVE' ? 'bg-success/20 text-success' : 'bg-gray-800 text-gray-500'}`}>{s.status}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-
-                                <div className="glass p-6 rounded-3xl">
-                                    <div className="flex justify-between items-center mb-4">
-                                        <h3 className="text-xs font-black uppercase text-gray-500">Live Positions</h3>
-                                        <span className="text-[9px] bg-accent/10 px-2 py-0.5 rounded text-accent font-bold">{positions.length}</span>
-                                    </div>
-                                    <div className="space-y-3 max-h-80 overflow-y-auto scroll-hide pr-1">
-                                        {positions.length > 0 ? positions.map((p, i) => (
-                                            <div key={i} className="p-4 rounded-2xl bg-white/5 border border-white/5">
-                                                <div className="flex justify-between mb-2">
-                                                    <span className="text-xs font-bold leading-none">{p.symbol}</span>
-                                                    <span className={`text-[9px] font-black px-1.5 py-0.5 rounded ${p.quantity > 0 ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>{p.quantity > 0 ? 'L' : 'S'} {Math.abs(p.quantity)}</span>
-                                                </div>
-                                                <div className="flex justify-between items-end">
-                                                    <span className="text-[10px] text-gray-500 mono">P/L: <span className={p.unrealized_pnl >= 0 ? 'text-success' : 'text-danger'}>{p.unrealized_pnl.toFixed(1)}</span></span>
-                                                    <span className="text-[8px] text-gray-600 uppercase font-black">{p.strategy_id}</span>
-                                                </div>
-                                            </div>
-                                        )) : (
-                                            <div className="text-center py-6 text-gray-600 text-[10px] italic">Neutral exposure</div>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </main>
-                </div>
-            );
-
-            const MobileLayout = () => (
-                <div className="min-h-screen flex flex-col bg-dark">
-                    <header className="p-4 glass sticky top-0 z-50 flex justify-between items-center border-b border-white/5">
-                        <div>
-                            <h1 className="text-lg font-black tracking-tighter">🦸‍♂️ K.A.R.T.H.I.K.</h1>
-                            <div className="text-[8px] text-gray-500 font-bold uppercase tracking-widest leading-none">PROJECT PRO TERMINAL</div>
-                        </div>
-                        <button onClick={() => setMode(mode === 'Paper' ? 'Actual' : 'Paper')} className={`px-3 py-1 rounded-full text-[10px] font-black border tracking-wider ${mode === 'Paper' ? 'border-accent text-accent' : 'border-success text-success'}`}>
-                            {mode.toUpperCase()}
-                        </button>
-                    </header>
-
-                    <main className="flex-1 p-4 safe-bottom space-y-6">
-                        <section className="glass rounded-2xl p-6 text-center accent-glow">
-                            <div className="text-[9px] text-gray-400 uppercase font-black tracking-widest mb-2">Alpha State</div>
-                            <div className="text-5xl font-black mono text-accent tracking-tighter">{state.alpha_score.toFixed(1)}</div>
-                            <div className="mt-4 flex justify-center gap-2">
-                                <span className="px-2 py-1 glass rounded-md text-[9px] font-black text-success uppercase border border-success/30 underline decoration-success">{state.hmm_regime}</span>
-                                <span className={`px-2 py-1 glass rounded-md text-[9px] font-black uppercase border tracking-tighter ${state.gex_sign === 'NEGATIVE' ? 'border-danger/30 text-danger' : 'border-accent/30 text-accent'}`}>GEX: {state.gex_sign}</span>
-                            </div>
-                        </section>
-
-                        <div className="grid grid-cols-2 gap-3">
-                            <div className="glass p-4 rounded-2xl">
-                                <div className="text-[9px] text-gray-500 uppercase font-black mb-1">Margin</div>
-                                <div className="text-sm font-bold mono leading-none">{formatCurrency(mode === 'Paper' ? state.available_margin_paper : state.available_margin_live)}</div>
-                            </div>
-                            <div className="glass p-4 rounded-2xl">
-                                <div className="text-[9px] text-gray-500 uppercase font-black mb-1">P/L</div>
-                                <div className={`text-sm font-bold mono leading-none ${analytics.total_pnl >= 0 ? 'text-success' : 'text-danger'}`}>{formatCurrency(analytics.total_pnl)}</div>
-                            </div>
-                        </div>
-
-                        {activeTab === 'overview' && (
-                            <section className="space-y-4">
-                                <div className="flex justify-between items-center mb-2">
-                                    <h2 className="text-[10px] font-black uppercase tracking-widest text-gray-500">Positions</h2>
-                                    <span className="text-[9px] text-gray-600 font-bold">{positions.length} Active</span>
-                                </div>
-                                <div className="space-y-3">
-                                    {positions.length > 0 ? positions.map((p, i) => (
-                                        <div key={i} className="glass p-4 rounded-2xl border-l-4 border-accent">
-                                            <div className="flex justify-between items-start">
-                                                <div>
-                                                    <div className="text-sm font-bold leading-tight uppercase">{p.symbol}</div>
-                                                    <div className="text-[9px] text-gray-500 font-bold uppercase">{p.strategy_id}</div>
-                                                </div>
-                                                <div className={`px-2 py-0.5 rounded text-[10px] font-black ${p.quantity >= 0 ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>{p.quantity > 0 ? 'LONG' : 'SHORT'} {Math.abs(p.quantity)}</div>
-                                            </div>
-                                            <div className="flex justify-between items-end mt-4">
-                                                <span className="text-[9px] text-gray-500 mono">Avg: {p.avg_price.toFixed(2)}</span>
-                                                <span className={`text-xs font-bold mono ${p.unrealized_pnl >= 0 ? 'text-success' : 'text-danger'}`}>{p.unrealized_pnl.toFixed(1)}</span>
-                                            </div>
-                                        </div>
-                                    )) : <div className="text-center py-10 glass rounded-2xl border-dashed border-2 border-white/5 text-gray-600 text-[10px] uppercase font-black">All Flat</div>}
-                                </div>
-                            </section>
-                        )}
-
-                        {activeTab === 'analytics' && (
-                             <section className="space-y-4">
-                                <div className="glass p-4 rounded-2xl h-48 relative">
-                                    <canvas ref={chartRef}></canvas>
-                                </div>
-                                <div className="glass p-4 rounded-2xl">
-                                    <h3 className="text-[10px] font-black uppercase text-gray-500 mb-4">Deep Signals</h3>
-                                    <div className="grid grid-cols-2 gap-2">
-                                        <SignalItem label="OFI-Z" value={state.signals.log_ofi_z?.toFixed(2)} />
-                                        <SignalItem label="Hurst" value={state.signals.hurst?.toFixed(2)} />
-                                        <SignalItem label="CVD Flips" value={state.signals.cvd_flips} />
-                                        <SignalItem label="Dispersion" value={state.signals.dispersion?.toFixed(2)} />
-                                    </div>
-                                </div>
-                             </section>
-                        )}
-
-                        {activeTab === 'settings' && (
-                            <section className="space-y-4">
-                                <button onClick={handlePanic} className="w-full bg-danger text-white py-5 rounded-2xl font-black text-xl shadow-2xl shadow-danger/20 active:scale-95 transition-all">PANIC SHUTDOWN</button>
-                                <div className="glass p-6 rounded-2xl mt-8">
-                                    <h3 className="text-[10px] font-black uppercase text-gray-500 mb-2">System Safeguards</h3>
-                                    <p className="text-[10px] text-gray-600 leading-relaxed italic">Capital settings are locked to the persistent configuration layer for integrity.</p>
-                                </div>
-                            </section>
-                        )}
-                    </main>
-
-                    <nav className="fixed bottom-0 left-0 right-0 glass tab-bar border-t border-white/10 px-8 py-3 flex justify-between items-center z-50">
-                        <button onClick={() => setActiveTab('overview')} className={`flex flex-col items-center transition-all ${activeTab === 'overview' ? 'text-accent' : 'text-gray-500'}`}>
-                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
-                            <span className="text-[8px] font-black uppercase mt-1">Trade</span>
-                        </button>
-                        <button onClick={() => setActiveTab('analytics')} className={`flex flex-col items-center transition-all ${activeTab === 'analytics' ? 'text-accent' : 'text-gray-500'}`}>
-                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
-                            <span className="text-[8px] font-black uppercase mt-1">Data</span>
-                        </button>
-                        <button onClick={() => setActiveTab('settings')} className={`flex flex-col items-center transition-all ${activeTab === 'settings' ? 'text-accent' : 'text-gray-500'}`}>
-                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
-                            <span className="text-[8px] font-black uppercase mt-1">Panic</span>
-                        </button>
                     </nav>
+
+                    <main className="flex-1 p-10 overflow-y-auto scroll-hide bg-black">
+                        {activeTab === 'warroom' && <WarRoom state={state} positions={positions} mode={mode} handlePanic={handlePanic} />}
+                        {activeTab === 'playground' && <Playground 
+                            localEngine={localEngine} 
+                            setLocalEngine={setLocalEngine} 
+                            localCapital={mode === 'Paper' ? paperCapital : liveCapital} 
+                            setLocalCapital={mode === 'Paper' ? setPaperCapital : setLiveCapital} 
+                            maxLoss={mode === 'Paper' ? paperMaxLoss : liveMaxLoss}
+                            setMaxLoss={mode === 'Paper' ? setPaperMaxLoss : setLiveMaxLoss}
+                            hurst={hurst} setHurst={setHurst} 
+                            confidence={confidence} setConfidence={setConfidence} 
+                            vpin={vpin} setVpin={setVpin} 
+                            handleHotSwap={handleHotSwap} 
+                            mode={mode} 
+                        />}
+                        {activeTab === 'sim' && <SimulationTab simulation={simulation} />}
+                        {activeTab === 'evolution' && <Evolution evolution={evolution} />}
+                        {activeTab === 'audit' && <Performance attribution={attribution} />}
+                        {activeTab === 'health' && <Health telemetry={telemetry} />}
+                        {activeTab === 'attribution' && <SignalAttribution barrierData={barrierData} sizing={sizing} />}
+                    </main>
+
+                    <footer className="glass border-t border-white/5 p-3 px-10 flex justify-between items-center text-[10px] font-bold text-gray-500 uppercase tracking-widest bg-black/90">
+                        <div className="flex gap-10">
+                            <span className="flex items-center gap-3"><div className="w-2 h-2 rounded-full bg-success animate-pulse"></div> Redis Cluster Operational</span>
+                            <span className="flex items-center gap-3"><div className="w-2 h-2 rounded-full bg-success animate-pulse"></div> Timescale Stream Live</span>
+                        </div>
+                        <div className="mono text-gray-600 flex gap-10">
+                            <span>UPTIME: 99.9%</span>
+                            <span>© 2026 AR-KARTHIK INFRASTRUCTURE</span>
+                        </div>
+                    </footer>
                 </div>
             );
-
-            return isDesktop ? <DesktopLayout /> : <MobileLayout />;
         };
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<Dashboard />);
     </script>
 </body>
+
 </html>

@@ -16,6 +16,9 @@ Architecture:
 DEFAULT_MAX_PORTFOLIO_HEAT = 0.5   # Maximum combined fractional Kelly across all Tri-Brain assets
 MAX_RISK_PER_TRADE         = 0.0     # Default 0.0 to prevent orders until UI configures it
 ATR_SL_MULTIPLIER          = 1.0     # Mirrors liquidation_daemon constant for sizing consistency
+DEFAULT_HURST_THRESHOLD    = 0.55
+DEFAULT_HYBRID_CONFIDENCE  = 0.70
+DEFAULT_VPIN_TOXICITY      = 0.82
 
 import asyncio
 import json
@@ -126,10 +129,10 @@ class DeterministicProvider:
         regime = "RANGING"
         prob = 0.5
         
-        if hurst > 0.55 and adx > 25 and er > 0.6:
+        if hurst > state.get("hurst_threshold", 0.55) and adx > 25 and er > 0.6:
             regime = "TRENDING"
             prob = min(0.9, 0.5 + (hurst - 0.5) + (adx - 20)/100)
-        elif hurst < 0.45:
+        elif hurst < (state.get("hurst_threshold", 0.55) - 0.1):
             regime = "RANGING"
             prob = 0.7
             
@@ -149,7 +152,8 @@ class HybridProvider:
         score = (0.4 * h_ctx["prob"]) + (0.6 * d_ctx["prob"])
         
         regime = "WAITING"
-        if score > 0.7:
+        threshold = state.get("hybrid_confidence", 0.70)
+        if score > threshold:
             # Dual-key agreement required for Trending
             if h_ctx["regime"] == "TRENDING" and d_ctx["regime"] == "TRENDING":
                 regime = "TRENDING"
@@ -208,9 +212,44 @@ class MetaRouter:
     
     async def _sync_settings(self):
         """Syncs engine mode and parameters from Redis (upstream Firestore)."""
-        mode = await self._redis.get("active_regime_engine")
-        if mode in self.orchestrator.providers:
-            self.orchestrator.active_engine = mode
+        try:
+            # 1. Engine Mode
+            mode = await self._redis.get("CONFIG:REGIME_ENGINE")
+            if mode in self.orchestrator.providers:
+                if self.orchestrator.active_engine != mode:
+                    logger.info(f"🔄 Switching Regime Engine: {self.orchestrator.active_engine} -> {mode}")
+                    self.orchestrator.active_engine = mode
+            
+            # 2. Sizing Constraints
+            try:
+                self.heat_limit = float(await self._redis.get("CONFIG:MAX_PORTFOLIO_HEAT") or DEFAULT_MAX_PORTFOLIO_HEAT)
+                self.hurst_threshold = float(await self._redis.get("CONFIG:HURST_THRESHOLD") or DEFAULT_HURST_THRESHOLD)
+                self.hybrid_confidence = float(await self._redis.get("CONFIG:HYBRID_CONFIDENCE") or DEFAULT_HYBRID_CONFIDENCE)
+                self.vpin_toxicity = float(await self._redis.get("CONFIG:VPIN_TOXICITY") or DEFAULT_VPIN_TOXICITY)
+            except:
+                self.heat_limit = DEFAULT_MAX_PORTFOLIO_HEAT
+                self.hurst_threshold = DEFAULT_HURST_THRESHOLD
+                self.hybrid_confidence = DEFAULT_HYBRID_CONFIDENCE
+                self.vpin_toxicity = DEFAULT_VPIN_TOXICITY
+
+        except Exception as e:
+            logger.error(f"Sync settings failed: {e}")
+
+    async def _config_update_listener(self):
+        """Listens for real-time config updates via Redis Pub/Sub."""
+        pubsub = self._redis.pubsub()
+        await pubsub.subscribe("system_cmd")
+        logger.info("MetaRouter listening for system_cmd updates...")
+        
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    data = json.loads(message["data"])
+                    if data.get("cmd") == "HOT_SWAP_REGIME":
+                        logger.info("🔥 Real-time Config Update Received")
+                        await self._sync_settings()
+                except Exception as e:
+                    logger.error(f"Config listener error: {e}")
 
     async def _check_cross_index_divergence(self, regimes: dict) -> bool:
         """Returns True if the markets are severely fractured (divergence veto)."""
@@ -237,13 +276,21 @@ class MetaRouter:
             if is_fractured:
                 regime["regime"] = "WAITING" # Veto active
                 
+            # Inject dynamic parameters into state for providers
+            state["hurst_threshold"] = self.hurst_threshold
+            state["hybrid_confidence"] = self.hybrid_confidence
+            
             active_dec, all_decs = await self.orchestrator.get_decisions(
                 asset, state, self._redis, logic
             )
             
+            # ── A0: ATM Order Construction ───────────────────────────────────
+            # Construct real Shoonya scrip name if trading ATM options
+            if active_dec.get("lots", 0) > 0:
+                await self._enrich_with_atm_symbol(asset, active_dec)
+            
             # Recalculate weights based on the regime
-            cmds = await logic.calculate_weights(state, regime)
-            all_commands.extend(cmds)
+            # (In v8.0, active_dec already contains the weights for the active engine)
             all_commands.append(active_dec)
             attribution_payloads.append({
                 "asset": asset,
@@ -251,25 +298,23 @@ class MetaRouter:
                 "decisions": all_decs,
                 "active_engine": self.orchestrator.active_engine
             })
+            
+            # ── Shadow P&L Tracking (What-If) ────────────────────────────────
+            await self._record_shadow_signals(asset, all_decs)
 
         if not self.test_mode:
             # ── A1: Global Portfolio Heat Constraint ───────────────────────────
-            # Sum all fractional kelly weights across the three brains
             total_heat = sum(cmd.get("weight", 0) for cmd in all_commands if isinstance(cmd, dict))
-            try:
-                heat_limit = float(await self._redis.get("CONFIG:MAX_PORTFOLIO_HEAT") or DEFAULT_MAX_PORTFOLIO_HEAT)
-            except Exception:
-                heat_limit = DEFAULT_MAX_PORTFOLIO_HEAT
-
-            if total_heat > heat_limit and total_heat > 0:
-                scale = heat_limit / total_heat
+            
+            if total_heat > self.heat_limit and total_heat > 0:
+                scale = self.heat_limit / total_heat
                 all_commands = [
                     {**cmd, "weight": round(cmd.get("weight", 0) * scale, 4)}
                     if isinstance(cmd, dict) else cmd
                     for cmd in all_commands
                 ]
                 logger.warning(
-                    f"🔥 PORTFOLIO HEAT CAP: total_f={total_heat:.3f} > limit={heat_limit:.3f}. "
+                    f"🔥 PORTFOLIO HEAT CAP: total_f={total_heat:.3f} > limit={self.heat_limit:.3f}. "
                     f"Scaling all weights by {scale:.3f}."
                 )
                 await self._redis.set("PORTFOLIO_HEAT_CAPPED", "True", ex=60)
@@ -282,8 +327,31 @@ class MetaRouter:
             # Log attributions for Sidecar to push to Firestore
             await self._redis.set("latest_attributions", json.dumps(attribution_payloads))
 
+    async def _enrich_with_atm_symbol(self, asset: str, decision: dict):
+        """Builds scrip name (e.g. NIFTY26MAR22350CE) for ATM options."""
+        strikes = await self._redis.hgetall("optimal_strikes")
+        side = "CE" if decision.get("lots", 0) > 0 else "PE" # Simple directional bias
+        strike = strikes.get(f"{asset}_{side}")
+        expiry = await self._redis.get("CURRENT_EXPIRY_DATE") or "26MAR" # Expected from DataGateway
+        
+        if strike:
+            decision["tradingsymbol"] = f"{asset}{expiry}{int(float(strike))}{side}"
+            decision["exchange"] = "NFO"
+        else:
+            decision["tradingsymbol"] = asset # Fallback to index (sim only)
+
+    async def _record_shadow_signals(self, asset: str, all_decs: dict):
+        """Persists shadow engine lot sizes for What-If analysis."""
+        for engine, dec in all_decs.items():
+            key = f"shadow_lots:{engine}:{asset}"
+            await self._redis.lpush(key, dec.get("lots", 0))
+            await self._redis.ltrim(key, 0, 100) # Keep 100 ticks of history
+
     async def run(self):
         logger.info("MetaRouter [Core 3] Tri-Brain active. Waiting for market & model convergence...")
+        
+        # Start config listener in background
+        asyncio.create_task(self._config_update_listener())
         
         while True:
             try:
@@ -301,6 +369,10 @@ class MetaRouter:
                     await self.broadcast_decisions(mock_market_state, regimes)
                 
                 await asyncio.sleep(0.1) # 100ms router interval 
+
+            except Exception as e:
+                logger.error(f"Router Exception: {e}")
+                await asyncio.sleep(1)
 
             except Exception as e:
                 logger.error(f"Router Exception: {e}")

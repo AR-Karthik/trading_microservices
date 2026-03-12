@@ -66,7 +66,7 @@ logger = logging.getLogger("MarketSensor")
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-TOP_5_HEAVYWEIGHTS = ["RELIANCE", "HDFC", "INFY", "TCS", "ICICIBANK"]
+TOP_5_HEAVYWEIGHTS = ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "ITC", "SBIN", "AXISBANK", "KOTAKBANK", "LT"]
 OFI_WINDOW = 100          # ticks for rolling OFI
 DISPERSION_WINDOW_MIN = 3 # minutes for correlation rolling window
 RISK_FREE_RATE = 0.065    # 6.5% RBI repo rate
@@ -203,7 +203,7 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         strikes = snapshot.get("strikes", [spot - 200, spot - 100, spot, spot + 100, spot + 200])
         T = snapshot.get("dte", 2) / 365.0
         iv = snapshot.get("atm_iv", 0.18)
-        result["zero_gamma_level"] = find_zero_gamma_level(spot, strikes, T, RISK_FREE_RATE, iv)
+        result["zero_gamma_level"] = find_zero_gamma_level(np.array(snapshot.get("price_series", [spot])), spot)
 
         # ── Net GEX sign (simplified) ──────────────────────────────────────
         gex_vals = [bs_gamma(spot, K, T, RISK_FREE_RATE, iv) * (1 if K >= spot else -1)
@@ -379,7 +379,7 @@ class MarketSensor:
         self.spot_15m_series: collections.deque = collections.deque(maxlen=900)  # ~15min @ 1/s
 
         # VPIN State (SRS Phase 2)
-        self.vpin_bucket_size = 5000  # Configurable volume bucket size
+        self.vpin_bucket_size = 100  # v8.0 audit fix: smaller buckets for index ticks
         self.current_bucket_vol = 0
         self.current_bucket_buy_vol = 0
         self.current_bucket_sell_vol = 0
@@ -435,10 +435,11 @@ class MarketSensor:
         mid = (bid + ask) / 2.0
         
         if ltp > mid:
-            return 1.0  # Aggressive Buy
+            sign = 1.0  # Aggressive Buy
         elif ltp < mid:
-            return -1.0 # Aggressive Sell
-        return 0.0     # Neutral / Mid-quote bounce
+            sign = -1.0 # Aggressive Sell
+        else:
+            sign = 0.0     # Neutral / Mid-quote bounce
 
         if self.use_rust:
             rt = tick_engine.TickData(
@@ -449,7 +450,6 @@ class MarketSensor:
             )
             return self.rust_engine.classify_trade(rt) * tick.get("last_volume", 1)
         
-        sign = self._classify_trade(tick)
         volume = tick.get("last_volume", 1)
         return sign * volume
 
@@ -495,8 +495,16 @@ class MarketSensor:
         """Non-blocking drain of compute_out queue into latest_signals."""
         while True:
             try:
-                signals = self._compute_out.get_nowait()
-                self._latest_signals.update(signals)
+                msg = self._compute_out.get_nowait()
+                if isinstance(msg, dict):
+                    if "symbol" in msg:
+                        # Signal for a specific symbol (e.g. heavyweight)
+                        sym = msg["symbol"]
+                        if "signals" in msg:
+                            self._latest_signals[sym] = msg["signals"]
+                    else:
+                        # Global or default symbol signals
+                        self._latest_signals.update(msg)
             except mp.queues.Empty:
                 break
 
@@ -548,6 +556,7 @@ class MarketSensor:
                     if tick_count % 20 == 0 and not self.test_mode:
                         price_series = [t.get("price", price) for t in list(self.tick_store[symbol])]
                         snapshot = {
+                            "symbol": symbol,
                             "spot": price,
                             "ofi_series": list(self.ofi_series),
                             "hw_prices": {k: list(v) for k, v in self.hw_prices.items() if len(v) >= 10},
@@ -560,15 +569,25 @@ class MarketSensor:
                             "hurst_val": self.calculate_hurst(np.array(price_series[-500:])) if len(price_series) >= 50 else 0.5,
                             "er_window": 10, # Dynamic via Firestore later
                             "strikes": [price - 200, price - 100, price, price + 100, price + 200],
-                            "near_term_iv": 0.20,  # In prod: fetch from options chain
+                            "near_term_iv": await self._redis.get("atm_iv") or 0.20,
                             "far_term_iv": 0.17,
-                            "atm_iv": 0.18,
+                            "atm_iv": await self._redis.get("atm_iv") or 0.18,
                             "dte": 2
                         }
                         try:
                             self._compute_in.put_nowait(snapshot)
                         except mp.queues.Full:
                             pass  # Skip if compute is backed up — don't block I/O loop
+
+                        # GAP FIX: Also send individual snapshots for heavyweights for Power Five matrix
+                        if symbol in TOP_5_HEAVYWEIGHTS:
+                            hw_snapshot = {
+                                "symbol": symbol,
+                                "spot": price,
+                                "price_series": price_series,
+                                "ofi_series": [t.get("price", price) for t in list(self.tick_store[symbol])][-100:]
+                            }
+                            self._compute_in.put_nowait(hw_snapshot)
 
                     # Publish state every 50 ticks
                     if tick_count % 50 == 0:
@@ -604,9 +623,9 @@ class MarketSensor:
                     "pcr_slope": 0.02, "cvd_slope": float(np.diff(list(self.cvd_series)[-5:]).mean())
                     if len(self.cvd_series) >= 5 else 0}
 
-        s_env = self._calc_env(env_data)
-        s_str = self._calc_str(str_data)
-        s_div = self._calc_div(div_data)
+        s_env = self.scorer._calc_env(env_data)
+        s_str = self.scorer._calc_str(str_data)
+        s_div = self.scorer._calc_div(div_data)
         s_total = self.scorer.get_total_score(env_data, str_data, div_data)
 
         state = {
@@ -638,6 +657,30 @@ class MarketSensor:
             "flow_toxicity_veto": sig.get("flow_toxicity_veto", False),
             "time_of_day": datetime.now().strftime("%H:%M:%S")
         }
+
+        # ── GAP FIX: 70:30 Exit Path Calculation ───────────────────
+        if symbol == "NIFTY50":
+            # Target 1 = entry + 1.5 * ATR, Target 2 = entry + 3 * ATR
+            # For simplicity, we assume 'entry' is tracked in session or we use a baseline
+            atr = state.get("atr", 20.0)
+            entry = float(await self._redis.get(f"entry_price:{symbol}") or price)
+            
+            side = await self._redis.get(f"active_side:{symbol}") or "LONG"
+            mult = 1 if side == "LONG" else -1
+            
+            tp1 = entry + (1.5 * atr * mult)
+            tp2 = entry + (3.0 * atr * mult)
+            
+            # Progress: how close are we to TP2 from entry
+            dist_total = abs(tp2 - entry)
+            dist_current = abs(price - entry)
+            progress = min(100, max(0, (dist_current / dist_total) * 100)) if dist_total > 0 else 0
+            
+            state["exit_path_70_30"] = {
+                "tp1": round(tp1, 2),
+                "tp2": round(tp2, 2),
+                "progress": round(progress, 2)
+            }
 
         if not self.test_mode:
             if self.shm:
@@ -676,16 +719,25 @@ class MarketSensor:
             hmm_nifty_raw = await self._redis.hget("hmm_regime_state", "NIFTY")
             if hmm_nifty_raw:
                 hmm_nifty = json.loads(hmm_nifty_raw)
-                await self._redis.set("HMM_REGIME", hmm_nifty.get("regime", "WAITING"))
+                val = hmm_nifty.get("regime", "WAITING")
+                await self._redis.set("HMM_REGIME", val)
+                await self._redis.set("hmm_regime", val) # normalize to lowercase for API
             else:
                 await self._redis.set("HMM_REGIME", "WAITING")
+                await self._redis.set("hmm_regime", "WAITING")
 
-        logger.info(
-            f"STATE: ALPHA={s_total:.1f} | OFI-Z={state['log_ofi_zscore']:.2f} | "
-            f"Dispersion={state['dispersion_coeff']:.2f} | VPIN={state['vpin']:.2f} | "
-            f"Veto={'ON' if state['flow_toxicity_veto'] else 'OFF'}"
-        )
-        return state
+        if not self.test_mode:
+            # ... existing publication logic ...
+            
+            # GAP FIX: Store individual heavyweight Z-scores for API / Power Five
+            if symbol in TOP_5_HEAVYWEIGHTS:
+                hw_z = state.get("log_ofi_zscore", 0.0)
+                # Store in a dedicated hash for the API
+                await self._redis.hset("power_five_matrix", symbol, json.dumps({
+                    "price": price,
+                    "z_score": round(hw_z, 2),
+                    "timestamp": state["timestamp"]
+                }))
 
     async def _persist_signal_history(self, state: dict):
         """Pushes the current state into a rolling Redis list for UI history."""

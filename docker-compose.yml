@@ -159,14 +159,5 @@ services:
     restart: always
     env_file: .env
 
-  dashboard_frontend:
-    image: trading-app:latest
-    container_name: dashboard_frontend
-    command: python -m http.server 8501 --directory dashboard/frontend
-    ports:
-      - "8501:8501"
-    restart: always
-    env_file: .env
-
 volumes:
   timescaledb_data:

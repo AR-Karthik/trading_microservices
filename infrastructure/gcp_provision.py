@@ -73,19 +73,23 @@ GITHUB_PAT          = os.getenv("GITHUB_PAT_TOKEN", "")
 REPO_URL            = f"https://{GITHUB_PAT}@github.com/AR-Karthik/trading_microservices.git" if GITHUB_PAT else "https://github.com/AR-Karthik/trading_microservices.git"
 REPO_DIR            = "/opt/trading"
 
-# Build .env content from environment (loaded from local .env via dotenv)
+# Build .env content from local environment
 ENV_VARS = {
-    "SHOONYA_USER":     os.getenv("SHOONYA_USER", ""),
-    "SHOONYA_PWD":      os.getenv("SHOONYA_PWD", ""),
-    "SHOONYA_VC":       os.getenv("SHOONYA_VC", ""),
-    "SHOONYA_APP_KEY":  os.getenv("SHOONYA_APP_KEY", ""),
-    "SHOONYA_FACTOR2":  os.getenv("SHOONYA_FACTOR2", ""),
-    "SHOONYA_IMEI":     os.getenv("SHOONYA_IMEI", "abc1234"),
-    "SHOONYA_HOST":     os.getenv("SHOONYA_HOST", ""),
+    "SHOONYA_USER":       os.getenv("SHOONYA_USER", ""),
+    "SHOONYA_PWD":        os.getenv("SHOONYA_PWD", ""),
+    "SHOONYA_VC":         os.getenv("SHOONYA_VC", ""),
+    "SHOONYA_APP_KEY":    os.getenv("SHOONYA_APP_KEY", ""),
+    "SHOONYA_FACTOR2":    os.getenv("SHOONYA_FACTOR2", ""),
+    "SHOONYA_IMEI":       os.getenv("SHOONYA_IMEI", "abc1234"),
+    "SHOONYA_HOST":       os.getenv("SHOONYA_HOST", ""),
     "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", ""),
     "TELEGRAM_CHAT_ID":   os.getenv("TELEGRAM_CHAT_ID", ""),
     "GCP_PROJECT_ID":     PROJECT_ID,
     "GCS_MODEL_BUCKET":   os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models"),
+    "DASHBOARD_ACCESS_KEY": os.getenv("DASHBOARD_ACCESS_KEY", "K_A_R_T_H_I_K_2026_PRO"),
+    "SIMULATION_MODE":    os.getenv("SIMULATION_MODE", "false"),
+    "REDIS_HOST":         "redis",
+    "DB_HOST":            "timescaledb",
 }
 ENV_CONTENT = "\n".join(f"{k}={v}" for k, v in ENV_VARS.items())
 
@@ -199,8 +203,40 @@ fi
 echo "=== All services started: $(date) ==="
 """
 
+def ensure_firewall_rule():
+    """Ensures GCP firewall rule for Port 8000 (Hub-and-Spoke Proxy) exists."""
+    from google.cloud import compute_v1
+    fw_client = compute_v1.FirewallsClient()
+    rule_name = "allow-trading-api-v8"
+    
+    try:
+        fw_client.get(project=PROJECT_ID, firewall=rule_name)
+        print(f"Firewall rule '{rule_name}' already exists.")
+        return
+    except Exception:
+        print(f"Creating firewall rule '{rule_name}' for Port 8000...")
+        
+    rule = compute_v1.Firewall()
+    rule.name = rule_name
+    rule.direction = "INGRESS"
+    rule.network = "global/networks/default"
+    rule.allowed = [compute_v1.Allowed(I_p_protocol="tcp", ports=["8000"])]
+    rule.source_ranges = ["0.0.0.0/0"]
+    rule.target_tags = ["trading-api"]
+    rule.description = "Allow Hybrid Proxy traffic (v8.0) to Trading VM"
+
+    op = fw_client.insert(project=PROJECT_ID, firewall_resource=rule)
+    # Busy wait for completion
+    while True:
+        status = fw_client.get(project=PROJECT_ID, firewall=rule_name)
+        if status: break
+        time.sleep(2)
+    print(f"✅ Firewall rule '{rule_name}' created.")
+
+
 def create_spot_instance():
     """Creates a GCP Spot VM instance with all trading services."""
+    ensure_firewall_rule()
     instance_client = compute_v1.InstancesClient()
 
     # Check if already exists
@@ -269,6 +305,9 @@ def create_spot_instance():
         nic_type="GVNIC" 
     )
     instance.network_interfaces = [network_interface]
+
+    # Networking tags for firewall matching
+    instance.tags = compute_v1.Tags(items=["trading-api"])
 
     # Startup script via metadata
     metadata = compute_v1.Metadata(

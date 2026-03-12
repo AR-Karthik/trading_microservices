@@ -1,23 +1,78 @@
 """
-Cloud Run Dashboard API — Project K.A.R.T.H.I.K.
-==================================================
-This is the Cloud Run version of the dashboard API.
-Instead of reading from Redis/TimescaleDB (which live on the VM),
-it reads from Firestore (live state) and GCS (historical analytics).
-
-The Panic Button writes to Firestore, which the VM's CloudPublisher watches.
+Cloud Run Dashboard API — Project K.A.R.T.H.I.K. V8.0 (Hybrid)
+============================================================
+Smart Proxy Architecture:
+1. READS from VM (Public IP) when ONLINE.
+2. FALLS BACK to BigQuery/GCS/Firestore when OFFLINE.
+3. WRITES commands directly to VM when ONLINE.
 """
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 import os
 import json
+import httpx
+import asyncio
 
-app = FastAPI(title="🦸‍♂️ PROJECT K.A.R.T.H.I.K. — Cloud Dashboard")
+app = FastAPI(title="🦸‍♂️ PROJECT K.A.R.T.H.I.K. — Pro Cloud Dashboard")
+
+# ─── Auth Middleware ────────────────────────────────────────────────────────
+# ─── Auth Middleware ────────────────────────────────────────────────────────
+def get_dashboard_access_key():
+    """Fetches the access key from Secret Manager (Priority) or Environment."""
+    env_key = os.getenv("DASHBOARD_ACCESS_KEY")
+    if env_key and env_key != "K_A_R_T_H_I_K_2026_PRO":
+        return env_key
+        
+    try:
+        from google.cloud import secretmanager
+        client = secretmanager.SecretManagerServiceClient()
+        project_id = os.getenv("GCP_PROJECT_ID", "karthiks-trading-assistant")
+        name = f"projects/{project_id}/secrets/DASHBOARD_ACCESS_KEY/versions/latest"
+        response = client.access_secret_version(request={"name": name})
+        return response.payload.data.decode("UTF-8")
+    except Exception as e:
+        print(f"Secret Manager fetch failed: {e}. Falling back to default.")
+        return "K_A_R_T_H_I_K_2026_PRO"
+
+ACCESS_KEY = get_dashboard_access_key()
+
+@app.middleware("http")
+async def check_access_key(request: Request, call_next):
+    # Allow health check and static assets without key for basic functioning
+    if request.url.path in ["/health"] or request.url.path.startswith("/assets/"):
+        return await call_next(request)
+    
+    # Authenticate via Query Param, Header, or Session Cookie
+    requested_key = request.query_params.get("key") or request.headers.get("X-Access-Key")
+    session_cookie = request.cookies.get("dashboard_session")
+    
+    is_authenticated = (requested_key == ACCESS_KEY) or (session_cookie == ACCESS_KEY)
+    
+    if not is_authenticated:
+        if request.url.path == "/":
+             return JSONResponse(
+                 status_code=401, 
+                 content={"detail": "Unauthorized. Please provide ?key=YOUR_SECRET_KEY in the URL."}
+             )
+        return JSONResponse(status_code=401, content={"detail": "Invalid Access Key"})
+        
+    response = await call_next(request)
+    
+    # If authenticated via fresh key, drop a session cookie for the SPA to use on next calls
+    if requested_key == ACCESS_KEY:
+        response.set_cookie(
+            key="dashboard_session",
+            value=ACCESS_KEY,
+            httponly=True,
+            samesite="lax",
+            max_age=86400  # 24 hours
+        )
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,14 +82,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── Firestore Client ────────────────────────────────────────────────────────
+# ─── Cloud Clients ──────────────────────────────────────────────────────────
 GCP_PROJECT = os.getenv("GCP_PROJECT_ID", "karthiks-trading-assistant")
 GCS_BUCKET = os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models")
 
 _firestore_client = None
-_gcs_client = None
 _bq_client = None
-
 
 def get_firestore():
     global _firestore_client
@@ -43,15 +96,6 @@ def get_firestore():
         _firestore_client = firestore.Client(project=GCP_PROJECT)
     return _firestore_client
 
-
-def get_gcs():
-    global _gcs_client
-    if _gcs_client is None:
-        from google.cloud import storage
-        _gcs_client = storage.Client(project=GCP_PROJECT)
-    return _gcs_client
-
-
 def get_bigquery():
     global _bq_client
     if _bq_client is None:
@@ -59,115 +103,155 @@ def get_bigquery():
         _bq_client = bigquery.Client(project=GCP_PROJECT)
     return _bq_client
 
+# ─── Hybrid Proxy Core ──────────────────────────────────────────────────────
+async def get_vm_ip():
+    """Fetch the latest VM Public IP from Firestore metadata."""
+    try:
+        db = get_firestore()
+        doc = db.collection("system").document("metadata").get()
+        if doc.exists:
+            data = doc.to_dict()
+            if data.get("status") == "ONLINE":
+                return data.get("vm_public_ip")
+    except:
+        pass
+    return None
 
-# ─── Models ──────────────────────────────────────────────────────────────────
-class SystemState(BaseModel):
-    alpha_score: float = 0.0
-    hmm_regime: str = "UNKNOWN"
-    gex_sign: str = "UNKNOWN"
-    system_halted: bool = False
-    macro_lockdown: bool = False
-    available_margin_paper: float = 0.0
-    available_margin_live: float = 0.0
-    signals: dict = {}
-    is_vm_running: bool = False
-    last_heartbeat: str = ""
-
-
-class StrategyStatus(BaseModel):
-    name: str
-    status: str
-    parameters: dict
-
-
-class Position(BaseModel):
-    symbol: str
-    strategy_id: str
-    quantity: int
-    avg_price: float
-    realized_pnl: float
-    unrealized_pnl: float
-
+async def smart_proxy(path: str, method: str = "GET", body: dict = None, params: dict = None):
+    """Attempts to route request to VM, otherwise returns None."""
+    vm_ip = await get_vm_ip()
+    if not vm_ip:
+        return None
+    
+    url = f"http://{vm_ip}:8000/{path}"
+    try:
+        async with httpx.AsyncClient() as client:
+            if method == "GET":
+                resp = await client.get(url, params=params, timeout=2.0)
+            elif method == "POST":
+                resp = await client.post(url, json=body, timeout=3.0)
+            
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as e:
+        print(f"Proxy failed to {url}: {e}")
+    return None
 
 # ─── Endpoints ───────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "source": "cloud_run"}
+    return {"status": "ok", "source": "cloud_run_proxy"}
 
+@app.get("/state")
+async def get_state():
+    # 1. Try VM Direct
+    vm_data = await smart_proxy("state")
+    if vm_data:
+        vm_data["source"] = "VM_DIRECT"
+        return vm_data
+    
+    # 2. Fallback to Firestore (Last Sync)
+    db = get_firestore()
+    doc = db.collection("system").document("config").get() # Using config sync for regime/capital
+    meta = db.collection("system").document("metadata").get()
+    
+    cfg = doc.to_dict() if doc.exists else {}
+    m = meta.to_dict() if meta.exists else {}
 
-@app.get("/state", response_model=SystemState)
-def get_state():
-    """Read live trading state from Firestore (published by VM's CloudPublisher)."""
-    try:
-        db = get_firestore()
-        doc = db.collection("trading_state").document("live").get()
+    return {
+        "alpha_score": m.get("live_alpha", 0.0),
+        "hmm_regime": m.get("live_regime", "UNKNOWN"),
+        "is_vm_running": m.get("status") == "ONLINE",
+        "last_heartbeat": m.get("last_heartbeat", ""),
+        "source": "FIRESTORE_SYNC",
+        "available_margin_paper": cfg.get("paper_capital_limit", 0.0),
+        "available_margin_live": cfg.get("live_capital_limit", 0.0)
+    }
 
-        if not doc.exists:
-            return SystemState()
+@app.get("/portfolio")
+async def get_portfolio(mode: str = "Paper"):
+    vm_data = await smart_proxy("portfolio", params={"mode": mode})
+    if vm_data is not None:
+        return vm_data
+    
+    # Fallback: Historical view (Empty if VM is off for now, or use BQ if needed)
+    return []
 
-        data = doc.to_dict()
-        return SystemState(
-            alpha_score=data.get("composite_alpha", 0.0),
-            hmm_regime=data.get("regime", "UNKNOWN"),
-            gex_sign=data.get("gex_sign", "UNKNOWN"),
-            system_halted=data.get("stop_day_loss_breached_paper", False),
-            macro_lockdown=data.get("macro_lockdown", False),
-            available_margin_paper=data.get("capital_limit", 0.0) - data.get("margin_utilized", 0.0),
-            available_margin_live=0.0,
-            signals={},
-            is_vm_running=data.get("is_vm_running", False),
-            last_heartbeat=data.get("last_heartbeat", ""),
-        )
-    except Exception as e:
-        print(f"Firestore read error: {e}")
-        return SystemState()
+@app.post("/regime/config")
+async def update_regime_config(config: dict):
+    # Try VM Direct
+    vm_data = await smart_proxy("regime/config", method="POST", body=config)
+    if vm_data:
+        return vm_data
+    
+    # Fallback: Queue in Firestore for VM to pick up on boot
+    db = get_firestore()
+    db.collection("commands").document("latest").set({
+        "HOT_SWAP_REGIME": config,
+        "timestamp": datetime.utcnow().isoformat(),
+        "status": "QUEUED"
+    }, merge=True)
+    return {"status": "Command QUEUED in Firestore (VM Offline)"}
 
+@app.post("/panic")
+async def panic(mode: str = "Paper"):
+    vm_data = await smart_proxy("panic", method="POST", params={"mode": mode})
+    if vm_data:
+        return vm_data
+    
+    # Fallback: Firestore flag for CloudPublisher watcher
+    db = get_firestore()
+    db.collection("commands").document("latest").set({
+        "PANIC_BUTTON": True,
+        "mode": mode,
+        "timestamp": datetime.utcnow().isoformat()
+    }, merge=True)
+    return {"status": "Panic signal QUEUED"}
 
-@app.get("/strategies", response_model=List[StrategyStatus])
-def get_strategies():
-    """Derive strategy status from Firestore state."""
-    try:
-        db = get_firestore()
-        doc = db.collection("trading_state").document("live").get()
-        data = doc.to_dict() if doc.exists else {}
+# ─── Advanced v8.0 Endpoints (Discovery & Proxy) ──────────────────────────
 
-        regime = data.get("regime", "RANGING")
-        targets = ["GAMMA", "REVERSION", "VWAP", "OI_PULSE", "LEAD_LAG"]
-        results = []
+@app.get("/regime/simulation")
+async def get_regime_sim():
+    vm_data = await smart_proxy("regime/simulation")
+    return vm_data if vm_data else {"engine_ranking": [], "equity_growth": []}
 
-        for t in targets:
-            status = "PAUSED"
-            if t == "LEAD_LAG":
-                status = "ACTIVE"
-            if t == "GAMMA" and regime == "TRENDING":
-                status = "ACTIVE"
-            if t == "REVERSION" and regime == "RANGING":
-                status = "ACTIVE"
+@app.get("/models/evolution")
+async def get_evolution():
+    vm_data = await smart_proxy("models/evolution")
+    return vm_data if vm_data else {"leaderboard": [], "transition_matrix": []}
 
-            results.append(StrategyStatus(
-                name=t,
-                status=status,
-                parameters={"regime": regime}
-            ))
-        return results
-    except Exception as e:
-        print(f"Strategy read error: {e}")
-        return []
+@app.get("/health/telemetry")
+async def get_telemetry():
+    vm_data = await smart_proxy("health/telemetry")
+    return vm_data if vm_data else {"nse_latency_ms": 0, "cpu_cores": [0,0,0]}
 
+@app.get("/attribution/strategy")
+async def get_attribution():
+    vm_data = await smart_proxy("attribution/strategy")
+    if vm_data: return vm_data
+    
+    # Fallback: Pull from BigQuery (TBD)
+    return {"pnl_stack": [], "efficiency": []}
 
+@app.get("/barriers/attribution")
+async def get_barriers():
+    vm_data = await smart_proxy("barriers/attribution")
+    return vm_data if vm_data else {"summary": {}, "feed": []}
+
+@app.get("/sizing/inspector")
+async def get_sizing():
+    vm_data = await smart_proxy("sizing/inspector")
+    return vm_data if vm_data else {"assets": []}
+
+# ─── Analytics (BigQuery) ──────────────────────────────────────────────────
 @app.get("/analytics")
 def get_analytics(mode: str = "Paper"):
-    """
-    Read historical analytics from BigQuery external tables.
-    Calculates equity curve from trade history.
-    """
     try:
         bq = get_bigquery()
         dataset = "trading_analytics"
         table = f"{GCP_PROJECT}.{dataset}.trade_history_external"
         
-        # Query for daily P&L and trade count
         query = f"""
             SELECT 
                 DATE(time) as trade_date,
@@ -179,149 +263,46 @@ def get_analytics(mode: str = "Paper"):
             GROUP BY trade_date
             ORDER BY trade_date ASC
         """
-        
         query_job = bq.query(query)
         results = query_job.result()
         
         curve = []
         cumulative_pnl = 0.0
         total_trades = 0
-        
         for row in results:
             cumulative_pnl += float(row.daily_pnl)
             total_trades += row.trades
-            curve.append({
-                "date": row.trade_date.isoformat(),
-                "pnl": round(cumulative_pnl, 2)
-            })
+            curve.append({"date": row.trade_date.isoformat(), "pnl": round(cumulative_pnl, 2)})
             
-        # If no data in BigQuery, check Firestore live state for today's P&L
-        if not curve:
-            db = get_firestore()
-            doc = db.collection("trading_state").document("live").get()
-            if doc.exists:
-                data = doc.to_dict()
-                daily_pnl = data.get("daily_pnl_paper", 0.0) if mode == "Paper" else data.get("daily_pnl_live", 0.0)
-                curve = [{"date": datetime.now().date().isoformat(), "pnl": daily_pnl}]
-                cumulative_pnl = daily_pnl
-
         return {
             "equity_curve": curve,
             "total_pnl": round(cumulative_pnl, 2),
             "trade_count": total_trades,
-            "source": "bigquery_external" if curve else "firestore_live"
+            "source": "bigquery_analytics"
         }
     except Exception as e:
-        print(f"BigQuery analytics error: {e}")
-        # Fallback to firestore for minimal data
-        try:
-            db = get_firestore()
-            doc = db.collection("trading_state").document("live").get()
-            data = doc.to_dict() if doc.exists else {}
-            daily_pnl = data.get("daily_pnl_paper", 0.0) if mode == "Paper" else data.get("daily_pnl_live", 0.0)
-            return {
-                "equity_curve": [{"date": datetime.now().date().isoformat(), "pnl": daily_pnl}],
-                "total_pnl": daily_pnl,
-                "trade_count": 0,
-                "error": str(e)
-            }
-        except:
-            return {"equity_curve": [], "total_pnl": 0.0, "error": str(e)}
+        return {"error": str(e), "equity_curve": [], "total_pnl": 0.0}
 
-
-@app.get("/portfolio", response_model=List[Position])
-def get_portfolio(mode: str = "Paper"):
-    """
-    Read active positions from Firestore.
-    The VM's CloudPublisher pushes position snapshots to Firestore.
-    """
-    try:
-        db = get_firestore()
-        doc = db.collection("trading_state").document("positions").get()
-
-        if not doc.exists:
-            return []
-
-        data = doc.to_dict()
-        positions_raw = data.get("active", [])
-
-        return [Position(
-            symbol=p.get("symbol", ""),
-            strategy_id=p.get("strategy_id", ""),
-            quantity=p.get("quantity", 0),
-            avg_price=p.get("avg_price", 0.0),
-            realized_pnl=p.get("realized_pnl", 0.0),
-            unrealized_pnl=p.get("unrealized_pnl", 0.0),
-        ) for p in positions_raw]
-
-    except Exception as e:
-        print(f"Portfolio read error: {e}")
-        return []
-
-
-@app.post("/panic")
-def panic(mode: str = "Paper"):
-    """
-    Write PANIC_BUTTON command to Firestore.
-    The VM's CloudPublisher watches this and triggers SQUARE_OFF_ALL.
-    """
-    try:
-        db = get_firestore()
-        doc_ref = db.collection("trading_commands").document("active")
-        doc_ref.set({
-            "PANIC_BUTTON": True,
-            "source": "cloud_dashboard",
-            "mode": mode,
-            "timestamp": datetime.utcnow().isoformat(),
-        }, merge=True)
-        return {"status": "Panic signal sent via Firestore"}
-    except Exception as e:
-        return {"status": f"Failed: {e}"}
-
-
-@app.post("/pause")
-def pause_trading():
-    """Write PAUSE_TRADING command to Firestore."""
-    try:
-        db = get_firestore()
-        db.collection("trading_commands").document("active").set({
-            "PAUSE_TRADING": True,
-            "timestamp": datetime.utcnow().isoformat(),
-        }, merge=True)
-        return {"status": "Pause command sent"}
-    except Exception as e:
-        return {"status": f"Failed: {e}"}
-
-
-@app.post("/resume")
-def resume_trading():
-    """Write RESUME_TRADING command to Firestore."""
-    try:
-        db = get_firestore()
-        db.collection("trading_commands").document("active").set({
-            "RESUME_TRADING": True,
-            "timestamp": datetime.utcnow().isoformat(),
-        }, merge=True)
-        return {"status": "Resume command sent"}
-    except Exception as e:
-        return {"status": f"Failed: {e}"}
-
-
-# ─── Serve Frontend ──────────────────────────────────────────────────────────
-# Mount static files (frontend assets)
+# --- Static Files & SPA Support ---
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+# Mount /assets specifically
+assets_dir = os.path.join(STATIC_DIR, "assets")
+if os.path.isdir(assets_dir):
+    app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+# Mount root for the rest of the files (index.html, etc)
+# NOTE: Mount this LAST to allow API routes priority
 if os.path.isdir(STATIC_DIR):
-    app.mount("/assets", StaticFiles(directory=os.path.join(STATIC_DIR, "assets")), name="assets")
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="frontend")
 
-
-@app.get("/")
-def serve_frontend():
-    """Serve the React SPA."""
+@app.exception_handler(404)
+async def custom_404_handler(request: Request, __):
+    """Fallback to index.html for React SPA routing on 404s."""
     index_path = os.path.join(STATIC_DIR, "index.html")
-    if os.path.exists(index_path):
+    if os.path.exists(index_path) and not request.url.path.startswith("/api/"):
         return FileResponse(index_path)
-    return {"error": "Frontend not found"}
-
+    return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
 if __name__ == "__main__":
     import uvicorn

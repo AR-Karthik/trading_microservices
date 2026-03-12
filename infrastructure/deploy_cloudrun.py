@@ -42,6 +42,7 @@ def enable_apis():
         "storage.googleapis.com",
         "iap.googleapis.com",
         "artifactregistry.googleapis.com",
+        "secretmanager.googleapis.com",
     ]
     for api in apis:
         run_cmd(f"gcloud services enable {api} --project={PROJECT_ID} --quiet", check=False)
@@ -103,20 +104,58 @@ def setup_bigquery():
         f"{trade_table}"
     )
     
-    # Grant Cloud Run service account access to BigQuery
-    # The default Cloud Run service account is {PROJECT_NUMBER}-compute@developer.gserviceaccount.com
-    # or we can use the project default service account.
-    print("Granting BigQuery permissions to project service account...")
-    run_cmd(
-        f"gcloud projects add-iam-policy-binding {PROJECT_ID} "
-        f"--member='serviceAccount:{PROJECT_ID}@appspot.gserviceaccount.com' "
-        f"--role='roles/bigquery.dataViewer' --quiet"
+    # Get Project Number for Service Account
+    result = subprocess.run(
+        f"gcloud projects describe {PROJECT_ID} --format='value(projectNumber)' --quiet",
+        shell=True, capture_output=True, text=True
     )
+    project_number = result.stdout.strip()
+    if not project_number:
+        print("Failed to get project number. IAM may fail.")
+        return
+
+    sa_email = f"{project_number}-compute@developer.gserviceaccount.com"
+    
+    print(f"Granting BigQuery, Firestore, and Storage permissions to {sa_email}...")
+    roles = [
+        'roles/bigquery.dataViewer',
+        'roles/bigquery.jobUser',
+        'roles/datastore.user',
+        'roles/storage.objectViewer'
+    ]
+    for role in roles:
+        run_cmd(
+            f"gcloud projects add-iam-policy-binding {PROJECT_ID} "
+            f"--member='serviceAccount:{sa_email}' "
+            f"--role='{role}' --quiet"
+        )
+    
+    # 3. Secret Manager access
     run_cmd(
-        f"gcloud projects add-iam-policy-binding {PROJECT_ID} "
-        f"--member='serviceAccount:{PROJECT_ID}@appspot.gserviceaccount.com' "
-        f"--role='roles/bigquery.jobUser' --quiet"
+        f"gcloud secrets add-iam-policy-binding DASHBOARD_ACCESS_KEY "
+        f"--member='serviceAccount:{sa_email}' "
+        f"--role='roles/secretmanager.secretAccessor' --project={PROJECT_ID} --quiet",
+        check=False
     )
+
+
+def setup_secrets():
+    """Create the dashboard access key secret if it doesn't exist."""
+    print("\n=== Initializing Dashboard Secret Key ===")
+    
+    # Check if secret exists
+    result = subprocess.run(
+        f"gcloud secrets describe DASHBOARD_ACCESS_KEY --project={PROJECT_ID} --quiet",
+        shell=True, capture_output=True, text=True
+    )
+    
+    if result.returncode != 0:
+        import uuid
+        new_key = str(uuid.uuid4()).replace("-", "").upper()[:16]
+        print(f"Creating new DASHBOARD_ACCESS_KEY secret (Key: {new_key})...")
+        run_cmd(f"echo {new_key} | gcloud secrets create DASHBOARD_ACCESS_KEY --data-file=- --project={PROJECT_ID} --quiet")
+    else:
+        print("DASHBOARD_ACCESS_KEY secret already exists.")
 
 
 def deploy_cloudrun():
@@ -182,6 +221,7 @@ if __name__ == "__main__":
         create_gcs_bucket()
         setup_firestore()
         setup_bigquery()
+        setup_secrets()
         deploy_cloudrun()
     elif args.action == "setup-only":
         enable_apis()
