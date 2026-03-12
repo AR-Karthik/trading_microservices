@@ -65,7 +65,7 @@ def prefetch_macro_events():
 
 
 # ─── Config ───────────────────────────────────────────────
-PROJECT_ID          = os.getenv("GCP_PROJECT_ID", "loanbot-8ac74")
+PROJECT_ID          = os.getenv("GCP_PROJECT_ID", "karthiks-trading-assistant")
 ZONE                = "asia-south1-a"
 INSTANCE_NAME       = "trading-engine-spot"
 MACHINE_TYPE        = f"zones/{ZONE}/machineTypes/c2-standard-4"
@@ -100,7 +100,7 @@ echo "=== Trading Engine Startup: $(date) ==="
 # 1. System update + Docker
 apt-get update -y
 apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release git
-curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor --batch --yes -o /usr/share/keyrings/docker-archive-keyring.gpg
 echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
 apt-get update -y
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
@@ -116,6 +116,7 @@ curl -fsSL https://tailscale.com/install.sh | sh
 tailscale up --authkey={TAILSCALE_AUTH_KEY} --hostname=trading-engine --accept-routes || echo "Tailscale up failed, continuing..."
 
 # 3. Clone repository
+rm -rf {REPO_DIR}
 git clone {REPO_URL} {REPO_DIR}
 cd {REPO_DIR}
 
@@ -137,34 +138,44 @@ net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 8000
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
-net.ipv4.tcp_fast_open = 3
 EOF
-sysctl -p
+sysctl -p || true
 
 # RAM Disk for IPC
 mkdir -p /ram_disk
-mount -t tmpfs -o size=512M tmpfs /ram_disk
-echo "tmpfs /ram_disk tmpfs rw,size=512M 0 0" >> /etc/fstab
+mountpoint -q /ram_disk || mount -t tmpfs -o size=512M tmpfs /ram_disk
+grep -q "/ram_disk" /etc/fstab || echo "tmpfs /ram_disk tmpfs rw,size=512M 0 0" >> /etc/fstab
 
 # Mount NVMe (Disk 2) for Hot Storage (Redis/Timescale WAL)
 mkdir -p /mnt/hot_nvme
-mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdb
-mount -o discard,defaults /dev/sdb /mnt/hot_nvme
-echo UUID=$(blkid -s UUID -o value /dev/sdb) /mnt/hot_nvme ext4 discard,defaults,nofail 0 2 >> /etc/fstab
+if ! blkid /dev/sdb; then
+    mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdb
+fi
+if ! mountpoint -q /mnt/hot_nvme; then
+    mount -o discard,defaults /dev/sdb /mnt/hot_nvme
+fi
+grep -q "/mnt/hot_nvme" /etc/fstab || echo "/dev/sdb /mnt/hot_nvme ext4 discard,defaults,nofail 0 2" >> /etc/fstab
 
 # Mount Regional SSD (Disk 3) for Cold Storage (HMM Data)
 mkdir -p /mnt/cold_ssd
-mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdc
-mount -o discard,defaults /dev/sdc /mnt/cold_ssd
-echo UUID=$(blkid -s UUID -o value /dev/sdc) /mnt/cold_ssd ext4 discard,defaults,nofail 0 2 >> /etc/fstab
+if ! blkid /dev/sdc; then
+    mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdc
+fi
+if ! mountpoint -q /mnt/cold_ssd; then
+    mount -o discard,defaults /dev/sdc /mnt/cold_ssd
+fi
+grep -q "/mnt/cold_ssd" /etc/fstab || echo "/dev/sdc /mnt/cold_ssd ext4 discard,defaults,nofail 0 2" >> /etc/fstab
 
 # 6. Launch all services
 # Symlink Docker volumes to the high-performance disks
 mkdir -p /mnt/hot_nvme/redis_data /mnt/hot_nvme/db_data
+# Remove existing symlinks if they exist
+rm -f {REPO_DIR}/data/redis {REPO_DIR}/data/db
 ln -s /mnt/hot_nvme/redis_data {REPO_DIR}/data/redis
 ln -s /mnt/hot_nvme/db_data {REPO_DIR}/data/db
 
-docker compose up -d --build
+# Use --progress=plain to ensure build logs are captured in serial console
+docker compose up -d --build --progress=plain
 
 echo "=== All services started: $(date) ==="
 """
@@ -306,6 +317,8 @@ def delete_instance():
         print(f"Failed to delete: {e}")
 
 if __name__ == "__main__":
+    print(f"DEBUG: Active Project ID: {PROJECT_ID}")
+    print(f"DEBUG: Active Zone: {ZONE}")
     parser = argparse.ArgumentParser(description="GCP Trading Engine Provisioner")
     parser.add_argument("--action", choices=["create", "delete"], default="create")
     parser.add_argument("--skip-holiday-check", action="store_true",
