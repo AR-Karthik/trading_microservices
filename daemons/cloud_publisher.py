@@ -151,7 +151,11 @@ class CloudPublisher:
                     await asyncio.sleep(5)
                     continue
 
-                doc_ref = self.firestore_db.collection("trading_commands").document("active")
+                if not self.firestore_db:
+                    logger.error("Firestore DB not initialized. Skipping command check.")
+                    return
+
+                doc_ref = self.firestore_db.collection("commands").document("latest")
                 doc = await doc_ref.get()
 
                 if doc.exists:
@@ -194,8 +198,9 @@ class CloudPublisher:
 
                 try:
                     await self._upload_tick_parquet(now)
+                    await self._upload_trades_parquet(now)
                 except Exception as e:
-                    logger.error(f"Tick parquet upload failed: {e}")
+                    logger.error(f"EOD Parquet export failed: {e}")
 
                 try:
                     await self._upload_hmm_model()
@@ -231,10 +236,12 @@ class CloudPublisher:
             )
 
             today_str = snapshot_time.strftime("%Y-%m-%d")
-            rows = await conn.fetch(
-                "SELECT * FROM market_history WHERE time >= $1::date AND time < ($1::date + interval '1 day')",
-                snapshot_time
-            )
+            # Enforce fixed column selection and order for BigQuery compatibility
+            rows = await conn.fetch("""
+                SELECT time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, vol_term_ratio 
+                FROM market_history 
+                WHERE time >= $1::date AND time < ($1::date + interval '1 day')
+            """, snapshot_time)
             await conn.close()
 
             if not rows:
@@ -242,8 +249,19 @@ class CloudPublisher:
                 return
 
             df = pd.DataFrame([dict(r) for r in rows])
+            
+            # Ensure types are correct for BigQuery
+            df['time'] = pd.to_datetime(df['time'])
+            df['symbol'] = df['symbol'].astype(str)
+            for col in ['price', 'log_ofi_zscore', 'cvd', 'vpin', 'basis_zscore', 'vol_term_ratio']:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+
             parquet_path = f"/tmp/ticks_{today_str}.parquet"
             df.to_parquet(parquet_path, index=False)
+
+            if not self.gcs_client:
+                logger.error("GCS client not initialized. Skipping tick export.")
+                return
 
             bucket = self.gcs_client.bucket(self.gcs_bucket)
             blob = bucket.blob(f"tick_history/ticks_{today_str}.parquet")
@@ -253,7 +271,52 @@ class CloudPublisher:
             os.remove(parquet_path)
 
         except Exception as e:
-            logger.error(f"Parquet export error: {e}")
+            logger.error(f"Tick Parquet export error: {e}")
+
+    async def _upload_trades_parquet(self, snapshot_time: datetime):
+        """Export today's trades from TimescaleDB to .parquet and upload to GCS."""
+        if not self.gcs_client:
+            return
+
+        try:
+            import asyncpg
+            import pandas as pd
+
+            conn = await asyncpg.connect(
+                host=os.getenv("DB_HOST", "localhost"),
+                port=5432,
+                user="trading_user",
+                password="trading_pass",
+                database="trading_db"
+            )
+
+            today_str = snapshot_time.strftime("%Y-%m-%d")
+            rows = await conn.fetch("""
+                SELECT id::text, time, symbol, action, quantity, price, fees, strategy_id, execution_type 
+                FROM trades 
+                WHERE time >= $1::date AND time < ($1::date + interval '1 day')
+            """, snapshot_time)
+            await conn.close()
+
+            if not rows:
+                logger.info("No trades found for today.")
+                return
+
+            df = pd.DataFrame([dict(r) for r in rows])
+            df['time'] = pd.to_datetime(df['time'])
+            
+            parquet_path = f"/tmp/trades_{today_str}.parquet"
+            df.to_parquet(parquet_path, index=False)
+
+            bucket = self.gcs_client.bucket(self.gcs_bucket)
+            blob = bucket.blob(f"trade_history/trades_{today_str}.parquet")
+            blob.upload_from_filename(parquet_path)
+            logger.info(f"✅ Trade data uploaded to GCS: gs://{self.gcs_bucket}/trade_history/trades_{today_str}.parquet")
+
+            os.remove(parquet_path)
+
+        except Exception as e:
+            logger.error(f"Trade Parquet export error: {e}")
 
     async def _upload_hmm_model(self):
         """Upload the latest HMM model to GCS for persistence."""

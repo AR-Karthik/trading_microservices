@@ -33,6 +33,7 @@ GCS_BUCKET = os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models")
 
 _firestore_client = None
 _gcs_client = None
+_bq_client = None
 
 
 def get_firestore():
@@ -49,6 +50,14 @@ def get_gcs():
         from google.cloud import storage
         _gcs_client = storage.Client(project=GCP_PROJECT)
     return _gcs_client
+
+
+def get_bigquery():
+    global _bq_client
+    if _bq_client is None:
+        from google.cloud import bigquery
+        _bq_client = bigquery.Client(project=GCP_PROJECT)
+    return _bq_client
 
 
 # ─── Models ──────────────────────────────────────────────────────────────────
@@ -150,24 +159,74 @@ def get_strategies():
 @app.get("/analytics")
 def get_analytics(mode: str = "Paper"):
     """
-    Read historical analytics from GCS parquet files.
-    Falls back to Firestore daily P&L if no parquet data exists.
+    Read historical analytics from BigQuery external tables.
+    Calculates equity curve from trade history.
     """
     try:
-        db = get_firestore()
-        doc = db.collection("trading_state").document("live").get()
-        data = doc.to_dict() if doc.exists else {}
-
-        daily_pnl = data.get("daily_pnl_paper", 0.0) if mode == "Paper" else data.get("daily_pnl_live", 0.0)
+        bq = get_bigquery()
+        dataset = "trading_analytics"
+        table = f"{GCP_PROJECT}.{dataset}.trade_history_external"
+        
+        # Query for daily P&L and trade count
+        query = f"""
+            SELECT 
+                DATE(time) as trade_date,
+                SUM(CASE WHEN action = 'SELL' THEN (price * quantity) - fees 
+                         ELSE -(price * quantity) - fees END) as daily_pnl,
+                COUNT(*) as trades
+            FROM `{table}`
+            WHERE execution_type = '{mode}'
+            GROUP BY trade_date
+            ORDER BY trade_date ASC
+        """
+        
+        query_job = bq.query(query)
+        results = query_job.result()
+        
+        curve = []
+        cumulative_pnl = 0.0
+        total_trades = 0
+        
+        for row in results:
+            cumulative_pnl += float(row.daily_pnl)
+            total_trades += row.trades
+            curve.append({
+                "date": row.trade_date.isoformat(),
+                "pnl": round(cumulative_pnl, 2)
+            })
+            
+        # If no data in BigQuery, check Firestore live state for today's P&L
+        if not curve:
+            db = get_firestore()
+            doc = db.collection("trading_state").document("live").get()
+            if doc.exists:
+                data = doc.to_dict()
+                daily_pnl = data.get("daily_pnl_paper", 0.0) if mode == "Paper" else data.get("daily_pnl_live", 0.0)
+                curve = [{"date": datetime.now().date().isoformat(), "pnl": daily_pnl}]
+                cumulative_pnl = daily_pnl
 
         return {
-            "equity_curve": [],
-            "total_pnl": daily_pnl,
-            "trade_count": 0,
-            "source": "firestore_live"
+            "equity_curve": curve,
+            "total_pnl": round(cumulative_pnl, 2),
+            "trade_count": total_trades,
+            "source": "bigquery_external" if curve else "firestore_live"
         }
     except Exception as e:
-        return {"equity_curve": [], "total_pnl": 0.0, "error": str(e)}
+        print(f"BigQuery analytics error: {e}")
+        # Fallback to firestore for minimal data
+        try:
+            db = get_firestore()
+            doc = db.collection("trading_state").document("live").get()
+            data = doc.to_dict() if doc.exists else {}
+            daily_pnl = data.get("daily_pnl_paper", 0.0) if mode == "Paper" else data.get("daily_pnl_live", 0.0)
+            return {
+                "equity_curve": [{"date": datetime.now().date().isoformat(), "pnl": daily_pnl}],
+                "total_pnl": daily_pnl,
+                "trade_count": 0,
+                "error": str(e)
+            }
+        except:
+            return {"equity_curve": [], "total_pnl": 0.0, "error": str(e)}
 
 
 @app.get("/portfolio", response_model=List[Position])

@@ -1,6 +1,6 @@
 # Technical Specifications: Project K.A.R.T.H.I.K.
 ## *(Kinetic Algorithmic Real-Time High-Intensity Knight)*
-**Version 7.0**
+**Version 8.1**
 
 This document represents the absolute ground-truth technical architecture for the trading system, derived from a line-by-line analysis of the current active codebase (`v0.9`).
 

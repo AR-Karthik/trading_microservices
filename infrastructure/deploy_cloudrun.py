@@ -79,6 +79,46 @@ def setup_firestore():
     )
 
 
+def setup_bigquery():
+    """Setup BigQuery dataset and External Tables pointing to GCS Parquet files."""
+    dataset = "trading_analytics"
+    bucket = os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models")
+    
+    print(f"\n=== Setting up BigQuery Dataset: {dataset} ===")
+    run_cmd(f"bq mk --if_exists --dataset {PROJECT_ID}:{dataset}")
+
+    # 1. Tick History External Table
+    tick_table = f"{dataset}.tick_history_external"
+    print(f"Creating External Table: {tick_table}")
+    run_cmd(
+        f"bq mk --if_exists --external_table_definition=PARQUET=gs://{bucket}/tick_history/*.parquet "
+        f"{tick_table}"
+    )
+
+    # 2. Trade History External Table
+    trade_table = f"{dataset}.trade_history_external"
+    print(f"Creating External Table: {trade_table}")
+    run_cmd(
+        f"bq mk --if_exists --external_table_definition=PARQUET=gs://{bucket}/trade_history/*.parquet "
+        f"{trade_table}"
+    )
+    
+    # Grant Cloud Run service account access to BigQuery
+    # The default Cloud Run service account is {PROJECT_NUMBER}-compute@developer.gserviceaccount.com
+    # or we can use the project default service account.
+    print("Granting BigQuery permissions to project service account...")
+    run_cmd(
+        f"gcloud projects add-iam-policy-binding {PROJECT_ID} "
+        f"--member='serviceAccount:{PROJECT_ID}@appspot.gserviceaccount.com' "
+        f"--role='roles/bigquery.dataViewer' --quiet"
+    )
+    run_cmd(
+        f"gcloud projects add-iam-policy-binding {PROJECT_ID} "
+        f"--member='serviceAccount:{PROJECT_ID}@appspot.gserviceaccount.com' "
+        f"--role='roles/bigquery.jobUser' --quiet"
+    )
+
+
 def deploy_cloudrun():
     """Build and deploy the Cloud Run dashboard."""
     print("\n=== Deploying Cloud Run Dashboard ===")
@@ -141,11 +181,13 @@ if __name__ == "__main__":
         enable_apis()
         create_gcs_bucket()
         setup_firestore()
+        setup_bigquery()
         deploy_cloudrun()
     elif args.action == "setup-only":
         enable_apis()
         create_gcs_bucket()
         setup_firestore()
+        setup_bigquery()
         print("\n✅ Cloud infrastructure ready. Run with --action deploy to push the dashboard.")
     elif args.action == "teardown":
         teardown()

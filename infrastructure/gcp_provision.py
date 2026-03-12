@@ -18,11 +18,11 @@ load_dotenv()
 # Add project root to path so we can import our own utils
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ── NSE Holiday Guard ─────────────────────────────────────────────────────────
+# ------ NSE Holiday Guard -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 def is_nse_holiday(target_date: date | None = None) -> bool:
     """
     Returns True if target_date is an NSE market holiday.
-    Uses python-holidays package with India country + NSE sub-market.
+    Uses python-holidays package with XNSE (financial market) subdivision.
     Also filters weekends.
     """
     try:
@@ -31,12 +31,12 @@ def is_nse_holiday(target_date: date | None = None) -> bool:
         # Weekends are always non-trading
         if target.weekday() >= 5:
             return True
-        # NSE holidays (financial market subset)
-        india_holidays = holidays.country_holidays("IN", subdiv="MH", years=target.year)
-        return target in india_holidays
-    except ImportError:
+        # NSE financial holidays
+        market_holidays = holidays.financial_holidays("XNSE", years=target.year)
+        return target in market_holidays
+    except (ImportError, AttributeError):
         import warnings
-        warnings.warn("python-holidays not installed; skipping NSE holiday check.")
+        warnings.warn("python-holidays (XNSE) not supported; skipping NSE holiday check.")
         return False
 
 
@@ -44,11 +44,11 @@ def abort_if_holiday():
     """Exits the provisioner if today is an NSE holiday."""
     today = date.today()
     if is_nse_holiday(today):
-        print(f"🚫 Today ({today.isoformat()}) is an NSE holiday or weekend. VM will not be started.")
+        print(f"🛑 Today ({today.isoformat()}) is an NSE holiday or weekend. VM will not be started.")
         sys.exit(0)  # Clean exit (not error) so Cloud Scheduler marks success
 
 
-# ── Macro Event Pre-fetch ─────────────────────────────────────────────────────
+# ------ Macro Event Pre-fetch -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 def prefetch_macro_events():
     """
     Fetches latest macro events from ForexFactory + FMP and writes to
@@ -64,12 +64,11 @@ def prefetch_macro_events():
         print(f"[WARNING] Macro event fetch failed ({e}). System controller will use cached calendar.")
 
 
-# ─── Config ───────────────────────────────────────────────
+# --------- Config ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 PROJECT_ID          = os.getenv("GCP_PROJECT_ID", "karthiks-trading-assistant")
 ZONE                = "asia-south1-a"
 INSTANCE_NAME       = "trading-engine-spot"
 MACHINE_TYPE        = f"zones/{ZONE}/machineTypes/c2-standard-4"
-TAILSCALE_AUTH_KEY  = os.getenv("TAILSCALE_AUTH_KEY", "")
 GITHUB_PAT          = os.getenv("GITHUB_PAT_TOKEN", "")
 REPO_URL            = f"https://{GITHUB_PAT}@github.com/AR-Karthik/trading_microservices.git" if GITHUB_PAT else "https://github.com/AR-Karthik/trading_microservices.git"
 REPO_DIR            = "/opt/trading"
@@ -90,7 +89,7 @@ ENV_VARS = {
 }
 ENV_CONTENT = "\n".join(f"{k}={v}" for k, v in ENV_VARS.items())
 
-# ─── Startup Script ──────────────────────────────────────
+# --------- Startup Script ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 STARTUP_SCRIPT = f"""#!/bin/bash
 set -e
 exec > /var/log/trading-startup.log 2>&1
@@ -106,28 +105,19 @@ apt-get update -y
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 systemctl enable --now docker
 
-# Docker Compose v2
-mkdir -p /usr/local/lib/docker/cli-plugins
-curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose
-chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-
-# 2. Tailscale
-curl -fsSL https://tailscale.com/install.sh | sh
-tailscale up --authkey={TAILSCALE_AUTH_KEY} --hostname=trading-engine --accept-routes || echo "Tailscale up failed, continuing..."
-
-# 3. Clone repository
+# 2. Clone repository
 rm -rf {REPO_DIR}
 git clone {REPO_URL} {REPO_DIR}
 cd {REPO_DIR}
 
-# 4. Write .env securely from instance metadata (avoids storing secrets in GitHub)
+# 3. Write .env securely from instance metadata
 cat > {REPO_DIR}/.env << 'ENVEOF'
 {ENV_CONTENT}
 ENVEOF
 
 echo ".env written."
 
-# 5. OS Hardening, Storage Mounts, & Kernel Tuning
+# 4. OS Hardening, Storage Mounts, & Kernel Tuning
 echo "Optimizing Kernel (THP, ulimit, TCP)..."
 # Transparent HugePages
 echo always > /sys/kernel/mm/transparent_hugepage/enabled
@@ -146,27 +136,38 @@ mkdir -p /ram_disk
 mountpoint -q /ram_disk || mount -t tmpfs -o size=512M tmpfs /ram_disk
 grep -q "/ram_disk" /etc/fstab || echo "tmpfs /ram_disk tmpfs rw,size=512M 0 0" >> /etc/fstab
 
-# Mount NVMe (Disk 2) for Hot Storage (Redis/Timescale WAL)
-mkdir -p /mnt/hot_nvme
-if ! blkid /dev/sdb; then
-    mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdb
-fi
-if ! mountpoint -q /mnt/hot_nvme; then
-    mount -o discard,defaults /dev/sdb /mnt/hot_nvme
-fi
-grep -q "/mnt/hot_nvme" /etc/fstab || echo "/dev/sdb /mnt/hot_nvme ext4 discard,defaults,nofail 0 2" >> /etc/fstab
+# Robust disk discovery and mounting
+mount_disk() {{
+    local disk_num=$1
+    local mount_point=$2
+    # Try multiple naming schemes: /dev/sdX (older), /dev/nvmeX (newer), google-persistent-disk-X (by-id)
+    local dev=""
+    for d in "/dev/sd$disk_num" "/dev/nvme0n$((disk_num-1))" "/dev/disk/by-id/google-persistent-disk-$((disk_num-2))"; do
+        if [ -e "$d" ]; then dev="$d"; break; fi
+    done
 
-# Mount Regional SSD (Disk 3) for Cold Storage (HMM Data)
-mkdir -p /mnt/cold_ssd
-if ! blkid /dev/sdc; then
-    mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdc
-fi
-if ! mountpoint -q /mnt/cold_ssd; then
-    mount -o discard,defaults /dev/sdc /mnt/cold_ssd
-fi
-grep -q "/mnt/cold_ssd" /etc/fstab || echo "/dev/sdc /mnt/cold_ssd ext4 discard,defaults,nofail 0 2" >> /etc/fstab
+    if [ -n "$dev" ]; then
+        echo "Mounting $dev to $mount_point..."
+        mkdir -p "$mount_point"
+        if ! blkid "$dev" >/dev/null 2>&1; then
+            mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$dev"
+        fi
+        if ! mountpoint -q "$mount_point"; then
+            mount -o discard,defaults "$dev" "$mount_point"
+        fi
+        grep -q "$mount_point" /etc/fstab || echo "$dev $mount_point ext4 discard,defaults,nofail 0 2" >> /etc/fstab
+    else
+        echo "WARNING: Could not find device for disk number $disk_num"
+    fi
+}}
 
-# 6. Launch all services
+# Mount NVMe/SSD (Disk 2) for Hot Storage (Redis/Timescale WAL)
+mount_disk "b" "/mnt/hot_nvme"
+
+# Mount Regional SSD/SSD (Disk 3) for Cold Storage (HMM Data)
+mount_disk "c" "/mnt/cold_ssd"
+
+# 5. Launch all services
 # Symlink Docker volumes to the high-performance disks
 mkdir -p /mnt/hot_nvme/redis_data /mnt/hot_nvme/db_data
 # Remove existing symlinks if they exist
@@ -174,30 +175,29 @@ rm -f {REPO_DIR}/data/redis {REPO_DIR}/data/db
 ln -s /mnt/hot_nvme/redis_data {REPO_DIR}/data/redis
 ln -s /mnt/hot_nvme/db_data {REPO_DIR}/data/db
 
-# Use --progress=plain to ensure build logs are captured in serial console
+# Use --progress=plain for build logs
 docker compose up -d --build --progress=plain
+
+# 6. Wait for Telegram Alerter to be ready
+echo "Waiting for Telegram Alerter to send BOOT signal..."
+MAX_RETRIES=30
+RETRY_COUNT=0
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+    if docker logs telegram_alerter 2>&1 | grep -q "Trading System BOOTED"; then
+        echo "Telegram Alerter is ready and BOOT signal sent."
+        break
+    fi
+    echo "Waiting for telegram_alerter... ($RETRY_COUNT/$MAX_RETRIES)"
+    RETRY_COUNT=$((RETRY_COUNT+1))
+    sleep 5
+done
+
+if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+    echo "WARNING: Telegram Alerter did not signal BOOT within timeout."
+fi
 
 echo "=== All services started: $(date) ==="
 """
-
-def get_or_create_firewall(client, project: str):
-    """Ensure port 8501 is open for the dashboard."""
-    firewall_client = compute_v1.FirewallsClient()
-    rule_name = "allow-trading-dashboard"
-    try:
-        firewall_client.get(project=project, firewall=rule_name)
-        print(f"Firewall rule '{rule_name}' already exists.")
-    except Exception:
-        print(f"Creating firewall rule '{rule_name}' for port 8501...")
-        firewall = compute_v1.Firewall()
-        firewall.name = rule_name
-        firewall.direction = "INGRESS"
-        firewall.network = "global/networks/default"
-        firewall.allowed = [compute_v1.Allowed(I_p_protocol="tcp", ports=["8501"])]
-        firewall.source_ranges = ["0.0.0.0/0"]
-        firewall.target_tags = ["trading-dashboard"]
-        firewall_client.insert(project=project, firewall_resource=firewall)
-        print("Firewall rule created.")
 
 def create_spot_instance():
     """Creates a GCP Spot VM instance with all trading services."""
@@ -207,7 +207,7 @@ def create_spot_instance():
     try:
         existing = instance_client.get(project=PROJECT_ID, zone=ZONE, instance=INSTANCE_NAME)
         print(f"Instance '{INSTANCE_NAME}' already exists (status: {existing.status}). Skipping creation.")
-        print(f"  → React Dashboard should be at http://<tailscale-IP>:8501")
+        print(f"  👉 Cloud Run Dashboard should be used for monitoring.")
         return
     except Exception:
         pass  # Doesn't exist, proceed
@@ -215,7 +215,6 @@ def create_spot_instance():
     instance = compute_v1.Instance()
     instance.name = INSTANCE_NAME
     instance.machine_type = MACHINE_TYPE
-    instance.tags = compute_v1.Tags(items=["trading-dashboard"])
 
     # Spot VM scheduling
     instance.scheduling = compute_v1.Scheduling(
@@ -236,7 +235,7 @@ def create_spot_instance():
         )
     )
     
-    # Disk 2: SSD for Hot Path (WAL/Active Ticks) - pd-extreme not in asia-south1-a
+    # Disk 2: SSD for Hot Path
     disk2 = compute_v1.AttachedDisk(
         auto_delete=False,
         boot=False,
@@ -246,13 +245,13 @@ def create_spot_instance():
         )
     )
 
-    # Disk 3: Regional Persistent SSD for Cold Storage
+    # Disk 3: SSD for Cold Storage
     disk3 = compute_v1.AttachedDisk(
         auto_delete=False,
         boot=False,
         initialize_params=compute_v1.AttachedDiskInitializeParams(
             disk_size_gb=200,
-            disk_type=f"regions/{ZONE[:-2]}/diskTypes/pd-ssd" # Maps asia-south1-a -> asia-south1
+            disk_type=f"zones/{ZONE}/diskTypes/pd-ssd"
         )
     )
 
@@ -285,7 +284,6 @@ def create_spot_instance():
             instance_resource=instance
         )
 
-        # Poll until done
         zone_ops = compute_v1.ZoneOperationsClient()
         print("Waiting for VM creation to complete...", end="", flush=True)
         while True:
@@ -300,9 +298,8 @@ def create_spot_instance():
             print(f"ERROR: {op.error}")
         else:
             print(f"\nInstance '{INSTANCE_NAME}' created successfully!")
-            print(f"  → Startup script is installing Docker + Tailscale (~3-5 minutes)")
-            print(f"  → React Dashboard will be available at http://<tailscale-IP>:8501")
-            print(f"  → Check logs: gcloud compute ssh {INSTANCE_NAME} --zone={ZONE} -- 'tail -f /var/log/trading-startup.log'")
+            print(f"  👉 Cloud Run Dashboard will be available shortly.")
+            print(f"  👉 Check logs: gcloud compute ssh {INSTANCE_NAME} --zone={ZONE} -- 'tail -f /var/log/trading-startup.log'")
 
     except Exception as e:
         print(f"Failed to provision instance: {e}")
@@ -322,23 +319,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GCP Trading Engine Provisioner")
     parser.add_argument("--action", choices=["create", "delete"], default="create")
     parser.add_argument("--skip-holiday-check", action="store_true",
-                        help="Override NSE holiday guard (use for manual deploys)")
+                        help="Override NSE holiday guard")
     parser.add_argument("--skip-macro-fetch", action="store_true",
-                        help="Skip ForexFactory+FMP macro calendar fetch")
+                        help="Skip macro calendar fetch")
     args = parser.parse_args()
 
     if args.action == "create":
-        # ── NSE Holiday Guard ──────────────────────────────────────────────
         if not args.skip_holiday_check:
             abort_if_holiday()
-
-        # ── Macro Event Pre-fetch ──────────────────────────────────────────
         if not args.skip_macro_fetch:
             prefetch_macro_events()
-
-        get_or_create_firewall(compute_v1.InstancesClient(), PROJECT_ID)
         create_spot_instance()
 
     elif args.action == "delete":
         delete_instance()
-
