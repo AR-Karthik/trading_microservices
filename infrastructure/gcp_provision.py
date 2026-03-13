@@ -231,7 +231,8 @@ echo "Waiting for Telegram Alerter to send BOOT signal..."
 MAX_RETRIES=30
 RETRY_COUNT=0
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    if docker logs telegram_alerter 2>&1 | grep -Ei "Alerter is ready|Trading System BOOTED"; then
+    if docker logs telegram_alerter 2>&1 | grep -Ei "Alerter is ready|Trading System BOOTED" && \
+       docker ps --format '{{.Names}}' | grep -q "live_bridge"; then
         echo "Telegram Alerter is ready."
         break
     fi

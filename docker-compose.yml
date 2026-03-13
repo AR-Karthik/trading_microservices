@@ -122,6 +122,25 @@ services:
         condition: service_healthy
     restart: always
     env_file: .env
+    volumes:
+      - /ram_disk:/ram_disk:rw
+
+  live_bridge:
+    image: trading-app:latest
+    container_name: live_bridge
+    command: python -m daemons.live_bridge
+    depends_on:
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    restart: always
+    env_file: .env
+    volumes:
+      - /ram_disk:/ram_disk:rw
+      - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
 
   cloud_publisher:
     image: trading-app:latest
