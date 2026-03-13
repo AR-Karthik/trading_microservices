@@ -109,6 +109,7 @@ class DataGateway:
         self._last_tick_ts: dict[str, float] = {}
         self._lot_sizes_fetched = False
         self._system_halted = False
+        self._data_flow_alert_sent = False
 
         # Shoonya API Setup
         host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")

@@ -144,24 +144,53 @@ grep -q "/ram_disk" /etc/fstab || echo "tmpfs /ram_disk tmpfs rw,size=512M 0 0" 
 mount_disk() {{
     local disk_num=$1
     local mount_point=$2
-    # Try multiple naming schemes: /dev/sdX (older), /dev/nvmeX (newer), google-persistent-disk-X (by-id)
     local dev=""
-    for d in "/dev/sd$disk_num" "/dev/nvme0n$((disk_num-1))" "/dev/disk/by-id/google-persistent-disk-$((disk_num-2))"; do
-        if [ -e "$d" ]; then dev="$d"; break; fi
-    done
+    
+    echo "Attempting to find device for disk $disk_num..."
+    
+    # Priority 1: Persistent Disk ID (The most reliable on GCP)
+    local disk_id="google-persistent-disk-$(( (disk_num == 'b' ? 1 : 2) ))"
+    if [ -e "/dev/disk/by-id/$disk_id" ]; then
+        dev="/dev/disk/by-id/$disk_id"
+    fi
+    
+    # Priority 2: Standard naming /dev/sdX
+    if [ -z "$dev" ] && [ -e "/dev/sd$disk_num" ]; then
+        dev="/dev/sd$disk_num"
+    fi
+    
+    # Priority 3: NVMe naming /dev/nvme0nX
+    if [ -z "$dev" ]; then
+        local nvme_idx=$(( (disk_num == 'b' ? 1 : 2) ))
+        if [ -e "/dev/nvme0n$nvme_idx" ]; then
+            dev="/dev/nvme0n$nvme_idx"
+        fi
+    fi
 
     if [ -n "$dev" ]; then
-        echo "Mounting $dev to $mount_point..."
+        echo "Found device $dev. Setting up $mount_point..."
         mkdir -p "$mount_point"
+        # Only format if needed
         if ! blkid "$dev" >/dev/null 2>&1; then
-            mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$dev"
+            echo "Formatting $dev..."
+            mkfs.ext4 -F -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$dev"
         fi
+        
+        # Mount
         if ! mountpoint -q "$mount_point"; then
             mount -o discard,defaults "$dev" "$mount_point"
         fi
+        
+        # Persist across reboots
         grep -q "$mount_point" /etc/fstab || echo "$dev $mount_point ext4 discard,defaults,nofail 0 2" >> /etc/fstab
+        
+        # Critical: Set permissions for Docker volumes
+        chmod 777 "$mount_point"
+        echo "Successfully mounted $dev to $mount_point"
     else
-        echo "WARNING: Could not find device for disk number $disk_num"
+        echo "ERROR: Could not locate device for disk $disk_num"
+        # List all block devices for debugging in startup logs
+        lsblk
     fi
 }}
 
@@ -174,6 +203,9 @@ mount_disk "c" "/mnt/cold_ssd"
 # 5. Launch all services
 # Symlink Docker volumes to the high-performance disks
 mkdir -p /mnt/hot_nvme/redis_data /mnt/hot_nvme/db_data
+# Fix permissions explicitly for current mount path
+chmod -R 777 /mnt/hot_nvme
+
 # Remove existing symlinks if they exist
 rm -f {REPO_DIR}/data/redis {REPO_DIR}/data/db
 ln -s /mnt/hot_nvme/redis_data {REPO_DIR}/data/redis
@@ -201,6 +233,8 @@ if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
 fi
 
 echo "=== All services started: $(date) ==="
+"""
+GCP Spot VM Provisioner for Trading Microservices.
 """
 
 def ensure_firewall_rule():
