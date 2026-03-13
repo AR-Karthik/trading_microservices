@@ -13,7 +13,11 @@ def run_cmd(cmd):
     print(f"Running: {cmd}")
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"Error: {result.stderr}")
+        # Ignore "Already exists" or "not found" errors for idempotency
+        if "already exists" in result.stderr.lower() or "not found" in result.stderr.lower():
+            print(f"Info: {result.stderr.strip()}")
+        else:
+            print(f"Error: {result.stderr}")
     else:
         print(result.stdout)
     return result

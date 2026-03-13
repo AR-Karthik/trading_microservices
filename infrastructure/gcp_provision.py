@@ -90,6 +90,7 @@ ENV_VARS = {
     "SIMULATION_MODE":    os.getenv("SIMULATION_MODE", "false"),
     "REDIS_HOST":         "redis",
     "DB_HOST":            "timescaledb",
+    "ENABLE_OFF_HOUR_SIMULATOR": os.getenv("ENABLE_OFF_HOUR_SIMULATOR", "true"),
 }
 ENV_CONTENT = "\n".join(f"{k}={v}" for k, v in ENV_VARS.items())
 
@@ -211,8 +212,17 @@ rm -f {REPO_DIR}/data/redis {REPO_DIR}/data/db
 ln -s /mnt/hot_nvme/redis_data {REPO_DIR}/data/redis
 ln -s /mnt/hot_nvme/db_data {REPO_DIR}/data/db
 
-# Use --progress=plain for build logs
-docker compose up -d --build --progress=plain
+# Check for GCP credentials file and create dummy if missing to avoid mount failure
+# (Docker requires the host path to exist if it's a bind mount)
+if [ ! -f "/var/run/google/gcp_creds.json" ]; then
+    echo "⚠️ /var/run/google/gcp_creds.json not found. Creating placeholder to prevent mount failure."
+    mkdir -p /var/run/google
+    echo "{}" > /var/run/google/gcp_creds.json
+fi
+
+# Use --progress=plain for build logs and add a 10min timeout to prevent hanging forever
+echo "Starting containers (timeout 10m)..."
+timeout 600s docker compose up -d --build --progress=plain || echo "❌ Docker compose timed out or failed."
 
 # 6. Wait for Telegram Alerter to be ready
 echo "Waiting for Telegram Alerter to send BOOT signal..."
@@ -276,7 +286,11 @@ def create_spot_instance():
     # Check if already exists
     try:
         existing = instance_client.get(project=PROJECT_ID, zone=ZONE, instance=INSTANCE_NAME)
-        print(f"Instance '{INSTANCE_NAME}' already exists (status: {existing.status}). Skipping creation.")
+        if existing.status == "TERMINATED":
+            print(f"Instance '{INSTANCE_NAME}' exists but is TERMINATED. Starting it...")
+            instance_client.start(project=PROJECT_ID, zone=ZONE, instance=INSTANCE_NAME)
+        else:
+            print(f"Instance '{INSTANCE_NAME}' already exists (status: {existing.status}). Skipping creation.")
         print(f"  👉 Cloud Run Dashboard should be used for monitoring.")
         return
     except Exception:

@@ -659,10 +659,10 @@ class DataGateway:
         await self.redis_client.set("SYSTEM_HALT", str(level))
         await self.redis_client.publish("system_events", json.dumps(payload))
         # Also push Telegram alert via Pub/Sub
-        await send_cloud_alert(
+        asyncio.create_task(send_cloud_alert(
             f"⛔ CIRCUIT BREAKER L{level}% triggered! Market halt: {halt_mins} min.",
             alert_type="CRITICAL"
-        )
+        ))
 
 
 async def start_gateway():

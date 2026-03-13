@@ -20,6 +20,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone
+import html
 
 import redis.asyncio as redis
 
@@ -75,8 +76,19 @@ class TelegramAlerter:
             )
 
     async def start(self):
-        self._redis = redis.from_url(self.redis_url, decode_responses=True)
-        logger.info("TelegramAlerter started. Draining redis 'telegram_alerts' queue.")
+        # Wait for Redis to be ready
+        logger.info(f"Connecting to Redis at {self.redis_url}...")
+        while True:
+            try:
+                self._redis = redis.from_url(self.redis_url, decode_responses=True)
+                await self._redis.ping()
+                logger.info("✅ Redis connection established.")
+                break
+            except Exception as e:
+                logger.warning(f"⏳ Waiting for Redis... ({e})")
+                await asyncio.sleep(5)
+
+        logger.info("TelegramAlerter started. Draining 'telegram_alerts' queue.")
         await self._send_boot_alert()
 
         while True:
@@ -123,7 +135,10 @@ class TelegramAlerter:
             pass
 
         emoji = ALERT_EMOJIS.get(alert_type, "ℹ️")
-        text = f"{emoji} [{alert_type}]\n{message}\n\n💰 Paper Budget: {paper_avail} / {paper_total}\n💰 Live Budget: {live_avail} / {live_total}\n🕐 {timestamp[:19]} UTC"
+        
+        # HTML Escape message to avoid Telegram API 400 errors with < or & characters
+        safe_message = html.escape(message)
+        text = f"{emoji} <b>[{alert_type}]</b>\n{safe_message}\n\n💰 Paper Budget: {paper_avail} / {paper_total}\n💰 Live Budget: {live_avail} / {live_total}\n🕐 {timestamp[:19]} UTC"
 
         logger.info(f"TELEGRAM [{alert_type}]: {message[:100]}")
 
