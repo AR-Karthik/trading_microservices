@@ -139,6 +139,7 @@ class LiquidationDaemon:
 
     async def _market_monitor(self):
         """Polls market state and tick data to apply exit barriers."""
+        asyncio.create_task(send_cloud_alert("🛡️ LIQUIDATION DAEMON: Active and monitoring risk thresholds.", alert_type="SYSTEM"))
         market_sub = self.mq.create_subscriber(Ports.MARKET_DATA, topics=["TICK.NIFTY50"])
         state_sub = self.mq.create_subscriber(Ports.MARKET_STATE, topics=["STATE"])
 
@@ -479,11 +480,11 @@ class LiquidationDaemon:
 
                 elif http400_result == "abort":
                     logger.error(f"HTTP 400 ABORT (margin/payload error): {err_str}")
-                    await send_cloud_alert(
+                    asyncio.create_task(send_cloud_alert(
                         f"🆘 CRITICAL: EXIT ORDER ABORTED for {symbol}\n"
                         f"Error: {err_str[:200]}\nManual intervention required!",
                         alert_type="CRITICAL"
-                    )
+                    ))
                     self.orphaned_positions.pop(symbol, None)
                     return
                 else:
@@ -492,10 +493,10 @@ class LiquidationDaemon:
 
         # All retries exhausted
         logger.error(f"❌ EXIT ORDER FAILED after {max_retries} attempts for {symbol}.")
-        await send_cloud_alert(
+        asyncio.create_task(send_cloud_alert(
             f"❌ EXIT ORDER EXHAUSTED: {symbol} | {reason}\nManual intervention required!",
             alert_type="ERROR"
-        )
+        ))
 
     def _parse_http400_emsg(self, err_str: str) -> str:
         """

@@ -359,11 +359,11 @@ async def execute_orders(pull_socket, pool, mq_manager, redis_client):
 
             # --- Pub/Sub Alert: Transaction Confirmation ---
             emoji = "📄" # Paper
-            await send_cloud_alert(
+            asyncio.create_task(send_cloud_alert(
                 f"{emoji} *TRANSACTION*: {execution['action']} {execution['quantity']} {execution['symbol']}\n"
                 f"Price: ₹{execution['price']:.2f} | Strategy: {execution['strategy_id']}",
                 alert_type="TRANSACTION"
-            )
+            ))
             
             logger.info(f"Executed: {execution['action']} {execution['symbol']} @ {exec_price:.2f} (Fees: {fees})")
 
@@ -410,6 +410,7 @@ async def start_bridge():
         return
 
     try:
+        asyncio.create_task(send_cloud_alert("🧪 PAPER BRIDGE: Active and simulating order execution.", alert_type="SYSTEM"))
         # Run execution loop and panic listener concurrently
         await asyncio.gather(
             execute_orders(pull_socket, pool, mq, r),
@@ -460,11 +461,11 @@ async def panic_listener(pool, r):
                             await conn.execute(update_query)
                             
                         logger.info(f"{mode_str}Portfolio successfully liquidated.")
-                        await send_cloud_alert(
+                        asyncio.create_task(send_cloud_alert(
                             f"🚨 PANIC LIQUIDATION COMPLETED {mode_str}\n"
                             f"All positions for this mode have been closed.",
                             alert_type="CRITICAL"
-                        )
+                        ))
             except Exception as e:
                 logger.error(f"Error in panic handler: {e}")
 

@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from core.mq import MQManager, Ports, RedisLogger
 from core.health import Heartbeat
+from core.alerts import send_cloud_alert
 from NorenRestApiPy.NorenApi import NorenApi
 
 try:
@@ -170,6 +171,7 @@ class ShoonyaDataStreamer:
             logger.info(f"Successfully logged in as {res.get('uname')}")
             
             logger.info("Starting WebSockets feed...")
+            asyncio.create_task(send_cloud_alert("🌐 SHOONYA GATEWAY: Active and streaming live market data.", alert_type="SYSTEM"))
             self.api.start_websocket(
                 order_update_callback=lambda x: None, 
                 subscribe_callback=self.event_handler_feed_update, 

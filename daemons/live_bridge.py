@@ -291,6 +291,7 @@ class LiveExecutionEngine:
     async def run(self, pull_socket):
         """Listens for orders and spawns async handlers (Fire-and-Forget)."""
         logger.info("Started Live Execution loop. Waiting for signals...")
+        asyncio.create_task(send_cloud_alert("⚡ LIVE BRIDGE: Active and monitoring Shoonya execution stream.", alert_type="SYSTEM"))
         
         trade_pub_socket = self.mq.create_publisher(Ports.TRADE_EVENTS)
         

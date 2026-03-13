@@ -39,6 +39,7 @@ import redis.asyncio as redis
 import os
 from core.shm import ShmManager
 from core.mq import MQManager, Ports, Topics
+from core.alerts import send_cloud_alert
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -513,6 +514,7 @@ class MarketSensor:
             self._start_compute_process()
 
         logger.info("MarketSensor active. Subscribing to tick data...")
+        asyncio.create_task(send_cloud_alert("👁️ MARKET SENSOR: Active. Computing microstructure features and correlations.", alert_type="SYSTEM"))
         sub = self.mq.create_subscriber(Ports.MARKET_DATA, topics=[Topics.TICK_DATA, "TICK."])
         tick_count = 0
 

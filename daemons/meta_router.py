@@ -221,10 +221,10 @@ class MetaRouter:
                     old_mode = self.orchestrator.active_engine
                     logger.info(f"🔄 Switching Regime Engine: {old_mode} -> {mode}")
                     self.orchestrator.active_engine = mode
-                    await send_cloud_alert(
+                    asyncio.create_task(send_cloud_alert(
                         f"🔄 HOT-SWAP APPLIED: Regime engine switched from {old_mode} to {mode}.",
                         alert_type="CONFIG"
-                    )
+                    ))
             
             # 2. Sizing Constraints
             try:
@@ -323,12 +323,12 @@ class MetaRouter:
                     f"🔥 PORTFOLIO HEAT CAP: total_f={total_heat:.3f} > limit={self.heat_limit:.3f}. "
                     f"Scaling all weights by {scale:.3f}."
                 )
-                await send_cloud_alert(
+                asyncio.create_task(send_cloud_alert(
                     f"🔥 PORTFOLIO HEAT CAP TRIGGERED\n"
                     f"Total Heat: {total_heat:.3f} | Limit: {self.heat_limit:.3f}\n"
                     f"Scaling factor: {scale:.3f} applied to all positions.",
                     alert_type="RISK"
-                )
+                ))
                 await self._redis.set("PORTFOLIO_HEAT_CAPPED", "True", ex=60)
             else:
                 await self._redis.set("PORTFOLIO_HEAT_CAPPED", "False", ex=60)
@@ -361,6 +361,7 @@ class MetaRouter:
 
     async def run(self):
         logger.info("MetaRouter [Core 3] Tri-Brain active. Waiting for market & model convergence...")
+        asyncio.create_task(send_cloud_alert("🚦 META ROUTER: Active and orchestrating strategy weights.", alert_type="SYSTEM"))
         
         # Start config listener in background
         asyncio.create_task(self._config_update_listener())

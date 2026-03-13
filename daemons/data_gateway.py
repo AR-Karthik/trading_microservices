@@ -156,7 +156,8 @@ class DataGateway:
     async def start(self):
         self.redis_client = redis.from_url(self.redis_url, decode_responses=True)
         logger.info("DataGateway initialised. Starting sub-tasks...")
-        await send_cloud_alert("🛰️ DATA GATEWAY: Service active. Monitoring 13 heavyweights + Indices.", alert_type="SYSTEM")
+        asyncio.create_task(send_cloud_alert("🚀 DATA GATEWAY: Service active. Monitoring 13 heavyweights + Indices.", alert_type="SYSTEM"))
+        self._data_flow_alert_sent = False
 
         await asyncio.gather(
             self._tick_stream(),
@@ -264,6 +265,11 @@ class DataGateway:
 
                 if raw_tick.get('t') not in ('tk', 'tf'):
                     continue
+
+                # Signal live data flow on first valid tick
+                if not getattr(self, '_data_flow_alert_sent', False):
+                    asyncio.create_task(send_cloud_alert("✅ DATA INGESTION LIVE: First market ticks received and broadcasting via Redis.", alert_type="INFO"))
+                    self._data_flow_alert_sent = True
 
                 token = raw_tick.get('tk')
                 symbol = TOKEN_TO_SYMBOL.get(token) or self.active_option_tokens.get(token)

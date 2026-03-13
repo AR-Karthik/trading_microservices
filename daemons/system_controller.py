@@ -109,10 +109,10 @@ class SystemController:
             logger.info(f"Initialized AVAILABLE_MARGIN_LIVE pool: ₹{live_limit:,.2f}")
 
         logger.info("SystemController started. Monitoring lifecycle events.")
-        await send_cloud_alert(
+        asyncio.create_task(send_cloud_alert(
             f"🟢 SYSTEM BOOT: Controller active. Paper Budget: ₹{paper_limit:,.2f} | Live Budget: ₹{live_limit:,.2f}",
             alert_type="SYSTEM"
-        )
+        ))
 
         # ── Persistence Reconciliation: Audit Pending Journal (SRS §2.7) ──
         await self._audit_pending_journal()
