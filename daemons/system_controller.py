@@ -137,12 +137,12 @@ class SystemController:
             logger.warning(f"⚠️ FOUND {count} ORPHANED INTENTS in Pending Journal!")
             for key in keys:
                 data_raw = await self.redis.get(key)
-                await send_cloud_alert(
+                asyncio.create_task(send_cloud_alert(
                     f"⚠️ ORPHANED INTENT detected on boot: {key}\n"
                     f"Data: {data_raw[:200]}...\n"
                     f"Action Required: Manually verify if order reached exchange!",
                     alert_type="CRITICAL"
-                )
+                ))
 
     # ── Macro Calendar ───────────────────────────────────────────────────────
 
@@ -184,11 +184,11 @@ class SystemController:
                             f"📵 MACRO LOCKDOWN: '{event['name']}' in "
                             f"{int(delta.total_seconds() / 60)} min."
                         )
-                        await send_cloud_alert(
+                        asyncio.create_task(send_cloud_alert(
                             f"📵 MACRO LOCKDOWN activated: {event['name']} "
                             f"at {event_dt.strftime('%H:%M IST')}",
                             alert_type="SYSTEM"
-                        )
+                        ))
 
                 # Post-event: clear lockdown 30 min after
                 elif delta < timedelta(0) and delta > timedelta(minutes=-30):
@@ -228,10 +228,10 @@ class SystemController:
                 if preempted and not self._preemption_detected:
                     self._preemption_detected = True
                     logger.critical("⚡ GCP PREEMPTION NOTICE DETECTED! Initiating emergency square-off.")
-                    await send_cloud_alert(
+                    asyncio.create_task(send_cloud_alert(
                         "⚡ GCP SPOT VM PREEMPTION DETECTED! Initiating batched SQUARE_OFF_ALL.",
                         alert_type="CRITICAL"
-                    )
+                    ))
                     await self._execute_square_off_all(reason="GCP_PREEMPTION")
             except Exception as e:
                 logger.debug(f"Preemption poll error (expected outside GCP): {e}")
@@ -264,10 +264,10 @@ class SystemController:
                 logger.critical(f"🔴 HARD STOP: {SHUTDOWN_HH:02d}:{SHUTDOWN_MM:02d} IST reached.")
                 # ── EOD Summary Report (before square-off so positions are still visible) ──
                 await self._eod_summary_report(now)
-                await send_cloud_alert(
+                asyncio.create_task(send_cloud_alert(
                     f"🔴 HARD STOP at {SHUTDOWN_HH:02d}:{SHUTDOWN_MM:02d} IST. Squaring off all positions.",
                     alert_type="SYSTEM"
-                )
+                ))
                 await self._execute_square_off_all(reason="EOD_HARD_STOP")
                 self._shutdown_flag = True
                 # Flush Redis state
@@ -395,12 +395,12 @@ class SystemController:
             lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
             summary_msg = "\n".join(lines)
 
-            await send_cloud_alert(summary_msg, alert_type="SUMMARY")
+            asyncio.create_task(send_cloud_alert(summary_msg, alert_type="SUMMARY"))
             logger.info("EOD summary report sent to Telegram.")
 
         except Exception as e:
             logger.error(f"EOD summary report failed: {e}")
-            await send_cloud_alert(f"⚠️ EOD summary report failed: {e}", alert_type="ERROR")
+            asyncio.create_task(send_cloud_alert(f"⚠️ EOD summary report failed: {e}", alert_type="ERROR"))
 
     # ── HMM & Data Synchronization ──────────────────────────────────────────
 
@@ -458,7 +458,7 @@ class SystemController:
 
     async def _telegram_alert(self, message: str):
         # Legacy placeholder
-        await send_cloud_alert(message, alert_type="SYSTEM")
+        asyncio.create_task(send_cloud_alert(message, alert_type="SYSTEM"))
 
 
 # ── SEBI-Compliant Batched Execution Helper ──────────────────────────────────

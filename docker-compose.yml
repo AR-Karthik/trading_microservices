@@ -66,7 +66,7 @@ services:
     env_file: .env
     cpuset: "1"
     volumes:
-      - ./ram_disk:/ram_disk
+      - /ram_disk:/ram_disk
 
   meta_router:
     image: trading-app:latest
@@ -79,7 +79,7 @@ services:
     env_file: .env
     cpuset: "1"
     volumes:
-      - ./ram_disk:/ram_disk
+      - /ram_disk:/ram_disk
 
   strategy_engine:
     image: trading-app:latest
@@ -96,7 +96,7 @@ services:
     env_file: .env
     cpuset: "2"
     volumes:
-      - ./ram_disk:/ram_disk
+      - /ram_disk:/ram_disk
 
   liquidation_daemon:
     image: trading-app:latest
@@ -133,6 +133,11 @@ services:
     restart: always
     env_file: .env
     cpuset: "3"
+    volumes:
+      - /ram_disk:/ram_disk
+      - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
 
   telegram_alerter:
     image: trading-app:latest
@@ -158,6 +163,38 @@ services:
       - "8000:8000"
     restart: always
     env_file: .env
+    volumes:
+      - /ram_disk:/ram_disk
+      - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
+
+  system_controller:
+    image: trading-app:latest
+    container_name: system_controller
+    command: python -m daemons.system_controller
+    depends_on:
+      redis:
+        condition: service_healthy
+      data_gateway:
+        condition: service_started
+    restart: always
+    env_file: .env
+    volumes:
+      - /ram_disk:/ram_disk
+      - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
+
+  dashboard_frontend:
+    build:
+      context: ./dashboard/frontend
+    container_name: dashboard_frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - dashboard_api
+    restart: always
 
 volumes:
   timescaledb_data:

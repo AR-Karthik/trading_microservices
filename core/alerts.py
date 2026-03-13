@@ -1,14 +1,14 @@
 import json
 import logging
 import os
-from google.cloud import pubsub_v1
+from datetime import datetime, timezone
+import redis
 
 logger = logging.getLogger("CloudAlerts")
 
 class CloudAlerts:
     _instance = None
-    _publisher = None
-    _topic_path = None
+    _redis = None
 
     @classmethod
     def get_instance(cls):
@@ -17,38 +17,36 @@ class CloudAlerts:
         return cls._instance
 
     def __init__(self):
-        project_id = os.environ.get("GCP_PROJECT_ID", "karthiks-trading-assistant")
-        topic_id = "karthik-telemetry-alerts"
-        
+        redis_host = os.environ.get("REDIS_HOST", "localhost")
+        self.redis_url = f"redis://{redis_host}:6379"
         try:
-            self._publisher = pubsub_v1.PublisherClient()
-            self._topic_path = self._publisher.topic_path(project_id, topic_id)
-            logger.info(f"CloudAlerts initialized for topic: {self._topic_path}")
+            # Note: Using synchronous redis client for simple, thread-safe push
+            self._redis = redis.from_url(self.redis_url, decode_responses=True)
+            logger.info(f"CloudAlerts initialized using Redis queue at {self.redis_url}")
         except Exception as e:
-            logger.error(f"Failed to initialize Pub/Sub publisher: {e}")
+            logger.error(f"Failed to initialize Redis for alerts: {e}")
 
     async def alert(self, text: str, alert_type: str = "SYSTEM", **kwargs):
         """
-        Pushes an alert to Google Cloud Pub/Sub.
-        This is a non-blocking/background-compatible call.
+        Pushes an alert to the local Redis queue.
+        This call is extremely fast (<1ms) and safe for trading loops.
         """
-        if not self._publisher or not self._topic_path:
-            logger.warning(f"Pub/Sub not initialized. Alert dropped: {text}")
+        if not self._redis:
+            logger.warning(f"Redis alerts not initialized. Alert dropped: {text}")
             return
 
         payload = {
-            "text": text,
+            "message": text, # Match telegram_bot.py expected key
             "type": alert_type,
-            "timestamp": os.environ.get("IST_TIME", ""), # Optional time context
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             **kwargs
         }
         
         try:
-            message_bytes = json.dumps(payload).encode("utf-8")
-            # Publish is asynchronous by default in the client
-            self._publisher.publish(self._topic_path, message_bytes)
+            # LPUSH is O(1) and atomic
+            self._redis.lpush("telegram_alerts", json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to publish alert: {e}")
+            logger.error(f"Failed to push alert to Redis: {e}")
 
 # Global helper for easy access
 async def send_cloud_alert(text: str, alert_type: str = "SYSTEM", **kwargs):

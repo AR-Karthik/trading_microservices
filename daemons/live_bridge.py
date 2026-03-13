@@ -271,11 +271,11 @@ class LiveExecutionEngine:
             
             # --- Pub/Sub Alert: Transaction Confirmation ---
             emoji = "🟢" # Live
-            await send_cloud_alert(
+            asyncio.create_task(send_cloud_alert(
                 f"{emoji} *TRANSACTION*: {execution['action']} {execution['quantity']} {execution['symbol']}\n"
                 f"Price: ₹{execution['price']:.2f} | Strategy: {execution['strategy_id']}",
                 alert_type="TRANSACTION"
-            )
+            ))
             
             # Publish live P&L and lot count to Redis for cloud_publisher and UI
             await self.redis.set("DAILY_REALIZED_PNL_LIVE", str(self.total_realized_pnl))
@@ -354,11 +354,11 @@ class LiveExecutionEngine:
                             await conn.execute("UPDATE portfolio SET quantity = 0, avg_price = 0, realized_pnl=0 WHERE execution_type = 'Actual'")
                             
                         logger.critical("✅ Live Market Wipeout Completed.")
-                        await send_cloud_alert(
+                        asyncio.create_task(send_cloud_alert(
                             "🚨 LIVE PANIC LIQUIDATION COMPLETED\n"
                             "All real positions have been closed with market orders.",
                             alert_type="CRITICAL"
-                        )
+                        ))
                         
                 except Exception as e:
                     logger.error(f"Live Panic exception: {e}")

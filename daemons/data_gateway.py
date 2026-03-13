@@ -33,8 +33,6 @@ load_dotenv()
 
 RISK_FREE_RATE = 0.065
 
-RISK_FREE_RATE = 0.065
-
 try:
     import uvloop
 except ImportError:
@@ -48,6 +46,12 @@ logging.basicConfig(
 logger = logging.getLogger("DataGateway")
 
 IST = ZoneInfo("Asia/Kolkata")
+MARKET_OPEN = dt_time(9, 15)
+MARKET_CLOSE = dt_time(15, 30)
+
+def is_market_hours():
+    now = datetime.now(IST).time()
+    return MARKET_OPEN <= now <= MARKET_CLOSE
 
 # Symbols simulated / watched
 # Symbols simulated / watched
@@ -110,6 +114,7 @@ class DataGateway:
         self._lot_sizes_fetched = False
         self._system_halted = False
         self._data_flow_alert_sent = False
+        self.sim_mode = False  # Dynamic state
 
         # Shoonya API Setup
         host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
@@ -117,7 +122,7 @@ class DataGateway:
         self.api = NorenApi(host=host, websocket=ws_host)
         self.tick_queue = asyncio.Queue()
         self.active_option_tokens = {} # token -> symbol (e.g. "12345" -> "NIFTY26MAR22350CE")
-        self.last_expiry_sync = 0
+        self.last_expiry_sync: float = 0.0
 
     # ── Authentication ───────────────────────────────────────────────────────
 
@@ -161,6 +166,7 @@ class DataGateway:
         self._data_flow_alert_sent = False
 
         await asyncio.gather(
+            self._mode_controller(),  # New: Dynamic mode manager
             self._tick_stream(),
             self._lot_size_scheduler(),
             self._staleness_watchdog(),
@@ -191,6 +197,44 @@ class DataGateway:
                     
         return best_strike
 
+    # ── Dynamic Mode Controller ──────────────────────────────────────────────
+
+    async def _mode_controller(self):
+        """Monitors market hours and connectivity to switch between LIVE and SIMULATED."""
+        logger.info("Dynamic Mode Controller active.")
+        while True:
+            try:
+                sim_enabled = os.getenv("ENABLE_OFF_HOUR_SIMULATOR", "true").lower() == "true"
+                sim_mode_global = os.getenv("SIMULATION_MODE", "false").lower() == "true"
+                market_on = is_market_hours()
+                
+                new_sim_mode = self.sim_mode
+                
+                if market_on:
+                    # In market hours, we MUST try to be LIVE unless global SIMULATION_MODE is forced
+                    new_sim_mode = sim_mode_global
+                else:
+                    # Off-hours: use simulator if enabled
+                    new_sim_mode = sim_enabled
+
+                if new_sim_mode != self.sim_mode:
+                    old_mode = "SIMULATED" if self.sim_mode else "LIVE"
+                    new_mode = "SIMULATED" if new_sim_mode else "LIVE"
+                    logger.info(f"🔄 Mode Transition: {old_mode} -> {new_mode}")
+                    
+                    self.sim_mode = new_sim_mode
+                    self._data_flow_alert_sent = False # Reset to signal first tick in new mode
+                    
+                    asyncio.create_task(send_cloud_alert(
+                        f"🔄 DATA GATEWAY: Switch from {old_mode} to {new_mode} data flow.",
+                        alert_type="SYSTEM"
+                    ))
+                    
+            except Exception as e:
+                logger.error(f"Mode controller error: {e}")
+            
+            await asyncio.sleep(60) # Check every minute
+
     # ── Tick Stream ──────────────────────────────────────────────────────────
 
     async def _tick_stream(self):
@@ -199,11 +243,24 @@ class DataGateway:
         Uses asyncio.Queue to bridge the synchronous callback to the async event loop.
         """
         logger.info("Starting live Shoonya WebSocket integration...")
-        sim_mode = os.getenv("SIMULATION_MODE", "false").lower() == "true"
+        sim_enabled = os.getenv("ENABLE_OFF_HOUR_SIMULATOR", "true").lower() == "true"
+        sim_mode_global = os.getenv("SIMULATION_MODE", "false").lower() == "true"
 
         if not self._login():
-            logger.error("Could not log in to Shoonya. Tick stream will not start.")
-            return
+            logger.error("Could not log in to Shoonya.")
+            if is_market_hours() and not sim_mode_global:
+                logger.error("Market is OPEN but Shoonya login failed. Zero data flow!")
+                asyncio.create_task(send_cloud_alert("🚨 DATA GATEWAY: Shoonya login failed during market hours! No live data flow.", alert_type="CRITICAL"))
+                return
+            elif not is_market_hours() and sim_enabled:
+                logger.warning("Falling back to SIMULATOR (Off-hours).")
+                self.sim_mode = True
+                asyncio.create_task(send_cloud_alert("ℹ️ DATA GATEWAY: Shoonya offline. Activating off-hour simulator.", alert_type="INFO"))
+            else:
+                logger.error("Shoonya login failed and Off-hour simulator is disabled or market is closed. Shutting down.")
+                return
+        else:
+            self.sim_mode = sim_mode_global
 
         loop = asyncio.get_running_loop()
         feed_opened = threading.Event()
@@ -242,11 +299,11 @@ class DataGateway:
             return feed_opened.wait(20.0)
             
         # Wait for socket to open with a generous timeout for staging environments
-        if not sim_mode:
+        if not self.sim_mode:
             await asyncio.to_thread(_wait_for_feed)
             if not feed_opened.is_set():
                 logger.error("WebSocket failed to connect within 20 seconds. Falling back to simulation if requested.")
-                if not sim_mode: return
+                if not self.sim_mode: return
 
         while True:
             if self._system_halted:
@@ -255,12 +312,22 @@ class DataGateway:
 
             try:
                 # Read from queue or simulate
-                if sim_mode:
+                if self.sim_mode:
                     await asyncio.sleep(random.uniform(0.1, 0.5))
-                    symbol = random.choice(SYMBOLS_UNDERLYING)
+                    # Pick from symbols OR active options
+                    choices = SYMBOLS_UNDERLYING + list(self.active_option_tokens.values())
+                    symbol = random.choice(choices)
                     base_price = self._prices.get(symbol, 1000.0)
                     price = base_price * (1 + random.uniform(-0.0005, 0.0005))
-                    raw_tick = {'t': 'tk', 'tk': next(k for k,v in TOKEN_TO_SYMBOL.items() if v == symbol), 'lp': str(price), 'v': str(random.randint(1, 100))}
+                    
+                    # Reverse map symbol to token
+                    token = "FAKE_TOKEN"
+                    for t, s in {**TOKEN_TO_SYMBOL, **self.active_option_tokens}.items():
+                        if s == symbol:
+                            token = t
+                            break
+                            
+                    raw_tick = {'t': 'tk', 'tk': token, 'lp': str(price), 'v': str(random.randint(1, 100))}
                 else:
                     raw_tick = await self.tick_queue.get()
 
@@ -269,10 +336,14 @@ class DataGateway:
 
                 # Signal live data flow on first valid tick
                 if not getattr(self, '_data_flow_alert_sent', False):
-                    asyncio.create_task(send_cloud_alert("✅ DATA INGESTION LIVE: First market ticks received and broadcasting via Redis.", alert_type="INFO"))
+                    source = "SIMULATED" if self.sim_mode else "LIVE"
+                    asyncio.create_task(send_cloud_alert(f"✅ DATA INGESTION {source}: First market ticks received and broadcasting via Redis.", alert_type="INFO"))
                     self._data_flow_alert_sent = True
 
                 token = raw_tick.get('tk')
+                if not isinstance(token, str):
+                    continue
+                    
                 symbol = TOKEN_TO_SYMBOL.get(token) or self.active_option_tokens.get(token)
 
                 if not symbol:
@@ -377,7 +448,9 @@ class DataGateway:
 
     async def _sync_expiries(self):
         """Fetches the nearest expiry for indices from Shoonya."""
-        if os.getenv("SIMULATION_MODE", "false").lower() == "true":
+        if os.getenv("SIMULATION_MODE", "false").lower() == "true" or not is_market_hours():
+            # Mock expiry for simulation/off-hours
+            await self.redis_client.set("CURRENT_EXPIRY_DATE", "26MAR")
             return
             
         try:
@@ -398,16 +471,16 @@ class DataGateway:
 
     async def _ensure_option_subscription(self, idx: str, strike: float, otype: str):
         """Finds token for strike/type and subscribes if not active."""
-        if os.getenv("SIMULATION_MODE", "false").lower() == "true":
-            # Generate fake token for simulation
-            fake_token = f"OPT_{idx}_{int(strike)}_{otype}"
-            self.active_option_tokens[fake_token] = f"{idx}_{int(strike)}_{otype}"
-            return
-
         expiry = await self.redis_client.get("CURRENT_EXPIRY_DATE") or "26MAR"
         search_text = f"{idx} {expiry} {int(strike)} {otype}"
         
         try:
+            # Mock if in simulation mode
+            if os.getenv("SIMULATION_MODE", "false").lower() == "true":
+                fake_token = f"OPT_{idx}_{int(strike)}_{otype}"
+                self.active_option_tokens[fake_token] = f"{idx} {expiry} {int(strike)} {otype}"
+                return
+
             res = self.api.search_scrip(exchange='NFO', searchtext=search_text)
             if res and res.get('stat') == 'Ok':
                 values = res.get('values', [])
@@ -454,9 +527,13 @@ class DataGateway:
         lot_sizes = dict(DEFAULT_LOT_SIZES)  # start with defaults
 
         try:
-            # In production: call Shoonya get_contracts() or search_scrip()
-            # For now use known 2026 values as per SRS
-            lot_sizes = {"NIFTY50": 65, "BANKNIFTY": 30}
+            # Mock for simulation
+            if os.getenv("SIMULATION_MODE", "false").lower() == "true":
+                lot_sizes = {"NIFTY50": 65, "BANKNIFTY": 30}
+            else:
+                # In production: call Shoonya get_contracts() or search_scrip()
+                # For now use known 2026 values as per SRS
+                lot_sizes = {"NIFTY50": 65, "BANKNIFTY": 30}
             logger.info(f"Lot sizes fetched: {lot_sizes}")
         except Exception as e:
             logger.warning(f"Lot size fetch failed ({e}). Using defaults: {lot_sizes}")
@@ -486,6 +563,10 @@ class DataGateway:
                             f"Triggering socket reset..."
                         )
                         await self._force_socket_reset(symbol)
+                        
+                        # ALERT: If market hours and NOT simulating, this is a real data flow issue
+                        if is_market_hours() and not os.getenv("SIMULATION_MODE", "false").lower() == "true":
+                            asyncio.create_task(send_cloud_alert(f"⚠️ DATA GATEWAY: Live feed for {symbol} is stale (>1s). Attempting reset.", alert_type="WARNING"))
             except Exception as e:
                 logger.error(f"Watchdog error: {e}")
             await asyncio.sleep(0.5)

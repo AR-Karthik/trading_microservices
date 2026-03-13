@@ -100,13 +100,13 @@ class LiquidationDaemon:
                                 f"(fill={fill_price:.2f} vs intended={intended_price:.2f}). "
                                 f"Pausing new entries for {SLIPPAGE_HALT_TTL_SEC}s."
                             )
-                            await send_cloud_alert(
+                            asyncio.create_task(send_cloud_alert(
                                 f"🚨 SLIPPAGE BUDGET BREACHED\n"
                                 f"Symbol: {symbol} | Slippage: {slip:.1%}\n"
                                 f"Fill: ₹{fill_price:.2f} vs Intended: ₹{intended_price:.2f}\n"
                                 f"New entries paused for {SLIPPAGE_HALT_TTL_SEC}s.",
                                 alert_type="RISK"
-                            )
+                            ))
                 except Exception as e:
                     logger.error(f"Slippage monitor parse error: {e}")
         except asyncio.CancelledError:
@@ -196,12 +196,12 @@ class LiquidationDaemon:
                     if not already_breached:
                         # Set the breach flag — execution bridges check this before accepting new orders
                         await self._redis.set(breach_key, "True")
-                        await send_cloud_alert(
+                        asyncio.create_task(send_cloud_alert(
                             f"🛑 STOP DAY LOSS BREACHED [{mode_suffix}]: "
                             f"Daily P&L ₹{day_pnl:,.0f} <= -₹{stop_limit:,.0f}. "
                             f"Blocking new entries and triggering full liquidation.",
                             alert_type="CRITICAL"
-                        )
+                        ))
                         # Publish panic signal to square off all positions for this mode
                         import json as _json
                         await self._redis.publish(
@@ -546,7 +546,7 @@ class LiquidationDaemon:
 
     async def _telegram_alert(self, message: str):
         # Legacy placeholder, actual alerts now use send_cloud_alert directly in logic
-        await send_cloud_alert(message, alert_type="LIQUIDATION")
+        asyncio.create_task(send_cloud_alert(message, alert_type="LIQUIDATION"))
 
 
 if __name__ == "__main__":
