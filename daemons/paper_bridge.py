@@ -403,6 +403,13 @@ async def start_bridge():
     try:
         pool = await asyncpg.create_pool(DB_DSN)
         await init_db(pool)
+        
+        # v8.0: Initialize paper margin and capital if not already set
+        if not await r.exists("AVAILABLE_MARGIN_PAPER"):
+            await r.set("AVAILABLE_MARGIN_PAPER", "1000000.0")
+            await r.set("PAPER_CAPITAL_LIMIT", "1000000.0")
+            logger.info("Initialized PAPER margin to ₹1,000,000")
+            
     except Exception as e:
         logger.error(f"Failed to connect to TimescaleDB: {e}")
         logger.error("Please ensure the database container is running (docker-compose up -d)")

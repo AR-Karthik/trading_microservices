@@ -49,7 +49,7 @@ services:
     env_file: .env
     cpuset: "0"
     volumes:
-      - /ram_disk:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
 
   market_sensor:
     image: trading-app:latest
@@ -66,7 +66,7 @@ services:
     env_file: .env
     cpuset: "1"
     volumes:
-      - /ram_disk:/ram_disk:rw
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
 
   meta_router:
     image: trading-app:latest
@@ -79,7 +79,7 @@ services:
     env_file: .env
     cpuset: "1"
     volumes:
-      - /ram_disk:/ram_disk:rw
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
 
   strategy_engine:
     image: trading-app:latest
@@ -96,7 +96,7 @@ services:
     env_file: .env
     cpuset: "2"
     volumes:
-      - /ram_disk:/ram_disk:rw
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
 
   liquidation_daemon:
     image: trading-app:latest
@@ -109,7 +109,7 @@ services:
     env_file: .env
     cpuset: "3"
     volumes:
-      - /ram_disk:/ram_disk:rw
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
 
   paper_bridge:
     image: trading-app:latest
@@ -123,7 +123,7 @@ services:
     restart: always
     env_file: .env
     volumes:
-      - /ram_disk:/ram_disk:rw
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
 
   live_bridge:
     image: trading-app:latest
@@ -137,8 +137,8 @@ services:
     restart: always
     env_file: .env
     volumes:
-      - /ram_disk:/ram_disk:rw
-      - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
 
@@ -153,8 +153,8 @@ services:
     env_file: .env
     cpuset: "3"
     volumes:
-      - /ram_disk:/ram_disk:rw
-      - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
 
@@ -183,8 +183,8 @@ services:
     restart: always
     env_file: .env
     volumes:
-      - /ram_disk:/ram_disk:rw
-      - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
 
@@ -200,7 +200,7 @@ services:
     restart: always
     env_file: .env
     volumes:
-      - /ram_disk:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
       - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json

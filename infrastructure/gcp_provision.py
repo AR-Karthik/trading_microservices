@@ -222,8 +222,10 @@ if [ ! -f "/var/run/google/gcp_creds.json" ]; then
     echo '{{}}' > /var/run/google/gcp_creds.json
 fi
 
-# Use 10min timeout to prevent hanging forever
-echo "Starting containers (timeout 10m)..."
+# 1. Environment and Optimization Setup
+set -e
+export TRADING_RESOURCES_ROOT=/ram_disk
+echo "Setting up performance optimizations..."
 timeout 600s docker compose up -d --build || echo "❌ Docker compose timed out or failed."
 
 # 6. Wait for Telegram Alerter to be ready
@@ -298,7 +300,7 @@ def create_spot_instance():
                 f"sudo -i bash -c 'cd {REPO_DIR} && git pull origin master && "
                 f"docker image prune -f && "
                 f"docker compose down && "
-                f"docker compose up -d --build --no-cache'"
+                f"docker compose up -d --build'"
             )
             os.system(f"gcloud compute ssh {INSTANCE_NAME} --zone={ZONE} --tunnel-through-iap --command=\"{redeploy_cmd}\"")
         

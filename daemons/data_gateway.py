@@ -107,7 +107,8 @@ class DataGateway:
         self._prices = {
             "NIFTY50": 22350.0, "BANKNIFTY": 47200.0, "SENSEX": 73000.0,
             "RELIANCE": 1480.0, "HDFCBANK": 1680.0,
-            "INFY": 1820.0, "TCS": 3940.0, "ICICIBANK": 1230.0
+            "INFY": 1820.0, "TCS": 3940.0, "ICICIBANK": 1230.0,
+            "ITC": 420.0, "SBIN": 750.0, "AXISBANK": 1100.0, "KOTAKBANK": 1780.0, "LT": 3500.0
         }
         self._oi = {s: random.randint(800_000, 1_500_000) for s in SYMBOLS_UNDERLYING}
         self._last_tick_ts: dict[str, float] = {}
@@ -313,19 +314,25 @@ class DataGateway:
             try:
                 # Read from queue or simulate
                 if self.sim_mode:
-                    await asyncio.sleep(random.uniform(0.1, 0.5))
+                    await asyncio.sleep(random.uniform(0.01, 0.1)) # Faster ticks for simulation
                     # Pick from symbols OR active options
                     choices = SYMBOLS_UNDERLYING + list(self.active_option_tokens.values())
                     symbol = random.choice(choices)
                     base_price = self._prices.get(symbol, 1000.0)
                     price = base_price * (1 + random.uniform(-0.0005, 0.0005))
                     
-                    # Reverse map symbol to token
+                    # Correct Mapping: Force it to find a valid token even in simulation
                     token = "FAKE_TOKEN"
-                    for t, s in {**TOKEN_TO_SYMBOL, **self.active_option_tokens}.items():
-                        if s == symbol:
-                            token = t
-                            break
+                    # Add missing symbols to TOKEN_TO_SYMBOL for simulation completeness
+                    EXTENDED_MAPPING = {**TOKEN_TO_SYMBOL, **self.active_option_tokens}
+                    # If symbol not in mapping, pick a dummy or add it
+                    if symbol not in EXTENDED_MAPPING.values():
+                        token = f"SIM_{symbol}"
+                    else:
+                        for t, s in EXTENDED_MAPPING.items():
+                            if s == symbol:
+                                token = t
+                                break
                             
                     raw_tick = {'t': 'tk', 'tk': token, 'lp': str(price), 'v': str(random.randint(1, 100))}
                 else:
