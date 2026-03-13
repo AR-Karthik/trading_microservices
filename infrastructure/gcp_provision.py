@@ -102,13 +102,13 @@ exec > /var/log/trading-startup.log 2>&1
 echo "=== Trading Engine Startup: $(date) ==="
 
 # 1. System update + Docker
-apt-get update -y
-apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release git
-curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor --batch --yes -o /usr/share/keyrings/docker-archive-keyring.gpg
+apt-get update -y || echo "⚠️ apt-get update failed"
+apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release git || echo "⚠️ base package install failed"
+curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor --batch --yes -o /usr/share/keyrings/docker-archive-keyring.gpg || true
 echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
-apt-get update -y
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-systemctl enable --now docker
+apt-get update -y || echo "⚠️ docker apt-get update failed"
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || echo "⚠️ docker install failed"
+systemctl enable --now docker || true
 
 # 2. Clone repository
 rm -rf {REPO_DIR}
@@ -134,12 +134,13 @@ net.ipv4.tcp_max_syn_backlog = 8000
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
 EOF
-sysctl -p || true
+sysctl -p || echo "⚠️ sysctl reload failed"
 
 # RAM Disk for IPC
 mkdir -p /ram_disk
-mountpoint -q /ram_disk || mount -t tmpfs -o size=512M tmpfs /ram_disk
-grep -q "/ram_disk" /etc/fstab || echo "tmpfs /ram_disk tmpfs rw,size=512M 0 0" >> /etc/fstab
+mount -t tmpfs -o size=512M tmpfs /ram_disk || echo "⚠️ RAM disk mount failed, using local dir"
+grep -q "/ram_disk" /etc/fstab || echo "tmpfs /ram_disk tmpfs rw,size=512M 0 0" >> /etc/fstab || true
+chmod 777 /ram_disk
 
 # Robust disk discovery and mounting
 mount_disk() {{
