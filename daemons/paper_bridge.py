@@ -8,6 +8,7 @@ from core.mq import MQManager, Ports, Topics
 from redis import asyncio as redis
 import json
 import time
+from core.alerts import send_cloud_alert
 from collections import deque
 import os
 
@@ -355,6 +356,14 @@ async def execute_orders(pull_socket, pool, mq_manager, redis_client):
                 "price": float(exec_price),
                 "type": "EXECUTION"
             }, topic=f"EXEC.{execution['symbol']}")
+
+            # --- Pub/Sub Alert: Transaction Confirmation ---
+            emoji = "📄" # Paper
+            await send_cloud_alert(
+                f"{emoji} *TRANSACTION*: {execution['action']} {execution['quantity']} {execution['symbol']}\n"
+                f"Price: ₹{execution['price']:.2f} | Strategy: {execution['strategy_id']}",
+                alert_type="TRANSACTION"
+            )
             
             logger.info(f"Executed: {execution['action']} {execution['symbol']} @ {exec_price:.2f} (Fees: {fees})")
 
@@ -451,6 +460,11 @@ async def panic_listener(pool, r):
                             await conn.execute(update_query)
                             
                         logger.info(f"{mode_str}Portfolio successfully liquidated.")
+                        await send_cloud_alert(
+                            f"🚨 PANIC LIQUIDATION COMPLETED {mode_str}\n"
+                            f"All positions for this mode have been closed.",
+                            alert_type="CRITICAL"
+                        )
             except Exception as e:
                 logger.error(f"Error in panic handler: {e}")
 

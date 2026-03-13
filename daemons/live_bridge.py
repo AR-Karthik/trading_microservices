@@ -13,6 +13,7 @@ import asyncpg
 import redis.asyncio as redis
 from dotenv import load_dotenv
 from core.mq import MQManager, Ports, Topics
+from core.alerts import send_cloud_alert
 from core.execution_wrapper import MultiLegExecutor
 from NorenRestApiPy.NorenApi import NorenApi
 
@@ -266,10 +267,15 @@ class LiveExecutionEngine:
             await self.redis.delete(pending_key)
             # lock:{symbol} is cleared by order_reconciler.py as per spec.
             
-            await self.mq.send_json(trade_pub_socket, {
-                "id": execution["id"], "symbol": execution["symbol"],
-                "price": float(execution['price']), "type": "EXECUTION"
             }, topic=f"EXEC.{execution['symbol']}")
+            
+            # --- Pub/Sub Alert: Transaction Confirmation ---
+            emoji = "🟢" # Live
+            await send_cloud_alert(
+                f"{emoji} *TRANSACTION*: {execution['action']} {execution['quantity']} {execution['symbol']}\n"
+                f"Price: ₹{execution['price']:.2f} | Strategy: {execution['strategy_id']}",
+                alert_type="TRANSACTION"
+            )
             
             # Publish live P&L and lot count to Redis for cloud_publisher and UI
             await self.redis.set("DAILY_REALIZED_PNL_LIVE", str(self.total_realized_pnl))
@@ -347,6 +353,11 @@ class LiveExecutionEngine:
                             await conn.execute("UPDATE portfolio SET quantity = 0, avg_price = 0, realized_pnl=0 WHERE execution_type = 'Actual'")
                             
                         logger.critical("✅ Live Market Wipeout Completed.")
+                        await send_cloud_alert(
+                            "🚨 LIVE PANIC LIQUIDATION COMPLETED\n"
+                            "All real positions have been closed with market orders.",
+                            alert_type="CRITICAL"
+                        )
                         
                 except Exception as e:
                     logger.error(f"Live Panic exception: {e}")

@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 import redis.asyncio as redis
 from core.mq import MQManager, Ports, Topics
 from core.greeks import BlackScholes
+from core.alerts import send_cloud_alert
 from NorenRestApiPy.NorenApi import NorenApi
 
 load_dotenv()
@@ -48,6 +49,7 @@ logger = logging.getLogger("DataGateway")
 
 IST = ZoneInfo("Asia/Kolkata")
 
+# Symbols simulated / watched
 # Symbols simulated / watched
 SYMBOLS_UNDERLYING = ["NIFTY50", "BANKNIFTY", "SENSEX", "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "ITC", "SBIN", "AXISBANK", "KOTAKBANK", "LT"]
 
@@ -154,6 +156,7 @@ class DataGateway:
     async def start(self):
         self.redis_client = redis.from_url(self.redis_url, decode_responses=True)
         logger.info("DataGateway initialised. Starting sub-tasks...")
+        await send_cloud_alert("🛰️ DATA GATEWAY: Service active. Monitoring 13 heavyweights + Indices.", alert_type="SYSTEM")
 
         await asyncio.gather(
             self._tick_stream(),
@@ -567,12 +570,11 @@ class DataGateway:
         }
         await self.redis_client.set("SYSTEM_HALT", str(level))
         await self.redis_client.publish("system_events", json.dumps(payload))
-        # Also push Telegram alert
-        await self.redis_client.lpush("telegram_alerts", json.dumps({
-            "message": f"CIRCUIT BREAKER L{level}%! Halt: {halt_mins} min.",
-            "type": "CIRCUIT_BREAKER",
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }))
+        # Also push Telegram alert via Pub/Sub
+        await send_cloud_alert(
+            f"⛔ CIRCUIT BREAKER L{level}% triggered! Market halt: {halt_mins} min.",
+            alert_type="CRITICAL"
+        )
 
 
 async def start_gateway():

@@ -19,6 +19,7 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 import redis.asyncio as redis
+from core.alerts import send_cloud_alert
 
 try:
     import asyncpg
@@ -108,7 +109,10 @@ class SystemController:
             logger.info(f"Initialized AVAILABLE_MARGIN_LIVE pool: ₹{live_limit:,.2f}")
 
         logger.info("SystemController started. Monitoring lifecycle events.")
-        await self._telegram_alert(f"🟢 SYSTEM BOOT: Controller active. Paper Budget: ₹{paper_limit:,.2f} | Live Budget: ₹{live_limit:,.2f}")
+        await send_cloud_alert(
+            f"🟢 SYSTEM BOOT: Controller active. Paper Budget: ₹{paper_limit:,.2f} | Live Budget: ₹{live_limit:,.2f}",
+            alert_type="SYSTEM"
+        )
 
         # ── Persistence Reconciliation: Audit Pending Journal (SRS §2.7) ──
         await self._audit_pending_journal()
@@ -133,10 +137,11 @@ class SystemController:
             logger.warning(f"⚠️ FOUND {count} ORPHANED INTENTS in Pending Journal!")
             for key in keys:
                 data_raw = await self.redis.get(key)
-                await self._telegram_alert(
+                await send_cloud_alert(
                     f"⚠️ ORPHANED INTENT detected on boot: {key}\n"
                     f"Data: {data_raw[:200]}...\n"
-                    f"Action Required: Manually verify if order reached exchange!"
+                    f"Action Required: Manually verify if order reached exchange!",
+                    alert_type="CRITICAL"
                 )
 
     # ── Macro Calendar ───────────────────────────────────────────────────────
@@ -179,9 +184,10 @@ class SystemController:
                             f"📵 MACRO LOCKDOWN: '{event['name']}' in "
                             f"{int(delta.total_seconds() / 60)} min."
                         )
-                        await self._telegram_alert(
+                        await send_cloud_alert(
                             f"📵 MACRO LOCKDOWN activated: {event['name']} "
-                            f"at {event_dt.strftime('%H:%M IST')}"
+                            f"at {event_dt.strftime('%H:%M IST')}",
+                            alert_type="SYSTEM"
                         )
 
                 # Post-event: clear lockdown 30 min after
@@ -222,8 +228,9 @@ class SystemController:
                 if preempted and not self._preemption_detected:
                     self._preemption_detected = True
                     logger.critical("⚡ GCP PREEMPTION NOTICE DETECTED! Initiating emergency square-off.")
-                    await self._telegram_alert(
-                        "⚡ GCP SPOT VM PREEMPTION DETECTED! Initiating batched SQUARE_OFF_ALL."
+                    await send_cloud_alert(
+                        "⚡ GCP SPOT VM PREEMPTION DETECTED! Initiating batched SQUARE_OFF_ALL.",
+                        alert_type="CRITICAL"
                     )
                     await self._execute_square_off_all(reason="GCP_PREEMPTION")
             except Exception as e:
@@ -257,8 +264,9 @@ class SystemController:
                 logger.critical(f"🔴 HARD STOP: {SHUTDOWN_HH:02d}:{SHUTDOWN_MM:02d} IST reached.")
                 # ── EOD Summary Report (before square-off so positions are still visible) ──
                 await self._eod_summary_report(now)
-                await self._telegram_alert(
-                    f"🔴 HARD STOP at {SHUTDOWN_HH:02d}:{SHUTDOWN_MM:02d} IST. Squaring off all positions."
+                await send_cloud_alert(
+                    f"🔴 HARD STOP at {SHUTDOWN_HH:02d}:{SHUTDOWN_MM:02d} IST. Squaring off all positions.",
+                    alert_type="SYSTEM"
                 )
                 await self._execute_square_off_all(reason="EOD_HARD_STOP")
                 self._shutdown_flag = True
@@ -387,12 +395,12 @@ class SystemController:
             lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
             summary_msg = "\n".join(lines)
 
-            await self._telegram_alert(summary_msg)
+            await send_cloud_alert(summary_msg, alert_type="SUMMARY")
             logger.info("EOD summary report sent to Telegram.")
 
         except Exception as e:
             logger.error(f"EOD summary report failed: {e}")
-            await self._telegram_alert(f"⚠️ EOD summary report failed: {e}")
+            await send_cloud_alert(f"⚠️ EOD summary report failed: {e}", alert_type="ERROR")
 
     # ── HMM & Data Synchronization ──────────────────────────────────────────
 
@@ -449,18 +457,8 @@ class SystemController:
     # ── Telegram Alert ───────────────────────────────────────────────────────
 
     async def _telegram_alert(self, message: str):
-        """Pushes message to Redis for telemetry_alerter to dispatch."""
-        try:
-            await self.redis.lpush(
-                "telegram_alerts",
-                json.dumps({
-                    "message": message,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "type": "SYSTEM_CTRL"
-                })
-            )
-        except Exception as e:
-            logger.error(f"Telegram alert push failed: {e}")
+        # Legacy placeholder
+        await send_cloud_alert(message, alert_type="SYSTEM")
 
 
 # ── SEBI-Compliant Batched Execution Helper ──────────────────────────────────

@@ -22,6 +22,7 @@ import os
 import redis.asyncio as redis
 
 from core.mq import MQManager, Ports, Topics
+from core.alerts import send_cloud_alert
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,11 +100,12 @@ class LiquidationDaemon:
                                 f"(fill={fill_price:.2f} vs intended={intended_price:.2f}). "
                                 f"Pausing new entries for {SLIPPAGE_HALT_TTL_SEC}s."
                             )
-                            await self._telegram_alert(
+                            await send_cloud_alert(
                                 f"🚨 SLIPPAGE BUDGET BREACHED\n"
                                 f"Symbol: {symbol} | Slippage: {slip:.1%}\n"
                                 f"Fill: ₹{fill_price:.2f} vs Intended: ₹{intended_price:.2f}\n"
-                                f"New entries paused for {SLIPPAGE_HALT_TTL_SEC}s."
+                                f"New entries paused for {SLIPPAGE_HALT_TTL_SEC}s.",
+                                alert_type="RISK"
                             )
                 except Exception as e:
                     logger.error(f"Slippage monitor parse error: {e}")
@@ -193,10 +195,11 @@ class LiquidationDaemon:
                     if not already_breached:
                         # Set the breach flag — execution bridges check this before accepting new orders
                         await self._redis.set(breach_key, "True")
-                        logger.critical(
+                        await send_cloud_alert(
                             f"🛑 STOP DAY LOSS BREACHED [{mode_suffix}]: "
                             f"Daily P&L ₹{day_pnl:,.0f} <= -₹{stop_limit:,.0f}. "
-                            f"Blocking new entries and triggering full liquidation."
+                            f"Blocking new entries and triggering full liquidation.",
+                            alert_type="CRITICAL"
                         )
                         # Publish panic signal to square off all positions for this mode
                         import json as _json
@@ -476,9 +479,10 @@ class LiquidationDaemon:
 
                 elif http400_result == "abort":
                     logger.error(f"HTTP 400 ABORT (margin/payload error): {err_str}")
-                    await self._telegram_alert(
+                    await send_cloud_alert(
                         f"🆘 CRITICAL: EXIT ORDER ABORTED for {symbol}\n"
-                        f"Error: {err_str[:200]}\nManual intervention required!"
+                        f"Error: {err_str[:200]}\nManual intervention required!",
+                        alert_type="CRITICAL"
                     )
                     self.orphaned_positions.pop(symbol, None)
                     return
@@ -488,8 +492,9 @@ class LiquidationDaemon:
 
         # All retries exhausted
         logger.error(f"❌ EXIT ORDER FAILED after {max_retries} attempts for {symbol}.")
-        await self._telegram_alert(
-            f"❌ EXIT ORDER EXHAUSTED: {symbol} | {reason}\nManual intervention required!"
+        await send_cloud_alert(
+            f"❌ EXIT ORDER EXHAUSTED: {symbol} | {reason}\nManual intervention required!",
+            alert_type="ERROR"
         )
 
     def _parse_http400_emsg(self, err_str: str) -> str:
@@ -539,14 +544,8 @@ class LiquidationDaemon:
     # ── Telegram Alert ────────────────────────────────────────────────────────
 
     async def _telegram_alert(self, message: str):
-        try:
-            await self._redis.lpush("telegram_alerts", json.dumps({
-                "message": message,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "type": "LIQUIDATION"
-            }))
-        except Exception as e:
-            logger.error(f"Telegram alert failed: {e}")
+        # Legacy placeholder, actual alerts now use send_cloud_alert directly in logic
+        await send_cloud_alert(message, alert_type="LIQUIDATION")
 
 
 if __name__ == "__main__":

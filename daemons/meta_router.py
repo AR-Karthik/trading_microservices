@@ -30,6 +30,7 @@ from datetime import datetime
 import redis.asyncio as redis
 from core.mq import MQManager, Ports, Topics
 from core.shm import ShmManager
+from core.alerts import send_cloud_alert
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("MetaRouter")
@@ -217,8 +218,13 @@ class MetaRouter:
             mode = await self._redis.get("CONFIG:REGIME_ENGINE")
             if mode in self.orchestrator.providers:
                 if self.orchestrator.active_engine != mode:
-                    logger.info(f"🔄 Switching Regime Engine: {self.orchestrator.active_engine} -> {mode}")
+                    old_mode = self.orchestrator.active_engine
+                    logger.info(f"🔄 Switching Regime Engine: {old_mode} -> {mode}")
                     self.orchestrator.active_engine = mode
+                    await send_cloud_alert(
+                        f"🔄 HOT-SWAP APPLIED: Regime engine switched from {old_mode} to {mode}.",
+                        alert_type="CONFIG"
+                    )
             
             # 2. Sizing Constraints
             try:
@@ -316,6 +322,12 @@ class MetaRouter:
                 logger.warning(
                     f"🔥 PORTFOLIO HEAT CAP: total_f={total_heat:.3f} > limit={self.heat_limit:.3f}. "
                     f"Scaling all weights by {scale:.3f}."
+                )
+                await send_cloud_alert(
+                    f"🔥 PORTFOLIO HEAT CAP TRIGGERED\n"
+                    f"Total Heat: {total_heat:.3f} | Limit: {self.heat_limit:.3f}\n"
+                    f"Scaling factor: {scale:.3f} applied to all positions.",
+                    alert_type="RISK"
                 )
                 await self._redis.set("PORTFOLIO_HEAT_CAPPED", "True", ex=60)
             else:

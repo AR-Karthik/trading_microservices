@@ -166,7 +166,9 @@ async def get_state():
         "last_heartbeat": m.get("last_heartbeat", ""),
         "source": "FIRESTORE_SYNC",
         "available_margin_paper": cfg.get("paper_capital_limit", 0.0),
-        "available_margin_live": cfg.get("live_capital_limit", 0.0)
+        "available_margin_live": cfg.get("live_capital_limit", 0.0),
+        "power_five": {}, # Empty when offline
+        "exit_path_70_30": {"tp1": 0, "tp2": 0, "progress": 0}
     }
 
 @app.get("/portfolio")
@@ -224,15 +226,22 @@ async def get_evolution():
 @app.get("/health/telemetry")
 async def get_telemetry():
     vm_data = await smart_proxy("health/telemetry")
-    return vm_data if vm_data else {"nse_latency_ms": 0, "cpu_cores": [0,0,0]}
+    if vm_data:
+        return vm_data
+    
+    # Transparent return when offline
+    return {
+        "nse_latency_ms": 0,
+        "bse_latency_ms": 0,
+        "cpu_cores": [0, 0, 0],
+        "source": "OFFLINE"
+    }
 
 @app.get("/attribution/strategy")
 async def get_attribution():
     vm_data = await smart_proxy("attribution/strategy")
     if vm_data: return vm_data
-    
-    # Fallback: Pull from BigQuery (TBD)
-    return {"pnl_stack": [], "efficiency": []}
+    return {"pnl_stack": [], "efficiency": [], "source": "OFFLINE"}
 
 @app.get("/barriers/attribution")
 async def get_barriers():
