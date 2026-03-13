@@ -179,7 +179,7 @@ mount_disk() {{
         
         # Mount
         if ! mountpoint -q "$mount_point"; then
-            mount -o discard,defaults "$dev" "$mount_point"
+            mount -o discard,defaults "$dev" "$mount_point" || echo "⚠️ Mount failed for $dev"
         fi
         
         # Persist across reboots
@@ -208,16 +208,17 @@ mkdir -p /mnt/hot_nvme/redis_data /mnt/hot_nvme/db_data
 chmod -R 777 /mnt/hot_nvme
 
 # Remove existing symlinks if they exist
+mkdir -p {REPO_DIR}/data
 rm -f {REPO_DIR}/data/redis {REPO_DIR}/data/db
-ln -s /mnt/hot_nvme/redis_data {REPO_DIR}/data/redis
-ln -s /mnt/hot_nvme/db_data {REPO_DIR}/data/db
+ln -sv /mnt/hot_nvme/redis_data {REPO_DIR}/data/redis || echo "⚠️ redis symlink failed"
+ln -sv /mnt/hot_nvme/db_data {REPO_DIR}/data/db || echo "⚠️ db symlink failed"
 
 # Check for GCP credentials file and create dummy if missing to avoid mount failure
 # (Docker requires the host path to exist if it's a bind mount)
 if [ ! -f "/var/run/google/gcp_creds.json" ]; then
     echo "⚠️ /var/run/google/gcp_creds.json not found. Creating placeholder to prevent mount failure."
     mkdir -p /var/run/google
-    echo "{}" > /var/run/google/gcp_creds.json
+    echo '{{}}' > /var/run/google/gcp_creds.json
 fi
 
 # Use --progress=plain for build logs and add a 10min timeout to prevent hanging forever
@@ -229,8 +230,8 @@ echo "Waiting for Telegram Alerter to send BOOT signal..."
 MAX_RETRIES=30
 RETRY_COUNT=0
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    if docker logs telegram_alerter 2>&1 | grep -q "Trading System BOOTED"; then
-        echo "Telegram Alerter is ready and BOOT signal sent."
+    if docker logs telegram_alerter 2>&1 | grep -Ei "Alerter is ready|Trading System BOOTED"; then
+        echo "Telegram Alerter is ready."
         break
     fi
     echo "Waiting for telegram_alerter... ($RETRY_COUNT/$MAX_RETRIES)"
@@ -244,8 +245,7 @@ fi
 
 echo "=== All services started: $(date) ==="
 """
-GCP Spot VM Provisioner for Trading Microservices.
-"""
+# End of STARTUP_SCRIPT
 
 def ensure_firewall_rule():
     """Ensures GCP firewall rule for Port 8000 (Hub-and-Spoke Proxy) exists."""
@@ -290,7 +290,16 @@ def create_spot_instance():
             print(f"Instance '{INSTANCE_NAME}' exists but is TERMINATED. Starting it...")
             instance_client.start(project=PROJECT_ID, zone=ZONE, instance=INSTANCE_NAME)
         else:
-            print(f"Instance '{INSTANCE_NAME}' already exists (status: {existing.status}). Skipping creation.")
+            print(f"Instance '{INSTANCE_NAME}' already exists (status: {existing.status}). Triggering self-healing redeploy...")
+            # Run the update logic via SSH if it's already running
+            redeploy_cmd = (
+                f"sudo -i bash -c 'cd {REPO_DIR} && git pull origin master && "
+                f"docker image prune -f && "
+                f"docker compose down && "
+                f"docker compose up -d --build --no-cache --progress=plain'"
+            )
+            os.system(f"gcloud compute ssh {INSTANCE_NAME} --zone={ZONE} --tunnel-through-iap --command=\"{redeploy_cmd}\"")
+        
         print(f"  👉 Cloud Run Dashboard should be used for monitoring.")
         return
     except Exception:
