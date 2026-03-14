@@ -56,7 +56,7 @@ logger = setup_logger("MarketSensor", log_file="logs/market_sensor.log")
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-TOP_5_HEAVYWEIGHTS = [
+TOP_10_HEAVYWEIGHTS = [
     "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", 
     "ITC", "SBIN", "AXISBANK", "KOTAKBANK", "LT"
 ]
@@ -189,26 +189,31 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         far_iv = snapshot.get("far_term_iv", 0.16)
         result["vol_term_ratio"] = float(near_iv / far_iv) if far_iv > 0 else 1.0
 
-        # ── Zero Gamma Level ───────────────────────────────────────────────
+        # ── Zero Gamma Level & GEX ───────────────────────────────────────────
         spot = snapshot.get("spot", 22000.0)
-        strikes = snapshot.get("strikes", [spot - 200, spot - 100, spot, spot + 100, spot + 200])
+        strikes = snapshot.get("strikes", [])
         T = snapshot.get("dte", 2) / 365.0
         iv = snapshot.get("atm_iv", 0.18)
-        result["zero_gamma_level"] = find_zero_gamma_level(np.array(snapshot.get("price_series", [spot])), spot)
+        symbol = snapshot.get("symbol", "NIFTY50")
 
-        # ── Net GEX sign (simplified) ──────────────────────────────────────
-        gex_vals = [bs_gamma(spot, K, T, RISK_FREE_RATE, iv) * (1 if K >= spot else -1)
-                    for K in strikes]
-        result["gex_sign"] = "NEGATIVE" if sum(gex_vals) < 0 else "POSITIVE"
-
-        # ── Vanna & Charm ──────────────────────────────────────────────────
-        K_atm = min(strikes, key=lambda k: abs(k - spot))
-        charm_val = bs_charm(spot, K_atm, T, RISK_FREE_RATE, iv, "call")
-        vanna_val = bs_vanna(spot, K_atm, T, RISK_FREE_RATE, iv)
-        result["charm"] = float(charm_val)
-        result["vanna"] = float(vanna_val)
-        # Flag toxic if charm < -0.05 (severe delta bleed per time decay)
-        result["toxic_option"] = bool(charm_val < -0.05)
+        # [Audit 2.3] Option Liquidity Guard
+        has_liquid_options = (len(strikes) >= 5 and 0.05 < iv < 1.5 and T > 0)
+        
+        if has_liquid_options:
+            result["zero_gamma_level"] = find_zero_gamma_level(np.array(snapshot.get("price_series", [spot])), spot)
+            gex_vals = [bs_gamma(spot, K, T, RISK_FREE_RATE, iv) * (1 if K >= spot else -1) for K in strikes]
+            result["gex_sign"] = "NEGATIVE" if sum(gex_vals) < 0 else "POSITIVE"
+            
+            K_atm = min(strikes, key=lambda k: abs(k - spot))
+            result["charm"] = float(bs_charm(spot, K_atm, T, RISK_FREE_RATE, iv, "call"))
+            result["vanna"] = float(bs_vanna(spot, K_atm, T, RISK_FREE_RATE, iv))
+            result["toxic_option"] = bool(result["charm"] < -0.05)
+        else:
+            result["zero_gamma_level"] = spot
+            result["gex_sign"] = "NEUTRAL"
+            result["charm"] = 0.0
+            result["vanna"] = 0.0
+            result["toxic_option"] = False
 
         # ── ATR (20-tick) ──────────────────────────────────────────────────
         prices = np.array(snapshot.get("price_series", [spot]))
@@ -270,6 +275,17 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         # ── Phase 12.1: Sentiment Fusion ───────────────────────────────────
         sentiment_score = snapshot.get("sentiment_score", 0.0) # -1.0 to 1.0
         result["sentiment_bias"] = float(sentiment_score)
+
+        # ── Individual Heavyweight Alpha Scores (for SHM) ──────────────────
+        hw_alphas = {}
+        if symbol == "NIFTY50" or symbol == "BANKNIFTY" or symbol == "SENSEX":
+            for hw, prices in hw_prices.items():
+                if len(prices) >= 20:
+                    ret = np.diff(np.log(prices))
+                    hw_alphas[hw] = float(np.mean(ret) / np.std(ret)) if np.std(ret) > 0 else 0.0
+                else:
+                    hw_alphas[hw] = 0.0
+        result["hw_alphas"] = hw_alphas
 
         return result
 
@@ -346,9 +362,9 @@ class MarketSensor:
         self.test_mode = test_mode
         self.scorer = CompositeAlphaScorer()
 
+        redis_host = os.getenv("REDIS_HOST", "localhost")
         if not test_mode:
             self.pub = self.mq.create_publisher(Ports.MARKET_STATE)
-            redis_host = os.getenv("REDIS_HOST", "localhost")
             self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
             self.shm = ShmManager(mode='w')
         else:
@@ -367,7 +383,7 @@ class MarketSensor:
         else:
             self.rust_engine = None
             logger.info("🐍 Using standard Python ComputeWorker (Multiprocessing mode)")
-            self._redis = redis.Redis(host=redis_host, port=6379, db=0, decode_responses=True)
+            # self._redis is already initialized above
 
         # Tick buffers (main process — lightweight)
         # Audit 1.2: Explicitly type hint deques to avoid list[Error] lints
@@ -375,7 +391,7 @@ class MarketSensor:
             lambda: collections.deque(maxlen=2000)
         )
         self.hw_prices: dict[str, collections.deque[float]] = {
-            sym: collections.deque(maxlen=500) for sym in TOP_5_HEAVYWEIGHTS
+            sym: collections.deque(maxlen=500) for sym in TOP_10_HEAVYWEIGHTS
         }
         self.ofi_series: collections.deque[float] = collections.deque(maxlen=200)
         self.cvd: float = 0.0
@@ -594,7 +610,7 @@ class MarketSensor:
                     self.tick_store[symbol].append(tick)
 
                     # Update heavyweight price buffer for dispersion
-                    if symbol in TOP_5_HEAVYWEIGHTS:
+                    if symbol in TOP_10_HEAVYWEIGHTS:
                         self.hw_prices[symbol].append(price)
 
                     # Update OFI, CVD, VPIN, basis
@@ -644,7 +660,7 @@ class MarketSensor:
                             pass  # Skip if compute is backed up — don't block I/O loop
 
                         # GAP FIX: Also send individual snapshots for heavyweights for Power Five matrix
-                        if symbol in TOP_5_HEAVYWEIGHTS:
+                        if symbol in TOP_10_HEAVYWEIGHTS:
                             hw_snapshot = {
                                 "symbol": symbol,
                                 "spot": price,
@@ -729,6 +745,7 @@ class MarketSensor:
             "price_dislocation": sig.get("price_dislocation", False),
             "spot_zscore_15m": sig.get("spot_zscore_15m", 0.0),
             "vpin": vpin,
+            "cvd": float(self.cvd),
             "flow_toxicity_veto": flow_toxicity_veto,
             "sentiment_score": sentiment_score,
             "time_of_day": datetime.now().strftime("%H:%M:%S")
@@ -760,6 +777,12 @@ class MarketSensor:
             }
 
             if self.shm:
+                # Map heavyweight alpha scores from latest signals
+                hw_list = [0.0] * 10
+                hw_scores = self._latest_signals.get("hw_alphas", {})
+                for idx, sym in enumerate(TOP_10_HEAVYWEIGHTS):
+                    hw_list[idx] = float(hw_scores.get(sym, 0.0))
+
                 signals = SignalVector(
                     s_total=state["s_total"],
                     vpin=state["vpin"],
@@ -775,7 +798,8 @@ class MarketSensor:
                     net_delta_nifty=float(await self._redis.get("net_delta_nifty50") or 0.0),
                     net_delta_banknifty=float(await self._redis.get("net_delta_banknifty") or 0.0),
                     net_delta_sensex=float(await self._redis.get("net_delta_sensex") or 0.0),
-                    veto=bool(state.get("flow_toxicity_veto", False))
+                    veto=bool(state.get("flow_toxicity_veto", False)),
+                    hw_alpha=hw_list
                 )
                 self.shm.write(signals)
               # 3. Publish over ZeroMQ [Audit 2.2: Fix parameter order]

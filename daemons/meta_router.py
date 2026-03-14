@@ -23,6 +23,7 @@ import os
 import sys
 import uuid
 import time
+import re
 from datetime import datetime, timezone
 
 import redis.asyncio as redis
@@ -175,6 +176,17 @@ class MetaRouter:
             "NIFTY50": BaseStrategyLogic("NIFTY50", self._redis if not test_mode else None),
             "BANKNIFTY": BaseStrategyLogic("BANKNIFTY", self._redis if not test_mode else None),
             "SENSEX": BaseStrategyLogic("SENSEX", self._redis if not test_mode else None),
+            # Power 10 Heavyweights
+            "RELIANCE": BaseStrategyLogic("RELIANCE", self._redis if not test_mode else None),
+            "HDFCBANK": BaseStrategyLogic("HDFCBANK", self._redis if not test_mode else None),
+            "ICICIBANK": BaseStrategyLogic("ICICIBANK", self._redis if not test_mode else None),
+            "INFY": BaseStrategyLogic("INFY", self._redis if not test_mode else None),
+            "TCS": BaseStrategyLogic("TCS", self._redis if not test_mode else None),
+            "ITC": BaseStrategyLogic("ITC", self._redis if not test_mode else None),
+            "SBIN": BaseStrategyLogic("SBIN", self._redis if not test_mode else None),
+            "AXISBANK": BaseStrategyLogic("AXISBANK", self._redis if not test_mode else None),
+            "KOTAKBANK": BaseStrategyLogic("KOTAKBANK", self._redis if not test_mode else None),
+            "LT": BaseStrategyLogic("LT", self._redis if not test_mode else None),
         }
 
         # Initialize attributes to defaults
@@ -246,27 +258,37 @@ class MetaRouter:
             b_delta: float = 0.0
             s_delta: float = 0.0
             
-            # Simplified Greek calculation logic
+            # Institutional Greek calculation logic
             for row in rows:
                 qty = float(row['quantity'] or 0.0)
                 und = str(row['underlying'] or "UNKNOWN")
-                sym = str(row['symbol'] or "UNKNOWN")
+                tsym = str(row['symbol'] or "UNKNOWN")
                 
-                # Basic Delta assignments if not calculating Black-Scholes in-situ
-                # In production, we'd pull Spot/IV from Redis for each leg
-                if "CE" in sym:
-                    leg_delta = 0.5 # Placeholder
-                elif "PE" in sym:
-                    leg_delta = -0.5 # Placeholder
+                # Regex to extract Strike/Type: e.g. NIFTY26MAR22350CE
+                match = re.search(r"(\d+)(CE|PE)$", tsym)
+                if match:
+                    strike = float(match.group(1))
+                    opt_type = match.group(2)
+                    
+                    # Fetch real-time market inputs from Redis
+                    spot_raw = await self._redis.get(f"latest_market_state:{und}")
+                    spot = 0.0
+                    if spot_raw:
+                        spot = json.loads(spot_raw).get("price", 0.0)
+                        
+                    iv = float(await self._redis.get(f"iv:{tsym}") or await self._redis.get(f"iv:{und}") or 0.15)
+                    dt_exp = await self._redis.get(f"EXPIRY_DT:{und}") or datetime.now().strftime("%Y-%m-%d")
+                    t_days = (datetime.strptime(dt_exp, "%Y-%m-%d") - datetime.now()).days
+                    t_years = max(t_days, 1) / 365.0
+                    
+                    leg_delta = BlackScholes.delta(spot, strike, t_years, 0.07, iv, option_type=opt_type.lower())
                 else:
-                    leg_delta = 1.0 if qty > 0 else -1.0 # Futures/Equity
+                    # Futures or Equity Delta
+                    leg_delta = 1.0 if qty > 0 else -1.0
                 
-                if und == "NIFTY50":
-                    n_delta += float(leg_delta * qty)
-                elif und == "BANKNIFTY":
-                    b_delta += float(leg_delta * qty)
-                elif und == "SENSEX":
-                    s_delta += float(leg_delta * qty)
+                if und == "NIFTY50": n_delta += (leg_delta * qty)
+                elif und == "BANKNIFTY": b_delta += (leg_delta * qty)
+                elif und == "SENSEX": s_delta += (leg_delta * qty)
             
             self.net_delta_nifty50 = n_delta
             self.net_delta_banknifty = b_delta
@@ -415,8 +437,8 @@ class MetaRouter:
         
         while True:
             try:
-                # Polling Tri-Asset states and regimes
-                assets = ["NIFTY50", "BANKNIFTY", "SENSEX"]
+                # Polling 13-Asset states and regimes
+                assets = list(self.brains.keys())
                 multi_market_state = {}
                 
                 # Regimes from hash

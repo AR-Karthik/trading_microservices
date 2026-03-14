@@ -112,7 +112,7 @@ class DataLogger:
                             s["symbol"],
                             float(s.get("price", 0.0)),
                             float(s.get("log_ofi_zscore", 0.0)),
-                            float(s.get("cvd_series", [0.0])[-1] if isinstance(s.get("cvd_series"), list) else 0.0),
+                            float(s.get("cvd", 0.0)),
                             float(s.get("vpin", 0.0)),
                             float(s.get("basis_zscore", 0.0)),
                             float(s.get("vol_term_ratio", 1.0))

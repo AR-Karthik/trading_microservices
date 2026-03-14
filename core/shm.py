@@ -26,16 +26,18 @@ class SignalVector:
     net_delta_banknifty: float = 0.0
     net_delta_sensex: float = 0.0
     veto: bool = False
+    hw_alpha: list[float] = None  # To be initialized as [0.0]*10
 
 class ShmManager:
     """
     Zero-latency Shared Memory IPC for Alpha Scores & Quantitative Signals.
     Layout: [Timestamp] [Alpha] [VPIN] [OFI] [Vanna] [Charm] [ENV] [STR] [DIV] [RV] [ADX] [PCR] [ND_N] [ND_B] [Veto] [CRC]
     """
-    SIZE = 256
-    # Format: ts(d), s_total(d), vpin(d), ofi(d), vanna(d), charm(d), s_env(d), s_str(d), s_div(d), 
-    #         rv(d), adx(d), pcr(d), nd_nifty(d), nd_bnifty(d), nd_sensex(d), veto(?), crc(d)
-    STRUCT_FORMAT = "dddddddddddddddd?d" 
+    SIZE = 512 # Expanded for 10 heavyweights
+    # Layout: [Timestamp] [Total Alpha] [VPIN] [OFI] [Vanna] [Charm] [ENV] [STR] [DIV] [RV] [ADX] [PCR] 
+    #         [ND_Nifty] [ND_BNifty] [ND_Sensex] [Veto] [10x HW_Alpha] [CRC]
+    # Format: d (ts) + 14d (base signals) + ? (veto) + 10d (hw_alpha) + d (crc)
+    STRUCT_FORMAT = "ddddddddddddddd?ddddddddddd" 
 
     def __init__(self, asset_id: str = "GLOBAL", mode='r'):
         self.mode = mode
@@ -59,16 +61,18 @@ class ShmManager:
             self.shm = None
 
     def write(self, signals: SignalVector):
-        """Standardized write using SignalVector dataclass (#1971)"""
+        """Standardized write using SignalVector dataclass."""
         if not self.shm: return
         try:
             ts = time.time()
+            hw_a = signals.hw_alpha if signals.hw_alpha and len(signals.hw_alpha) == 10 else [0.0]*10
+            
             # Cyclic check: sum of all signals
             crc = (signals.s_total + signals.vpin + signals.ofi_z + signals.vanna + 
                    signals.charm + signals.s_env + signals.s_str + signals.s_div + 
                    signals.rv + signals.adx + signals.pcr + 
                    signals.net_delta_nifty + signals.net_delta_banknifty + signals.net_delta_sensex +
-                   (100.0 if signals.veto else 0.0))
+                   sum(hw_a) + (100.0 if signals.veto else 0.0))
             
             data = struct.pack(
                 self.STRUCT_FORMAT, 
@@ -76,7 +80,7 @@ class ShmManager:
                 signals.vanna, signals.charm, signals.s_env, signals.s_str, 
                 signals.s_div, signals.rv, signals.adx, signals.pcr,
                 signals.net_delta_nifty, signals.net_delta_banknifty, signals.net_delta_sensex,
-                signals.veto, crc
+                signals.veto, *hw_a, crc
             )
             self.shm.seek(0)
             self.shm.write(data)
@@ -84,13 +88,20 @@ class ShmManager:
             logger.error(f"SHM write error: {e}")
 
     def read(self) -> dict | None:
+        """Standardized read with integrity check."""
         if not self.shm: return None
         try:
             self.shm.seek(0)
             fmt_size = struct.calcsize(self.STRUCT_FORMAT)
             data = self.shm.read(fmt_size)
-            (ts, s_total, vpin, ofi_z, vanna, charm, s_env, s_str, s_div, 
-             rv, adx, pcr, nd_nifty, nd_bnifty, nd_sensex, veto, crc) = struct.unpack(self.STRUCT_FORMAT, data)
+            
+            read_data = struct.unpack(self.STRUCT_FORMAT, data)
+            ts = read_data[0]
+            s_total, vpin, ofi_z, vanna, charm, s_env, s_str, s_div = read_data[1:9]
+            rv, adx, pcr, nd_nifty, nd_bnifty, nd_sensex = read_data[9:15]
+            veto = read_data[15]
+            hw_alphas = list(read_data[16:26])
+            crc = read_data[26]
             
             # Check staleness (if > 1s, data is stale)
             if time.time() - ts > 1.0:
@@ -98,7 +109,7 @@ class ShmManager:
             
             # Integrity check
             check_val = (s_total + vpin + ofi_z + vanna + charm + s_env + s_str + s_div + 
-                         rv + adx + pcr + nd_nifty + nd_bnifty + nd_sensex + (100.0 if veto else 0.0))
+                         rv + adx + pcr + nd_nifty + nd_bnifty + nd_sensex + sum(hw_alphas) + (100.0 if veto else 0.0))
             if abs(crc - check_val) > 1e-4:
                 return None
                 
@@ -118,8 +129,10 @@ class ShmManager:
                 "net_delta_banknifty": nd_bnifty,
                 "net_delta_sensex": nd_sensex,
                 "toxic_veto": veto,
+                "hw_alpha": hw_alphas,
                 "timestamp": ts,
                 "source": "SHM"
             }
-        except Exception:
+        except Exception as e:
+            logger.error(f"SHM read error: {e}")
             return None

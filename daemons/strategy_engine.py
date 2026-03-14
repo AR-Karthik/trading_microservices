@@ -265,7 +265,6 @@ active_strategies: dict[str, BaseStrategy] = {}
 
 async def config_subscriber(redis_client):
     """Periodically polls Redis for strategy configurations."""
-    global active_strategies
     logger.info("Starting dynamic configuration polling...")
 
     strategy_registry: dict[str, type[BaseStrategy]] = {

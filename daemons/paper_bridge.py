@@ -35,8 +35,11 @@ except ImportError:
 
 logger = setup_logger("PaperBridge", log_file="logs/paper_bridge.log")
 
+db_user = os.getenv("DB_USER", "trading_user")
+db_pass = os.getenv("DB_PASS", "trading_pass")
 db_host = os.getenv("DB_HOST", "localhost")
-DB_DSN = f"postgres://trading_user:trading_pass@{db_host}:5432/trading_db"
+db_name = os.getenv("DB_NAME", "trading_db")
+DB_DSN = f"postgres://{db_user}:{db_pass}@{db_host}:5432/{db_name}"
 
 async def init_db(pool):
     """Initializes the TimescaleDB schema."""

@@ -8,9 +8,10 @@ import redis.asyncio as redis
 from dotenv import load_dotenv
 
 from core.mq import MQManager, Ports, RedisLogger
-from core.health import Heartbeat
+from core.health import HeartbeatProvider
 from core.alerts import send_cloud_alert
 from NorenRestApiPy.NorenApi import NorenApi
+from core.shared_memory import TickSharedMemory, MAX_SLOTS
 
 try:
     import uvloop
