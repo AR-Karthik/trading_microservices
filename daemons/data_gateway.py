@@ -81,7 +81,22 @@ SHOONYA_SUBSCRIPTIONS = [
 ]
 
 # Default dynamic lot sizes (updated from broker at 09:01 IST)
-DEFAULT_LOT_SIZES = {"NIFTY50": 65, "BANKNIFTY": 30, "SENSEX": 10}
+DEFAULT_LOT_SIZES = {"NIFTY50": 25, "BANKNIFTY": 15, "SENSEX": 10, "RELIANCE": 250, "HDFCBANK": 550, "ICICIBANK": 700, "INFY": 400, "TCS": 175, "ITC": 1600, "SBIN": 1500, "AXISBANK": 625, "KOTAKBANK": 400, "LT": 300}
+
+# Asset-specific tick sizes and ratios
+TICK_SIZES = {
+    "NIFTY50": 0.05,
+    "BANKNIFTY": 0.05,
+    "SENSEX": 1.00, # BSE index options tick size
+    "DEFAULT": 0.05
+}
+
+TICK_RATIOS = {
+    "NIFTY50": 1.0, # Normalizes movements relative to each other if cross-index calc is needed
+    "BANKNIFTY": 0.5,
+    "SENSEX": 0.25,
+    "DEFAULT": 1.0
+}
 
 # Staleness threshold — if last tick delta exceeds this, force reconnect
 STALENESS_THRESHOLD_MS = 1000
@@ -105,17 +120,14 @@ class DataGateway:
         self.redis_client: redis.Redis | None = None
         self.pub_socket = self.mq.create_publisher(Ports.MARKET_DATA)
 
-        self._prices = {
-            "NIFTY50": 22350.0, "BANKNIFTY": 47200.0, "SENSEX": 73000.0,
-            "RELIANCE": 1480.0, "HDFCBANK": 1680.0,
-            "INFY": 1820.0, "TCS": 3940.0, "ICICIBANK": 1230.0,
-            "ITC": 420.0, "SBIN": 750.0, "AXISBANK": 1100.0, "KOTAKBANK": 1780.0, "LT": 3500.0
-        }
+        # [Audit 9.2] Internal structures
+        self._prices = {}
         self._oi = {s: random.randint(800_000, 1_500_000) for s in SYMBOLS_UNDERLYING}
-        self._last_tick_ts: dict[str, float] = {}
-        self._lot_sizes_fetched = False
+        self._last_tick_ts = {}
         self._system_halted = False
+        self.last_expiry_sync = 0  # To track when expiries were last fetched
         self._data_flow_alert_sent = False
+        self._lot_sizes_fetched = False
         self.sim_mode = False  # Dynamic state
 
         # Shoonya API Setup
@@ -145,6 +157,10 @@ class DataGateway:
             logger.error("Missing Shoonya credentials in .env file.")
             return False
 
+        if not factor2:
+            logger.error("❌ Shoonya TOTP secret is empty. Cannot generate OTP.")
+            return False
+            
         try:
             totp = pyotp.TOTP(factor2).now()
             res = self.api.login(userid=user, password=pwd, twoFA=totp, vendor_code=vc, api_secret=app_key, imei=imei)
@@ -169,12 +185,23 @@ class DataGateway:
     # ── Gateway Startup ──────────────────────────────────────────────────────
 
     async def start(self):
-        self.redis_client = redis.from_url(
-            self.redis_url, 
-            decode_responses=True,
-            socket_timeout=5.0,
-            socket_connect_timeout=5.0
-        )
+        # [Audit 14.3] Added Redis connection retry loop
+        retry_count = 0
+        while True:
+            try:
+                self.redis_client = redis.from_url(
+                    self.redis_url, 
+                    decode_responses=True,
+                    socket_timeout=5.0,
+                    socket_connect_timeout=5.0
+                )
+                await self.redis_client.ping()
+                break
+            except Exception as e:
+                retry_count += 1
+                logger.error(f"Redis connection failed (Attempt {retry_count}): {e}")
+                await asyncio.sleep(min(5 * retry_count, 60))
+
         logger.info("DataGateway initialised. Starting sub-tasks...")
         asyncio.create_task(send_cloud_alert("🚀 DATA GATEWAY: Service active. Monitoring 13 heavyweights + Indices.", alert_type="SYSTEM"))
         self._data_flow_alert_sent = False
@@ -447,8 +474,14 @@ class DataGateway:
                     "type": "TICK"
                 }
 
-                # Update Redis
+                # Update Redis [Audit 10.2: Match tick_history format for consistency]
                 await self.redis_client.set(f"latest_tick:{symbol}", json.dumps(tick))
+                # Push to list for fast Historical lookup (e.g. Market Sensor VWAP)
+                history_key = f"tick_history:{symbol}"
+                await self.redis_client.rpush(history_key, json.dumps(tick))
+                # LTRIM to keep only last 10,000 ticks per symbol
+                await self.redis_client.ltrim(history_key, -10000, -1)
+                
                 self._last_tick_ts[symbol] = now_ts.timestamp()
 
                 # Simulate Strike Selection
@@ -486,7 +519,7 @@ class DataGateway:
                 continue
                 
             try:
-                # 1. Selection logic for NIFTY & BANKNIFTY
+                # 1. Selection logic for NIFTY50 & BANKNIFTY
                 for idx in ["NIFTY50", "BANKNIFTY"]:
                     spot = self._prices.get(idx)
                     if not spot: continue
@@ -502,8 +535,9 @@ class DataGateway:
                     pe_strike = self.get_optimal_strike(spot, "put")
                     
                     # Construct and Subscribe
-                    await self._ensure_option_subscription(idx, ce_strike, "CE")
-                    await self._ensure_option_subscription(idx, pe_strike, "PE")
+                    shoonya_symbol = "NIFTY" if idx == "NIFTY50" else idx
+                    await self._ensure_option_subscription(shoonya_symbol, ce_strike, "CE")
+                    await self._ensure_option_subscription(shoonya_symbol, pe_strike, "PE")
                     
             except Exception as e:
                 logger.error(f"Subscription manager error: {e}")
@@ -539,7 +573,7 @@ class DataGateway:
                         formatted = f"{parts[0]}{parts[1]}"
                         await self.redis_client.set(f"EXPIRY:{idx['id']}", formatted)
                         
-                        # Set legacy key for NIFTY to prevent breakage in older logic
+                        # Set legacy key for NIFTY to prevent breakage until all consumers are updated
                         if idx['id'] == "NIFTY50":
                             await self.redis_client.set("CURRENT_EXPIRY_DATE", formatted)
                             
@@ -549,9 +583,8 @@ class DataGateway:
 
     async def _ensure_option_subscription(self, idx: str, strike: float, otype: str):
         """Finds token for strike/type and subscribes if not active."""
-        # Normalize symbol for Redis lookup and Shoonya search
-        asset_id = idx
-        if idx == "NIFTY": asset_id = "NIFTY50"
+        # Standardize NIFTY to NIFTY50 for internal Redis keys
+        asset_id = "NIFTY50" if idx == "NIFTY" else idx
         
         # Pull from per-asset expiry key
         expiry = await self.redis_client.get(f"EXPIRY:{asset_id}") or "26MAR"
@@ -624,9 +657,16 @@ class DataGateway:
 
         # Store in Redis
         await self.redis_client.hset("lot_sizes", mapping=lot_sizes)
+        await self.redis_client.hset("tick_sizes", mapping=TICK_SIZES)
+        await self.redis_client.hset("tick_ratios", mapping=TICK_RATIOS)
         await self.redis_client.publish(
             "system_events",
-            json.dumps({"event": "LOT_SIZES_UPDATED", "lot_sizes": lot_sizes})
+            json.dumps({
+                "event": "ASSET_PARAMS_UPDATED", 
+                "lot_sizes": lot_sizes,
+                "tick_sizes": TICK_SIZES,
+                "tick_ratios": TICK_RATIOS
+            })
         )
 
     # ── Staleness Watchdog ───────────────────────────────────────────────────
@@ -681,11 +721,12 @@ class DataGateway:
                 continue
 
             try:
-                for symbol in ["NIFTY", "BANKNIFTY"]:
-                    pcr = await self._calculate_pcr(symbol)
+                for redis_symbol in ["NIFTY50", "BANKNIFTY"]:
+                    shoonya_symbol = "NIFTY" if redis_symbol == "NIFTY50" else redis_symbol
+                    pcr = await self._calculate_pcr(shoonya_symbol)
                     if pcr:
-                        await self.redis_client.set(f"live_pcr:{symbol}", pcr)
-                        logger.info(f"📈 PCR {symbol}: {pcr:.2f}")
+                        await self.redis_client.set(f"live_pcr:{redis_symbol}", pcr)
+                        logger.info(f"📈 PCR {redis_symbol}: {pcr:.2f}")
             except Exception as e:
                 logger.error(f"PCR ingestion error: {e}")
             
@@ -698,10 +739,11 @@ class DataGateway:
 
         try:
             # Get current expiry token/price to find ATM
-            spot = self._prices.get(f"{symbol}50" if symbol == "NIFTY" else symbol)
+            redis_symbol = "NIFTY50" if symbol == "NIFTY" else symbol
+            spot = self._prices.get(redis_symbol)
             if not spot: return None
 
-            expiry = await self.redis_client.get("CURRENT_EXPIRY_DATE") or "26MAR"
+            expiry = await self.redis_client.get(f"EXPIRY:{redis_symbol}") or "26MAR"
             
             # Shoonya get_option_chain expects strike for chain discovery
             # We'll pull strikes +/- 500 around spot to get most the OI
@@ -709,8 +751,8 @@ class DataGateway:
             
             if res and res.get('stat') == 'Ok':
                 values = res.get('values', [])
-                call_oi = 0
-                put_oi = 0
+                call_oi: int = 0
+                put_oi: int = 0
                 for v in values:
                     # Filter for current expiry only
                     # Scrip name: NIFTY26MAR22350CE

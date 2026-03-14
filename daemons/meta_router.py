@@ -74,7 +74,14 @@ class BaseStrategyLogic:
                 atr = float(await self.r.get(f"atr:{self.asset_id}") or await self.r.get("atr") or 20.0) if self.r else 20.0
             except Exception:
                 atr = 20.0
-            atr = max(atr, 1.0)  # Guard against zero ATR
+            
+            # [Audit 9.7] Asset-specific ATR floors
+            atr_floors = {
+                "NIFTY50": 20.0,
+                "BANKNIFTY": 50.0,
+                "SENSEX": 50.0
+            }
+            atr = max(atr, atr_floors.get(self.asset_id, 10.0))  # Guard against zero/tiny ATR
 
             # Read MAX_RISK_PER_TRADE from Redis — separate keys for paper vs live
             # Determine mode: live trading is active when LIVE_CAPITAL_LIMIT > 0
@@ -152,7 +159,8 @@ class MetaRouter:
         self.mq = MQManager()
         
         if not test_mode:
-            self.cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD)
+            # [Audit 2.1] MetaRouter is the primary binder for SYSTEM_CMD (PUB)
+            self.cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD, bind=True)
             redis_host = os.getenv("REDIS_HOST", "localhost")
             self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
             self.shm = ShmManager(mode='r')
@@ -162,9 +170,9 @@ class MetaRouter:
         # Setup Orchestrator (Phase 1.2 Simplified)
         self.orchestrator = RegimeOrchestrator(HeuristicRegimeReader())
         
-        # Asset Logic
+        # Asset Logic [Audit 3.1: Standardize NIFTY to NIFTY50]
         self.brains = {
-            "NIFTY": BaseStrategyLogic("NIFTY", self._redis if not test_mode else None),
+            "NIFTY50": BaseStrategyLogic("NIFTY50", self._redis if not test_mode else None),
             "BANKNIFTY": BaseStrategyLogic("BANKNIFTY", self._redis if not test_mode else None),
             "SENSEX": BaseStrategyLogic("SENSEX", self._redis if not test_mode else None),
         }
@@ -174,8 +182,9 @@ class MetaRouter:
         self.hurst_threshold = DEFAULT_HURST_THRESHOLD
         self.hybrid_confidence = DEFAULT_HYBRID_CONFIDENCE
         self.vpin_toxicity = DEFAULT_VPIN_TOXICITY
-        self.net_delta_nifty: float = 0.0
+        self.net_delta_nifty50: float = 0.0
         self.net_delta_banknifty: float = 0.0
+        self.net_delta_sensex: float = 0.0
         self.last_greek_ts: float = 0.0
     
     async def _sync_settings(self):
@@ -235,6 +244,7 @@ class MetaRouter:
             
             n_delta: float = 0.0
             b_delta: float = 0.0
+            s_delta: float = 0.0
             
             # Simplified Greek calculation logic
             for row in rows:
@@ -251,18 +261,22 @@ class MetaRouter:
                 else:
                     leg_delta = 1.0 if qty > 0 else -1.0 # Futures/Equity
                 
-                if und == "NIFTY":
+                if und == "NIFTY50":
                     n_delta += float(leg_delta * qty)
                 elif und == "BANKNIFTY":
                     b_delta += float(leg_delta * qty)
+                elif und == "SENSEX":
+                    s_delta += float(leg_delta * qty)
             
-            self.net_delta_nifty = n_delta
+            self.net_delta_nifty50 = n_delta
             self.net_delta_banknifty = b_delta
+            self.net_delta_sensex = s_delta
             
             await conn.close()
             # Export to Redis for UI/Liquidation accessibility
-            await self._redis.set("NET_DELTA_NIFTY", f"{n_delta:.2f}")
+            await self._redis.set("NET_DELTA_NIFTY50", f"{n_delta:.2f}")
             await self._redis.set("NET_DELTA_BANKNIFTY", f"{b_delta:.2f}")
+            await self._redis.set("NET_DELTA_SENSEX", f"{s_delta:.2f}")
             
         except Exception as e:
             logger.error(f"Greek calculation error: {e}")
@@ -412,9 +426,6 @@ class MetaRouter:
                 for asset in assets:
                     # Fetch per-asset state
                     st_raw = await self._redis.get(f"latest_market_state:{asset}")
-                    if not st_raw and asset == "NIFTY50":
-                        st_raw = await self._redis.get("latest_market_state") # legacy fallback
-                    
                     multi_market_state[asset] = json.loads(st_raw) if st_raw else {}
 
                 # Orchestrate if we have any data

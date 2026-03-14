@@ -9,18 +9,29 @@ services:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
       - POSTGRES_DB=trading
+    # [Audit 6.4] Missing healthchecks
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d trading"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-    command: redis-server --appendonly yes
+    # [Audit 6.4] Missing healthchecks
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   data_gateway:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.data_gateway
+    env_file: .env # [Audit 7.3] Ensure environment variables are loaded
     depends_on:
       - redis
       - postgres
@@ -32,7 +43,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.hmm_engine --asset NIFTY --core 1
+    command: python -m daemons.hmm_engine --asset NIFTY50 --core 1
+    env_file: .env
     depends_on:
       - redis
     volumes:
@@ -44,6 +56,7 @@ services:
       context: .
       dockerfile: Dockerfile.local
     command: python -m daemons.hmm_engine --asset BANKNIFTY --core 2
+    env_file: .env
     depends_on:
       - redis
     volumes:
@@ -55,6 +68,7 @@ services:
       context: .
       dockerfile: Dockerfile.local
     command: python -m daemons.hmm_engine --asset SENSEX --core 4
+    env_file: .env
     depends_on:
       - redis
     volumes:
@@ -66,6 +80,7 @@ services:
       context: .
       dockerfile: Dockerfile.local
     command: python -m daemons.market_sensor
+    env_file: .env
     depends_on:
       - redis
     volumes:
@@ -77,6 +92,7 @@ services:
       context: .
       dockerfile: Dockerfile.local
     command: python -m daemons.meta_router
+    env_file: .env
     depends_on:
       - redis
       - postgres
@@ -88,6 +104,7 @@ services:
       context: .
       dockerfile: Dockerfile.local
     command: python -m daemons.strategy_engine
+    env_file: .env
     depends_on:
       - redis
     volumes:
@@ -98,6 +115,7 @@ services:
       context: .
       dockerfile: Dockerfile.local
     command: python -m daemons.liquidation_daemon
+    env_file: .env
     depends_on:
       - redis
       - postgres
@@ -109,6 +127,7 @@ services:
       context: .
       dockerfile: Dockerfile.local
     command: python -m daemons.system_controller
+    env_file: .env
     depends_on:
       - redis
       - postgres
@@ -120,6 +139,7 @@ services:
       context: .
       dockerfile: Dockerfile.local
     command: python -m daemons.paper_bridge
+    env_file: .env
     depends_on:
       - redis
       - postgres
@@ -134,8 +154,66 @@ services:
     depends_on:
       - redis
       - postgres
+    env_file: .env
     volumes:
       - .:/app
+
+  # [Audit 7.6] Adding missing services
+  live_bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m daemons.live_bridge
+    depends_on:
+      - redis
+      - postgres
+    env_file: .env
+    volumes:
+      - .:/app
+
+  telegram_alerter:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m utils.telegram_bot
+    depends_on:
+      - redis
+    env_file: .env
+    volumes:
+      - .:/app
+
+  cloud_publisher:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m daemons.cloud_publisher
+    depends_on:
+      - redis
+    env_file: .env
+    volumes:
+      - .:/app
+
+  dashboard_api:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m uvicorn dashboard.api.main:app --host 0.0.0.0 --port 8000
+    depends_on:
+      - redis
+      - postgres
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - .:/app
+
+  dashboard_frontend:
+    build:
+      context: ./dashboard/frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - dashboard_api
 
 volumes:
   pgdata:

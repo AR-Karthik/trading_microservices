@@ -231,7 +231,7 @@ class LiquidationDaemon:
             try:
                 _, msg = await self.mq.recv_json(sub)
                 if msg:
-                    symbol = msg.get("symbol", "NIFTY_ATM_CE")
+                    symbol = msg.get("symbol", "NIFTY50")
                     msg["entry_time"] = time.time()
                     msg["stall_retries"] = 0
                     self.orphaned_positions[symbol] = msg
@@ -248,7 +248,10 @@ class LiquidationDaemon:
     async def _market_monitor(self):
         """Polls market state and tick data to apply exit barriers."""
         asyncio.create_task(send_cloud_alert("🛡️ LIQUIDATION DAEMON: Active and monitoring risk thresholds.", alert_type="SYSTEM"))
-        market_sub = self.mq.create_subscriber(Ports.MARKET_DATA, topics=["TICK.NIFTY50"])
+        
+        # Subscribe to all supported symbols instead of just TICK.NIFTY50
+        topics = ["TICK.NIFTY50", "TICK.BANKNIFTY", "TICK.SENSEX"]
+        market_sub = self.mq.create_subscriber(Ports.MARKET_DATA, topics=topics)
         state_sub = self.mq.create_subscriber(Ports.MARKET_STATE, topics=["STATE"])
 
         latest_state: dict = {}
@@ -268,12 +271,27 @@ class LiquidationDaemon:
 
         while True:
             try:
-                _, tick = await self.mq.recv_json(market_sub)
-                if tick and self.orphaned_positions:
+                topic, tick = await self.mq.recv_json(market_sub)
+                if topic and tick and self.orphaned_positions:
+                    # Extract the tick's underlying symbol
+                    tick_symbol = str(topic).split(".")[-1]
+                    
                     # Check Stop Day Loss on every tick cycle
                     await self._check_stop_day_loss()
-                    for symbol in list(self.orphaned_positions.keys()):
-                        await self._evaluate_barriers(symbol, tick, latest_state)
+                    
+                    for pos_symbol, pos in list(self.orphaned_positions.items()):
+                        # Dynamically bucket the position by its underlying index
+                        underlying = "UNKNOWN"
+                        if pos_symbol.startswith("BANKNIFTY"):
+                            underlying = "BANKNIFTY"
+                        elif pos_symbol.startswith("SENSEX"):
+                            underlying = "SENSEX"
+                        elif pos_symbol.startswith("NIFTY"):
+                            underlying = "NIFTY50"
+                            
+                        # Only evaluate barriers if the tick matches the position's bucket
+                        if underlying == tick_symbol:
+                            await self._evaluate_barriers(pos_symbol, tick, latest_state)
             except Exception as e:
                 logger.error(f"Market monitor error: {e}")
                 await asyncio.sleep(0.5)

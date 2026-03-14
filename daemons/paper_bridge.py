@@ -14,20 +14,22 @@ import logging
 import random
 import uuid
 from datetime import datetime, timezone
-import asyncpg
+import asyncpg # type: ignore
 import json
 import time
 import os
 import sys
 from collections import deque
-from redis import asyncio as redis
-from core.logger import setup_logger
-from core.mq import MQManager, Ports, Topics, NumpyEncoder
-from core.alerts import send_cloud_alert
-from core.db_retry import with_db_retry
+import redis.asyncio as redis # type: ignore
+
+from core.logger import setup_logger # type: ignore
+from core.mq import MQManager, Ports, Topics, NumpyEncoder # type: ignore
+from core.alerts import send_cloud_alert # type: ignore
+from core.db_retry import robust_db_connect, with_db_retry # type: ignore
+from core.health import HeartbeatProvider # type: ignore
 
 try:
-    import uvloop
+    import uvloop # type: ignore
 except ImportError:
     uvloop = None
 
@@ -60,8 +62,14 @@ async def init_db(pool):
         try:
             await conn.execute("SELECT create_hypertable('trades', 'time', if_not_exists => TRUE);")
             logger.info("trades hypertable created.")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"❌ Failed to create trades hypertable: {e}")
+            
+        try:
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_time ON trades (symbol, time DESC);")
+            logger.info("trades index created.")
+        except Exception as e:
+            logger.error(f"❌ Failed to create trades index: {e}")
             
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS portfolio (
@@ -76,10 +84,15 @@ async def init_db(pool):
                 avg_price NUMERIC(15, 2) DEFAULT 0.0,
                 realized_pnl NUMERIC(15, 2) DEFAULT 0.0,
                 execution_type TEXT NOT NULL DEFAULT 'Paper',
-                updated_at TIMESTAMPTZ NOT NULL,
-                PRIMARY KEY (symbol, strategy_id, execution_type, parent_uuid)
+                updated_at TIMESTAMPTZ NOT NULL
             );
         """)
+        
+        try:
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_strategy ON portfolio (strategy_id);")
+            logger.info("portfolio index created.")
+        except Exception as e:
+            logger.error(f"❌ Failed to create portfolio index: {e}")
 
 class PaperBridge:
     def __init__(self, mq, pool, redis_client):
@@ -244,6 +257,16 @@ class PaperBridge:
                 
                 logger.info(f"Rollback: Closing {abs_qty} {sym} to net zero.")
                 
+                # [Audit 5.2] Fetch actual market price from Redis instead of dummy 100.0
+                market_price = 100.0 # fallback
+                try:
+                    state_raw = await self.redis.get(f"latest_market_state:{sym}")
+                    if state_raw:
+                        state = json.loads(state_raw)
+                        market_price = state.get("price", 100.0) # Will use last traded price
+                except Exception as e:
+                    logger.warning(f"Rollback could not fetch market price for {sym}: {e}")
+
                 # Simulate market execution for rollback
                 execution = {
                     "id": str(uuid.uuid4()),
@@ -251,7 +274,7 @@ class PaperBridge:
                     "symbol": sym,
                     "action": action,
                     "quantity": abs_qty,
-                    "price": 100.0, # Dummy price for rollback simulation
+                    "price": market_price, # [Audit 5.2] Actual price
                     "fees": 20.0,
                     "strategy_id": row["strategy_id"],
                     "execution_type": row["execution_type"],
@@ -268,27 +291,41 @@ class PaperBridge:
         
         logger.info(f"✅ Rollback complete for {parent_uuid}. Portfolio flushed.")
 
-async def calculate_slippage_and_fees(order):
+async def calculate_slippage_and_fees(order: dict) -> tuple[float, float]:
     price = float(order['price'])
     slip = random.uniform(0.3, 0.5)
     exec_price = price + slip if order['action'] == 'BUY' else price - slip
-    return round(exec_price, 2), 20.0
+    return float(f"{exec_price:.2f}"), 20.0
 
 async def _run_heartbeat(r):
-    from core.health import HeartbeatProvider
     hb = HeartbeatProvider("PaperBridge", r)
     await hb.run_heartbeat()
 
 async def main():
     mq = MQManager()
-    # Subscribe to ORDER_INTENT and bind so strategies can connect
-    pull_socket = mq.create_subscriber(Ports.ORDERS, topics=[Topics.ORDER_INTENT], bind=True)
-    r = redis.from_url(f"redis://{os.getenv('REDIS_HOST', 'localhost')}:6379", decode_responses=True)
-    pool = await asyncpg.create_pool(DB_DSN)
-    await init_db(pool)
+    # [Audit 2.2] Pull socket should bind, allowing strategies to connect (push) to it.
+    pull_socket = mq.create_pull(Ports.ORDERS, bind=True)
     
-    bridge = PaperBridge(mq, pool, r)
-    await asyncio.gather(bridge.execute_orders(pull_socket), _run_heartbeat(r))
+    r = redis.from_url(f"redis://{os.getenv('REDIS_HOST', 'localhost')}:6379", decode_responses=True)
+    
+    # [Audit 10.1] Connection retry mapping for Database pool creation
+    pool = None
+    retry_count = 0
+    while True:
+        try:
+            pool = await asyncpg.create_pool(DB_DSN, min_size=1, max_size=5, timeout=5.0)
+            break
+        except Exception as e:
+            retry_count += 1
+            logger.error(f"PaperBridge DB connect failed (Attempt {retry_count}): {e}")
+            await asyncio.sleep(min(5 * retry_count, 60))
+
+    if pool:
+        await init_db(pool)
+        bridge = PaperBridge(mq, pool, r)
+        await asyncio.gather(bridge.execute_orders(pull_socket), _run_heartbeat(r))
+    else:
+        logger.critical("Failed to connect to the database after retries. Exiting.")
 
 if __name__ == "__main__":
     if uvloop: uvloop.install()

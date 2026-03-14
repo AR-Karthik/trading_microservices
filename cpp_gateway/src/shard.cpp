@@ -11,7 +11,9 @@
 
 #ifdef __linux__
 #include <pthread.h>
+#include <sched.h>
 #endif
+#include <cstdio>
 
 // Mock of POSIX Shared Memory for development cross-compilation
 void Shard::write_to_shared_memory(const std::string& serialized_tick) {

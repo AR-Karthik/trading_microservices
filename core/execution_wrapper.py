@@ -74,16 +74,16 @@ class MultiLegExecutor:
 
         # ── Step 2: Reconciler Ping (Spec 11.1) ──────────────────────────────
         parent_uuid = orders[0].get("parent_uuid")
-        if parent_uuid:
-            from core.mq import MQManager, Ports
-            mq = MQManager()
-            cmd_pub = mq.create_publisher(Ports.SYSTEM_CMD, bind=False)
+        if parent_uuid and self.mq:
+            from core.mq import Ports
+            # Reuse existing MQ context/manager instead of creating new one per call [Audit 2.5]
+            cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD, bind=False)
             ping = {
                 "parent_uuid": parent_uuid,
                 "legs": [{"symbol": o["symbol"], "side": o.get("side", o.get("action")), "qty": o.get("qty", o.get("quantity"))} for o in sorted_orders],
                 "asset": orders[0].get("asset", "GLOBAL")
             }
-            await mq.send_json(cmd_pub, "BASKET_ORIGINATION", ping)
+            await self.mq.send_json(cmd_pub, "BASKET_ORIGINATION", ping)
             cmd_pub.close()
 
         logger.info(f"⚡ Executing {len(sorted_orders)} legs {'sequentially' if sequential else 'atomically'}...")

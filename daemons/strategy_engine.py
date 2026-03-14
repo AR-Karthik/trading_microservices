@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from core.logger import setup_logger
 from core.mq import MQManager, Ports, RedisLogger, Topics
 from core.greeks import BlackScholes
+import re
 from core.shared_memory import TickSharedMemory
 from core.margin import AsyncMarginManager
 
@@ -81,55 +82,7 @@ class BaseStrategy:
                 
         return False
 
-class SMACrossoverStrategy(BaseStrategy):
-    def __init__(self, strategy_id: str, symbols: list[str], period: int = 10, **kwargs):
-        super().__init__(strategy_id, symbols)
-        self.period = int(period)
 
-    def on_tick(self, symbol: str, data: dict) -> str | None:
-        price = data['price']
-        self.history[symbol].append(price)
-        
-        hist = list(self.history[symbol])
-        if len(hist) < self.period:
-            return None
-            
-        # Use simple mean of last N periods
-        sma = sum(hist[-self.period:]) / self.period 
-        current_pos = self.positions[symbol]
-        
-        if price > sma * 1.0005 and current_pos <= 0:
-            self.positions[symbol] = 1
-            return "BUY"
-        elif price < sma * 0.9995 and current_pos >= 0:
-            self.positions[symbol] = -1
-            return "SELL"
-        return None
-
-class MeanReversionStrategy(BaseStrategy):
-    def __init__(self, strategy_id: str, symbols: list[str], period: int = 5, threshold: float = 0.001, **kwargs):
-        super().__init__(strategy_id, symbols)
-        self.period = int(period)
-        self.threshold = float(threshold)
-
-    def on_tick(self, symbol: str, data: dict) -> str | None:
-        price = data['price']
-        self.history[symbol].append(price)
-        
-        hist = list(self.history[symbol])
-        if len(hist) < self.period:
-            return None
-            
-        mean = sum(hist[-self.period:]) / self.period 
-        current_pos = self.positions[symbol]
-        
-        if price < mean * (1 - self.threshold) and current_pos <= 0:
-            self.positions[symbol] = 1
-            return "BUY"
-        elif price > mean * (1 + self.threshold) and current_pos >= 0:
-            self.positions[symbol] = -1
-            return "SELL"
-        return None
 
 class OIPulseScalpingStrategy(BaseStrategy):
     def __init__(self, strategy_id: str, symbols: list[str], oi_threshold: float = 2.0, **kwargs):
@@ -156,7 +109,8 @@ class AnchoredVWAPStrategy(BaseStrategy):
     def __init__(self, strategy_id: str, symbols: list[str], anchor_time: str = "09:15:00", **kwargs):
         super().__init__(strategy_id, symbols)
         self.anchor_time = anchor_time
-        self.tick_data = collections.defaultdict(list)
+        # [Audit 12.1] Bound the VWAP tick storage
+        self.tick_data = collections.defaultdict(lambda: collections.deque(maxlen=10000))
 
     def on_tick(self, symbol: str, data: dict) -> str | None:
         price = data['price']
@@ -167,7 +121,7 @@ class AnchoredVWAPStrategy(BaseStrategy):
             'time': now, 'price': price, 'volume': volume
         })
         
-        df = pd.DataFrame(self.tick_data[symbol])
+        df = pd.DataFrame(list(self.tick_data[symbol]))
         anchor_dt = datetime.combine(now.date(), datetime.strptime(self.anchor_time, "%H:%M:%S").time())
         df = df[df['time'] >= anchor_dt]
         
@@ -182,13 +136,15 @@ class AnchoredVWAPStrategy(BaseStrategy):
             return "SELL"
         return None
 
+
 class GammaScalpingStrategy(BaseStrategy):
-    def __init__(self, strategy_id: str, symbols: list[str], strike: float = 22000, expiry_days: float = 30, iv: float = 0.15, r: float = 0.07, hedge_threshold: float = 0.10, **kwargs):
+    def __init__(self, strategy_id: str, symbols: list[str], strike: float = 22000, expiry_days: float = 30, iv: float = 0.15, r: float = 0.065, hedge_threshold: float = 0.10, **kwargs):
         super().__init__(strategy_id, symbols)
         self.strike = float(strike)
         self.expiry_years = float(expiry_days) / 365.0
         self.iv = float(iv)
-        self.r = float(r)
+        # [Audit 5.4, 9.4] Dynamic risk-free rate setup, fallback to RBI Repo (0.065)
+        self.r = float(kwargs.get("risk_free_rate", r))
         self.hedge_threshold = float(hedge_threshold)
         self.last_calc_time = datetime.now(timezone.utc)
 
@@ -201,13 +157,22 @@ class GammaScalpingStrategy(BaseStrategy):
         
         if self.expiry_years <= 0: return None
         
+        # [Audit 1.3] Check if symbol is an option (e.g. contains CE or PE) to adjust strike
+        dynamic_strike = self.strike
+        if "CE" in symbol or "PE" in symbol:
+            try:
+                # Basic decoder, assuming NIFTY24APR22000CE format
+                match = re.search(r'(\d+)(CE|PE)$', symbol)
+                if match: dynamic_strike = float(match.group(1))
+            except Exception: pass
+
         bs = BlackScholes()
-        delta = bs.delta(price, self.strike, self.expiry_years, self.r, self.iv, "call")
+        delta = bs.delta(price, dynamic_strike, self.expiry_years, self.r, self.iv, "call" if "CE" in symbol else "put")
         
         current_pos = float(self.positions[symbol])
-        target_pos = -float(delta * 100)
-        # Type hinting for linter
-        error: float = target_pos - current_pos
+        target_pos = -float(delta * 100) # Delta hedging assumes 100 lot for simple math
+        
+        error = target_pos - current_pos
         
         if abs(error) >= self.hedge_threshold:
             return "BUY" if error > 0 else "SELL"
@@ -243,7 +208,7 @@ class IronCondorStrategy(BaseStrategy):
         if not data.get('is_ranging', False): return None
         
         T = self.expiry_years
-        r = 0.07 # Risk-free rate
+        r = 0.065 # Standardized Risk-free rate (Audit 5.1)
         iv = self.iv
         
         # Dynamic Strike Selection
@@ -275,7 +240,7 @@ class CreditSpreadStrategy(BaseStrategy):
     def on_tick(self, symbol: str, data: dict) -> list | None:
         price = float(data['price'])
         T = self.expiry_years
-        r = 0.07
+        r = 0.065 # Standardized Risk-free rate (Audit 5.1)
         iv = self.iv
         parent_uuid = f"CS_{uuid.uuid4().hex[:8]}"
 
@@ -295,36 +260,6 @@ class CreditSpreadStrategy(BaseStrategy):
                 {"action": "BUY",  "otype": "CE", "strike": s2, "parent_uuid": parent_uuid}
             ]
 
-class CustomCodeStrategy(BaseStrategy):
-    def __init__(self, strategy_id: str, symbols: list[str], code_str: str = "", **kwargs):
-        super().__init__(strategy_id, symbols)
-        self.code_str = code_str
-        self.compiled_env = {}
-        
-        try:
-            exec(self.code_str, {}, self.compiled_env)
-        except Exception as e:
-            logger.error(f"Failed to compile custom strategy {strategy_id}: {e}")
-
-    def on_tick(self, symbol: str, data: dict) -> str | None:
-        if 'on_tick' not in self.compiled_env:
-            return None
-            
-        price = data['price']
-        self.history[symbol].append(price)
-        hist = list(self.history[symbol])
-        current_position = self.positions[symbol]
-        
-        try:
-            # Custom code expected signature: on_tick(symbol, history, position, price)
-            signal = self.compiled_env['on_tick'](symbol, hist, current_position, price)
-            if signal == "BUY": self.positions[symbol] += 1
-            elif signal == "SELL": self.positions[symbol] -= 1
-            return signal
-        except Exception as e:
-            logger.error(f"Error executing custom strategy {self.strategy_id} on {symbol}: {e}")
-            return None
-
 # Global state for dynamic strategies
 active_strategies: dict[str, BaseStrategy] = {}
 
@@ -334,14 +269,11 @@ async def config_subscriber(redis_client):
     logger.info("Starting dynamic configuration polling...")
 
     strategy_registry: dict[str, type[BaseStrategy]] = {
-        "SMA": SMACrossoverStrategy,
-        "MeanReversion": MeanReversionStrategy,
         "OIPulse": OIPulseScalpingStrategy,
         "GammaScalping": GammaScalpingStrategy,
         "AnchoredVWAP": AnchoredVWAPStrategy,
         "IronCondor": IronCondorStrategy,
-        "CreditSpread": CreditSpreadStrategy,
-        "Custom": CustomCodeStrategy
+        "CreditSpread": CreditSpreadStrategy
     }
 
     while True:
@@ -393,7 +325,11 @@ async def config_subscriber(redis_client):
 async def warmup_engine(active_strategies, num_ticks=1000):
     """Primes the engine with synthetic data to trigger JIT optimization."""
     logger.info(f"🚀 Starting Pre-Flight Warmup ({num_ticks} synthetic ticks)...")
-    symbols = ["NIFTY50", "BANKNIFTY", "RELIANCE"]
+    symbols = [
+        "NIFTY50", "BANKNIFTY", "SENSEX",
+        "HDFCBANK", "ICICIBANK", "INFY", "TCS", "ITC", 
+        "SBIN", "AXISBANK", "KOTAKBANK", "LT", "RELIANCE"
+    ]
     for _ in range(num_ticks):
         symbol = random.choice(symbols)
         tick_data = {
@@ -600,7 +536,7 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                     dispatch_meta["dispatch_time_epoch"] = time.time()
                     dispatch_meta["broker_order_id"] = None
                     
-                    await mq_manager.send_json(push_socket, order)
+                    await mq_manager.send_json(push_socket, Topics.ORDER_INTENT, order)
                     await redis_client.hset("pending_orders", order["order_id"], json.dumps(dispatch_meta, cls=NumpyEncoder))
                     
                     logger.info(f"DISPATCHED {action} {qty} {symbol} @ {price}")
@@ -614,7 +550,8 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
 async def start_engine():
     mq = MQManager()
     redis_host = os.getenv("REDIS_HOST", "localhost")
-    redis_client = redis.Redis(host=redis_host, port=6379, db=0)
+    # [Audit 14.4] Use from_url for true async context manager compatibility
+    redis_client = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
     
     # v5.5: Zero-latency Risk & Alpha via SHM
     from core.shm import ShmManager
@@ -626,9 +563,11 @@ async def start_engine():
         logger.warning(f"Shared Memory (Ticks) not found: {e}.")
         shm_ticks = None
     
-    sub_socket = mq.create_subscriber(Ports.MARKET_DATA, topics=["TICK."])
-    push_socket = mq.create_push(Ports.ORDERS)
-    cmd_socket = mq.create_subscriber(Ports.SYSTEM_CMD, topics=["STRAT_", "ALL"])
+    # [Audit 2.3] Add missing MQ topics so Engine receives all ticks
+    sub_socket = mq.create_subscriber(Ports.MARKET_DATA, topics=["TICK.", "EXEC."])
+    push_socket = mq.create_push(Ports.ORDERS) # Pushes to Bridge
+    # [Audit 8.1] Bind CMD socket for controller push
+    cmd_socket = mq.create_subscriber(Ports.SYSTEM_CMD, topics=["STRAT_", "ALL"], bind=True)
     
     # ── Phase 9: UI & Observability heartbeat ──
     from core.health import HeartbeatProvider

@@ -165,8 +165,9 @@ class HeuristicEngine:
                     rv=self.rv_val,
                     adx=self.adx_val,
                     pcr=self.last_pcr,
-                    net_delta_nifty=0.0, # Filled by MarketSensor in Phase 5
-                    net_delta_banknifty=0.0,
+                    net_delta_nifty=float(state.get("net_delta_nifty", 0.0)), # [Audit 9.5] Pull from state
+                    net_delta_banknifty=float(state.get("net_delta_banknifty", 0.0)), # [Audit 9.5] Pull from state
+                    net_delta_sensex=float(state.get("net_delta_sensex", 0.0)),
                     veto=(regime == REGIME_CRASH)
                 ))
 
@@ -182,8 +183,9 @@ class HeuristicEngine:
                 }, cls=NumpyEncoder))
                 
                 # Link legacy key for primary index monitoring
-                if self.asset_id == "NIFTY50" or self.asset_id == "NIFTY":
+                if self.asset_id == "NIFTY50":
                     await self.r.set("hmm_regime", legacy_regime)
+                    await self.r.set("hmm_regime:NIFTY50", legacy_regime)
                 
             except Exception as e:
                 logger.error(f"Heuristic Engine [{self.asset_id}] loop error: {e}")
@@ -191,7 +193,8 @@ class HeuristicEngine:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--asset", required=True, choices=["NIFTY", "BANKNIFTY", "SENSEX"])
+    # [Audit 3.1] Standardize on NIFTY50 everywhere
+    parser.add_argument("--asset", required=True, choices=["NIFTY50", "BANKNIFTY", "SENSEX"])
     parser.add_argument("--core", type=int, required=True)
     args = parser.parse_args()
 

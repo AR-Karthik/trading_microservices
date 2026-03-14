@@ -27,23 +27,27 @@ import math
 import multiprocessing as mp
 import sys
 import time
+import queue
+import re
 from datetime import datetime, timezone
+import sys
 from typing import Any
 
-import numpy as np
-import polars as pl
-import redis.asyncio as redis
+import numpy as np # type: ignore
+import polars as pl # type: ignore
+import redis.asyncio as redis # type: ignore
 
 import os
-from core.logger import setup_logger
-from core.shm import ShmManager, SignalVector
-from core.greeks import BlackScholes
-from core.mq import MQManager, Ports, Topics, NumpyEncoder
-from core.alerts import send_cloud_alert
+from core.logger import setup_logger # type: ignore
+from core.shm import ShmManager, SignalVector # type: ignore
+from core.greeks import BlackScholes # type: ignore
+from core.mq import MQManager, Ports, Topics, NumpyEncoder # type: ignore
+from core.alerts import send_cloud_alert # type: ignore
+from core.health import HeartbeatProvider # type: ignore
 
 # Try to import Rust extension for high-performance math
 try:
-    import tick_engine
+    import tick_engine # type: ignore
     HAS_RUST_ENGINE = True
 except ImportError:
     HAS_RUST_ENGINE = False
@@ -52,7 +56,10 @@ logger = setup_logger("MarketSensor", log_file="logs/market_sensor.log")
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-TOP_5_HEAVYWEIGHTS = ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "ITC", "SBIN", "AXISBANK", "KOTAKBANK", "LT"]
+TOP_5_HEAVYWEIGHTS = [
+    "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", 
+    "ITC", "SBIN", "AXISBANK", "KOTAKBANK", "LT"
+]
 OFI_WINDOW = 100          # ticks for rolling OFI
 DISPERSION_WINDOW_MIN = 3 # minutes for correlation rolling window
 RISK_FREE_RATE = 0.065    # 6.5% RBI repo rate
@@ -109,6 +116,15 @@ def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: 
     
     dx = 100 * (np.abs(plus_di - minus_di) / (plus_di + minus_di)) if (plus_di + minus_di) > 0 else 0
     return float(dx)
+
+def calculate_hurst(series: np.ndarray) -> float:
+    """Hurst exponent helper."""
+    if len(series) < 50:
+        return 0.5
+    lags = range(2, 20)
+    tau = [np.sqrt(np.std(np.subtract(series[lag:], series[:-lag]))) for lag in lags]
+    poly = np.polyfit(np.log(lags), np.log(tau), 1)
+    return float(poly[0] * 2.0)
 
 def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
     """
@@ -339,6 +355,10 @@ class MarketSensor:
             self.shm = None
             self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
 
+        self.manager: Any = None
+        self.main_task: asyncio.Task | None = None
+        self.hb: HeartbeatProvider | None = None
+
         # High-performance Rust engine integration
         self.use_rust = os.getenv("USE_RUST_ENGINE", "0") == "1" and HAS_RUST_ENGINE
         if self.use_rust:
@@ -350,24 +370,25 @@ class MarketSensor:
             self._redis = redis.Redis(host=redis_host, port=6379, db=0, decode_responses=True)
 
         # Tick buffers (main process — lightweight)
-        self.tick_store: dict[str, collections.deque] = collections.defaultdict(
+        # Audit 1.2: Explicitly type hint deques to avoid list[Error] lints
+        self.tick_store: dict[str, collections.deque[dict[str, Any]]] = collections.defaultdict(
             lambda: collections.deque(maxlen=2000)
         )
-        self.hw_prices: dict[str, collections.deque] = {
+        self.hw_prices: dict[str, collections.deque[float]] = {
             sym: collections.deque(maxlen=500) for sym in TOP_5_HEAVYWEIGHTS
         }
-        self.ofi_series: collections.deque = collections.deque(maxlen=200)
+        self.ofi_series: collections.deque[float] = collections.deque(maxlen=200)
         self.cvd: float = 0.0
-        self.cvd_series: collections.deque = collections.deque(maxlen=200)
-        self.basis_series: collections.deque = collections.deque(maxlen=500)
-        self.spot_15m_series: collections.deque = collections.deque(maxlen=900)  # ~15min @ 1/s
+        self.cvd_series: collections.deque[float] = collections.deque(maxlen=200)
+        self.basis_series: collections.deque[float] = collections.deque(maxlen=500)
+        self.spot_15m_series: collections.deque[float] = collections.deque(maxlen=900)  # ~15min @ 1/s
 
         # VPIN State (SRS Phase 2)
         self.vpin_bucket_size = 100  # v8.0 audit fix: smaller buckets for index ticks
         self.current_bucket_vol = 0
         self.current_bucket_buy_vol = 0
         self.current_bucket_sell_vol = 0
-        self.vpin_series: collections.deque = collections.deque(maxlen=50)
+        self.vpin_series: collections.deque[float] = collections.deque(maxlen=50)
 
         # Compute subprocess setup
         self._compute_in: mp.Queue = mp.Queue(maxsize=50)
@@ -378,31 +399,65 @@ class MarketSensor:
         # Hurst exponent cache
         self._last_hurst_calc = 0.0
 
-    def _start_compute_process(self):
-        """Launch the isolated compute subprocess."""
-        self._compute_proc = mp.Process(
-            target=_compute_worker,
-            args=(self._compute_in, self._compute_out),
-            daemon=True,
-            name="ComputeWorker"
-        )
-        self._compute_proc.start()
-        logger.info(f"ComputeProcess started (PID: {self._compute_proc.pid})")
+    # Removed redundant compute process methods
 
-    def _stop_compute_process(self):
-        if self._compute_proc and self._compute_proc.is_alive():
-            self._compute_in.put(None)  # sentinel
-            self._compute_proc.join(timeout=5)
+    async def start(self):
+        """Starts multiprocessing sensors and the async state publishing."""
+        try:
+            self.manager = mp.Manager()
+            self._compute_in = self.manager.Queue(maxsize=10000) # Re-initialize with manager queue
+            self._compute_out = self.manager.Queue(maxsize=1000) # Re-initialize with manager queue
+            
+            self._compute_proc = mp.Process(
+                target=_compute_worker,
+                args=(self._compute_in, self._compute_out),
+                daemon=True,
+                name="MarketSensor_Compute"
+            )
+            self._compute_proc.start() # type: ignore
+            logger.info(f"🚀 Compute Process started. PID: {self._compute_proc.pid}")
+            
+            # [Audit 11.1] Heartbeat integration
+            self.hb = HeartbeatProvider("MarketSensor", self.mq)
+            await self.hb.start()
+
+            self.main_task = asyncio.create_task(self.run())
+        except Exception as e:
+            logger.error(f"❌ Failed to start Market Sensor: {e}")
+            self.stop()
+            raise
+
+    def stop(self):
+        """Gracefully stops all loops and background processes."""
+        logger.info("🛑 Stopping Market Sensor...")
+        if hasattr(self, 'main_task') and self.main_task:
+            try:
+                self.main_task.cancel()
+            except Exception:
+                pass
+        if self.hb:
+            asyncio.create_task(self.hb.stop())
+        if self._compute_proc:
             if self._compute_proc.is_alive():
-                self._compute_proc.terminate()
+                logger.info("Waiting for compute process to finish...")
+                # Send sentinel to compute process to shut down gracefully
+                try:
+                    self._compute_in.put(None)
+                except Exception as e:
+                    logger.warning(f"Could not send sentinel to compute process: {e}")
+                self._compute_proc.join(timeout=2)
+                if self._compute_proc.is_alive():
+                    logger.warning("Compute process did not terminate gracefully, forcing kill.")
+                    self._compute_proc.terminate()
+        logger.info("✅ Market Sensor stopped successfully.")
 
-    def calculate_hurst(self, series: np.ndarray) -> float:
-        if len(series) < 50:
-            return 0.5
-        lags = range(2, 20)
-        tau = [np.sqrt(np.std(np.subtract(series[lag:], series[:-lag]))) for lag in lags]
-        poly = np.polyfit(np.log(lags), np.log(tau), 1)
-        return float(poly[0] * 2.0)
+    def _pin_core(self):
+        if sys.platform != "win32":
+            try:
+                os.sched_setaffinity(0, {0, 1}) # Pin to first two cores
+                logger.info("Pinned Market Sensor to cores 0,1 natively.")
+            except Exception as e:
+                logger.error(f"Failed to pin core: {e}")
 
     def _classify_trade(self, tick: dict) -> float:
         """
@@ -437,11 +492,28 @@ class MarketSensor:
         volume = tick.get("last_volume", 1)
         return sign * volume
 
+    def _ofi(self, tick: dict) -> float:
+        """Order Flow Imbalance (OFI) calculation."""
+        # Simplified OFI: (bid_size - ask_size) * price_change_direction
+        # A more robust OFI would involve tracking order book changes
+        bid_size = tick.get("bid_size", 0)
+        ask_size = tick.get("ask_size", 0)
+        last_price = tick.get("price", 0.0)
+        prev_price = self.tick_store[tick.get("symbol", "NIFTY50")][-1].get("price", last_price) if self.tick_store[tick.get("symbol", "NIFTY50")] else last_price
+
+        price_change_direction = 0
+        if last_price > prev_price:
+            price_change_direction = 1
+        elif last_price < prev_price:
+            price_change_direction = -1
+
+        return (bid_size - ask_size) * price_change_direction
+
     def _update_cvd(self, tick: dict):
         """Cumulative Volume Delta update using Lee-Ready classification."""
         sign = self._classify_trade(tick)
         volume = tick.get("last_volume", 1)
-        self.cvd += sign * volume
+        self.cvd += sign # sign already includes volume in _classify_trade
         self.cvd_series.append(self.cvd)
 
     def _update_vpin(self, tick: dict):
@@ -489,12 +561,13 @@ class MarketSensor:
                     else:
                         # Global or default symbol signals
                         self._latest_signals.update(msg)
-            except mp.queues.Empty:
+            except queue.Empty:
                 break
 
     async def run(self):
         if not self.test_mode:
-            self._start_compute_process()
+            # The _start_compute_process is now handled by the new `start` method
+            pass
 
         # ── Phase 9: UI & Observability heartbeat ──
         from core.health import HeartbeatProvider
@@ -535,9 +608,9 @@ class MarketSensor:
                     self.basis_series.append(futures_est - price)
 
                     if symbol == "NIFTY50":
-                        self.spot_15m_series.append(price)
+                        self.spot_15m_series.append(float(price))
 
-                    tick_count = tick_count + 1
+                    tick_count = int(tick_count + 1)
 
                     # Drain compute results every tick (non-blocking)
                     await self._drain_compute_output()
@@ -556,7 +629,7 @@ class MarketSensor:
                             "vpin_series": list(self.vpin_series) if self.vpin_series else [0.0],
                             "zero_gamma_level": find_zero_gamma_level(np.array(price_series), price),
                             "price_series": price_series,
-                            "hurst_val": self.calculate_hurst(np.array(price_series[-500:])) if len(price_series) >= 50 else 0.5,
+                            "hurst_val": calculate_hurst(np.array(price_series[-500:])) if len(price_series) >= 50 else 0.5,
                             "er_window": 10, # Dynamic via Firestore later
                             "strikes": [price - 200, price - 100, price, price + 100, price + 200],
                             "near_term_iv": await self._redis.get("atm_iv") or 0.20,
@@ -567,7 +640,7 @@ class MarketSensor:
                         }
                         try:
                             self._compute_in.put_nowait(snapshot)
-                        except mp.queues.Full:
+                        except (queue.Full, Exception):
                             pass  # Skip if compute is backed up — don't block I/O loop
 
                         # GAP FIX: Also send individual snapshots for heavyweights for Power Five matrix
@@ -578,7 +651,10 @@ class MarketSensor:
                                 "price_series": price_series,
                                 "ofi_series": [t.get("price", price) for t in list(self.tick_store[symbol])][-100:]
                             }
-                            self._compute_in.put_nowait(hw_snapshot)
+                            try:
+                                self._compute_in.put_nowait(hw_snapshot)
+                            except (queue.Full, Exception):
+                                pass # Skip if compute is backed up
 
                     # Publish state every 50 ticks
                     if tick_count % 50 == 0:
@@ -587,11 +663,11 @@ class MarketSensor:
                     await asyncio.sleep(0)  # yield to event loop
 
                 except Exception as e:
-                    logger.error(f"MarketSensor tick error: {e}")
+                    logger.error(f"Market Sensor Data Sync Error: {e}")
                     await asyncio.sleep(0.1)
 
         finally:
-            self._stop_compute_process()
+            # The _stop_compute_process is now handled by the new `stop` method
             sub.close()
 
     async def _publish_market_state(self, symbol: str, price: float):
@@ -610,16 +686,22 @@ class MarketSensor:
         prices_arr = np.array([t.get("price", price) for t in list(self.tick_store[symbol])])
 
         env_data = {"fii_bias": fii_bias, "vix_slope": 0.01, "ivp": 25, "sentiment_score": sentiment_score}
-        str_data = {"basis_slope": float(np.mean(list(self.basis_series)[-5:]) if len(self.basis_series) >= 5 else 0),
-                    "dist_max_pain": 10, "pcr": 0.85}
-        div_data = {"price_slope": float(np.diff(prices_arr[-10:]).mean()) if len(prices_arr) >= 10 else 0,
-                    "pcr_slope": 0.02, "cvd_slope": float(np.diff(list(self.cvd_series)[-5:]).mean())
-                    if len(self.cvd_series) >= 5 else 0}
+        
+        basis_list = list(self.basis_series)
+        str_data = {"basis_slope": float(np.mean(basis_list[-5:]) if len(basis_list) >= 5 else 0.0),
+                    "dist_max_pain": 10.0, "pcr": 0.85}
+        
+        div_data = {"price_slope": float(np.diff(prices_arr[-10:]).mean()) if len(prices_arr) >= 10 else 0.0,
+                    "pcr_slope": 0.02, 
+                    "cvd_slope": float(np.diff(list(self.cvd_series)[-5:]).mean()) if len(self.cvd_series) >= 5 else 0.0}
 
         s_env = self.scorer._calc_env(env_data)
         s_str = self.scorer._calc_str(str_data)
         s_div = self.scorer._calc_div(div_data)
         s_total = self.scorer.get_total_score(env_data, str_data, div_data)
+
+        vpin = sig.get("vpin", 0.0)
+        flow_toxicity_veto = sig.get("flow_toxicity_veto", False)
 
         state = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -646,8 +728,8 @@ class MarketSensor:
             "basis_zscore": sig.get("basis_zscore", 0.0),
             "price_dislocation": sig.get("price_dislocation", False),
             "spot_zscore_15m": sig.get("spot_zscore_15m", 0.0),
-            "vpin": state["vpin"],
-            "flow_toxicity_veto": state["flow_toxicity_veto"],
+            "vpin": vpin,
+            "flow_toxicity_veto": flow_toxicity_veto,
             "sentiment_score": sentiment_score,
             "time_of_day": datetime.now().strftime("%H:%M:%S")
         }
@@ -656,24 +738,25 @@ class MarketSensor:
         if symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
             # Target 1 = entry + 1.5 * ATR, Target 2 = entry + 3 * ATR
             # For simplicity, we assume 'entry' is tracked in session or we use a baseline
-            atr = state.get("atr", 20.0)
-            entry = float(await self._redis.get(f"entry_price:{symbol}") or price)
+            atr = float(state.get("atr", 20.0))
+            entry_val = await self._redis.get(f"entry_price:{symbol}")
+            entry = float(entry_val) if entry_val else price
             
             side = await self._redis.get(f"active_side:{symbol}") or "LONG"
-            mult = 1 if side == "LONG" else -1
+            mult = 1.0 if side == "LONG" else -1.0
             
-            tp1 = entry + (1.5 * atr * mult)
-            tp2 = entry + (3.0 * atr * mult)
+            tp1 = float(entry) + (1.5 * atr * mult)
+            tp2 = float(entry) + (3.0 * atr * mult)
             
             # Progress: how close are we to TP2 from entry
             dist_total = abs(tp2 - entry)
             dist_current = abs(price - entry)
-            progress = min(100, max(0, (dist_current / dist_total) * 100)) if dist_total > 0 else 0
+            progress = min(100.0, max(0.0, (dist_current / dist_total) * 100.0)) if dist_total > 0 else 0.0
             
             state["exit_path_70_30"] = {
-                "tp1": round(tp1, 2),
-                "tp2": round(tp2, 2),
-                "progress": round(progress, 2)
+                "tp1": round(float(tp1), 2),
+                "tp2": round(float(tp2), 2),
+                "progress": round(float(progress), 2)
             }
 
             if self.shm:
@@ -686,10 +769,17 @@ class MarketSensor:
                     s_env=state.get("s_env", 0.0),
                     s_str=state.get("s_str", 0.0),
                     s_div=state.get("s_div", 0.0),
-                    veto=bool(state.get("toxic_veto", False))
+                    rv=state["rv"],
+                    adx=state["adx"],
+                    pcr=state.get("pcr", 0.85),
+                    net_delta_nifty=float(await self._redis.get("net_delta_nifty50") or 0.0),
+                    net_delta_banknifty=float(await self._redis.get("net_delta_banknifty") or 0.0),
+                    net_delta_sensex=float(await self._redis.get("net_delta_sensex") or 0.0),
+                    veto=bool(state.get("flow_toxicity_veto", False))
                 )
                 self.shm.write(signals)
-            await self.mq.send_json(self.pub, state, topic=Topics.MARKET_STATE)
+              # 3. Publish over ZeroMQ [Audit 2.2: Fix parameter order]
+            await self.mq.send_json(self.pub, Topics.MARKET_STATE, state)
             
             # Persist state by symbol
             await self._redis.set(f"latest_market_state:{symbol}", json.dumps(state, cls=NumpyEncoder))
@@ -725,9 +815,8 @@ class MarketSensor:
             if symbol == "NIFTY50":
                 await self._redis.set("COMPOSITE_ALPHA", str(state["s_total"]))
 
-            # HMM_REGIME: pull from partitioned regime hash
-            asset_short = "NIFTY" if symbol == "NIFTY50" else symbol
-            hmm_raw = await self._redis.hget("hmm_regime_state", asset_short)
+            # HMM_REGIME: pull from partitioned regime hash [Audit 3.1: Standardize NIFTY50]
+            hmm_raw = await self._redis.hget("hmm_regime_state", symbol)
             if hmm_raw:
                 hmm_data = json.loads(hmm_raw)
                 val = hmm_data.get("regime", "WAITING")

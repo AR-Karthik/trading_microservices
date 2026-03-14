@@ -33,7 +33,7 @@ class OrderReconciler:
                 now = time.time()
                 to_reconcile = []
                 
-                for p_uuid, data in self.inflight_baskets.items():
+                for p_uuid, data in list(self.inflight_baskets.items()): # [Audit 4.1] list() to prevent runtime error
                     if now - data["start_time"] > 3.0:
                         to_reconcile.append(p_uuid)
                 
@@ -105,8 +105,8 @@ class OrderReconciler:
                 "order_id": f"RECON_{int(time.time())}_{p_uuid[:8]}",
                 "parent_uuid": p_uuid,
                 "symbol": leg["symbol"],
-                "action": leg["side"], # side should be BUY/SELL
-                "quantity": leg["qty"],
+                "action": leg.get("action", leg.get("side")), # [Audit 10.4] Standardize action/side
+                "quantity": float(leg.get("quantity", leg.get("qty", 1))), # [Audit 10.4] Standardize quantity/qty
                 "order_type": "MARKET",
                 "strategy_id": "RECONCILER",
                 "execution_type": leg.get("execution_type", "Paper"),
@@ -147,8 +147,8 @@ class OrderReconciler:
                         "order_id": f"ROLL_{int(time.time())}_{p_uuid[:8]}",
                         "parent_uuid": p_uuid,
                         "symbol": leg["symbol"],
-                        "action": "SELL" if leg["side"] == "BUY" else "BUY",
-                        "quantity": qty,
+                        "action": "SELL" if leg.get("action", leg.get("side")) == "BUY" else "BUY", # [Audit 10.4] Standardize action/side
+                        "quantity": float(qty), # [Audit 10.4] Ensure float
                         "order_type": "MARKET",
                         "strategy_id": "RECONCILER_ROLLBACK",
                         "execution_type": leg.get("execution_type", "Paper"),
@@ -162,7 +162,9 @@ class OrderReconciler:
         self.order_push = self.mq.create_push(Ports.ORDERS, bind=False)
         
         # Listen for new basket originations from MetaRouter
-        sub = self.mq.create_subscriber(Ports.SYSTEM_CMD, topics=["BASKET_ORIGINATION"])
+        # [Audit 2.1] Do NOT bind subscriber to SYSTEM_CMD, as StrategyEngine may own it or vice versa
+        # Actually Publisher on MetaRouter might bind. Subscribing just connects.
+        sub = self.mq.create_subscriber(Ports.SYSTEM_CMD, topics=["BASKET_ORIGINATION"], bind=False)
         
         asyncio.create_task(self._watchdog_loop())
         

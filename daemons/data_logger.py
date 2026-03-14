@@ -28,7 +28,15 @@ logging.basicConfig(
 logger = logging.getLogger("DataLogger")
 
 db_host = os.getenv("DB_HOST", "localhost")
-DB_DSN = f"postgres://trading_user:trading_pass@{db_host}:5432/trading_db"
+db_user = os.getenv("DB_USER")
+db_pass = os.getenv("DB_PASS")
+db_name = os.getenv("DB_NAME", "trading_db")
+
+if not db_user or not db_pass:
+    logger.error("DB_USER or DB_PASS not set in environment!")
+    sys.exit(1)
+
+DB_DSN = f"postgres://{db_user}:{db_pass}@{db_host}:5432/{db_name}"
 
 class DataLogger:
     def __init__(self):

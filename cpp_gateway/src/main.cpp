@@ -28,7 +28,7 @@ int main() {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    std::cout << "🦸 K.A.R.T.H.I.K. Deterministic Tri-Brain Gateway [V6.4]\n";
+    std::cout << "🦸 K.A.R.T.H.I.K. Deterministic Tri-Brain Gateway\n";
     std::cout << "=========================================================\n";
 
     // Create Shards

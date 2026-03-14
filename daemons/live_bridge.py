@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from redis import asyncio as redis
 from functools import partial
 
+from typing import Optional, Any
 import asyncpg
 from core.logger import setup_logger
 from core.mq import MQManager, Ports, Topics
@@ -21,7 +22,7 @@ from NorenRestApiPy.NorenApi import NorenApi
 from dotenv import load_dotenv
 
 try:
-    import uvloop
+    import uvloop # type: ignore
 except ImportError:
     uvloop = None
 
@@ -46,6 +47,7 @@ class TokenBucketRateLimiter:
             self.last_refill = time.monotonic()
         self.tokens -= 1
 
+
 class LiveExecutionEngine:
     def __init__(self, mq_manager, pool, redis_client):
         self.mq = mq_manager
@@ -69,7 +71,7 @@ class LiveExecutionEngine:
         # Spec 11.5: Token Bucket Rate Limiter
         self.rate_limiter = TokenBucketRateLimiter(rate=8, per=1.0)
 
-        ws_url = self.host.replace('https', 'wss').replace('NorenWClientTP', 'NorenWSTP')
+        ws_url = str(self.host).replace('https', 'wss').replace('NorenWClientTP', 'NorenWSTP')
         if not ws_url.endswith('/'): ws_url += '/'
         
         self.api = NorenApi(host=self.host, websocket=ws_url)
@@ -79,7 +81,7 @@ class LiveExecutionEngine:
         load_dotenv()
         logger.info("Authenticating Execution Bridge with Shoonya APIs...")
         
-        pwd = hashlib.sha256(self.pwd.encode('utf-8')).hexdigest()
+        pwd = hashlib.sha256(str(self.pwd).encode('utf-8')).hexdigest()
         u_app_key = '{0}|{1}'.format(self.user, self.app_key)
         app_key = hashlib.sha256(u_app_key.encode('utf-8')).hexdigest()
         
@@ -114,18 +116,23 @@ class LiveExecutionEngine:
         symbol = execution['symbol']
         strategy_id = execution['strategy_id']
         exec_type = execution.get('execution_type', 'Actual') # We force Actual here
-        qty = execution['quantity'] if execution['action'] == 'BUY' else -execution['quantity']
-        price = execution['price']
+        parent_uuid = execution.get('parent_uuid', 'NONE')
+        qty = float(execution['quantity']) if execution['action'] == 'BUY' else -float(execution['quantity'])
+        price = float(execution['price'])
         
-        record = await conn.fetchrow("SELECT * FROM portfolio WHERE symbol = $1 AND strategy_id = $2 AND execution_type = $3 FOR UPDATE", symbol, strategy_id, exec_type)
+        # [Audit 5.1] Add parent_uuid to portfolio tracking
+        record = await conn.fetchrow(
+            "SELECT quantity, avg_price, realized_pnl FROM portfolio WHERE symbol = $1 AND strategy_id = $2 AND execution_type = $3 AND parent_uuid = $4 FOR UPDATE", 
+            symbol, strategy_id, exec_type, parent_uuid
+        )
         
         if not record:
             await conn.execute(
                 """
-                INSERT INTO portfolio (symbol, strategy_id, quantity, avg_price, execution_type, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO portfolio (symbol, strategy_id, parent_uuid, quantity, avg_price, execution_type, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 """,
-                symbol, strategy_id, qty, price, exec_type, execution['time']
+                symbol, strategy_id, parent_uuid, qty, price, exec_type, execution['time']
             )
             return
             
@@ -151,11 +158,12 @@ class LiveExecutionEngine:
             """
             UPDATE portfolio
             SET quantity = $1, avg_price = $2, realized_pnl = $3, updated_at = $4
-            WHERE symbol = $5 AND strategy_id = $6 AND execution_type = $7
+            WHERE symbol = $5 AND strategy_id = $6 AND execution_type = $7 AND parent_uuid = $8
             """,
-            new_qty, new_avg_price, realized_pnl, execution['time'], symbol, strategy_id, exec_type
+            new_qty, new_avg_price, realized_pnl, execution['time'], symbol, strategy_id, exec_type, parent_uuid
         )
-        self.total_realized_pnl = realized_pnl # Update for kill switch check
+        # [Audit 8.4] Only update realized PnL delta to avoid overwriting from multiple threads
+        self.total_realized_pnl += (realized_pnl - float(record['realized_pnl']))
 
     async def check_kill_switch(self):
         """Monitors total realized P&L against the Hard Kill Switch boundary."""
@@ -170,13 +178,15 @@ class LiveExecutionEngine:
             return True
         return False
 
-    async def execute_live_order(self, order):
+    async def execute_live_order(self, order: dict) -> Optional[dict]:
         """Dispatches real network requests to Shoonya routing engine."""
         action_map = {"BUY": "B", "SELL": "S"}
         
-        exchange = 'NSE' # Fallback
-        symbol = order['symbol']
+        # [Audit 9.3] Dynamic exchange routing based on symbol
+        exchange = self._get_exchange(order['symbol'])
+            
         action = action_map.get(order['action'], 'B')
+        symbol = order['symbol']
         
         # --- Spec 11.5: Rate Limiting ---
         await self.rate_limiter.acquire()
@@ -206,24 +216,32 @@ class LiveExecutionEngine:
                 "time": datetime.now(timezone.utc),
                 "symbol": symbol,
                 "action": order['action'],
-                "quantity": order['quantity'],
-                "price": order.get('price', 0.0), # Will be reconciled later
-                "fees": 20.0,
+                "quantity": float(order['quantity']),
+                "price": float(order.get('price', 0.0)), # Will be reconciled later
+                "fees": float(order.get('fees', 20.0)),  # [Audit 5.3] Allow dynamic fees
                 "strategy_id": order['strategy_id'],
-                "execution_type": "Actual"
+                "execution_type": "Actual",
+                "parent_uuid": order.get('parent_uuid', 'NONE') # [Audit 5.1] Pass through parent UUID
             }
         else:
             logger.error(f"❌ Live Order Rejected by Broker: {res}")
             return None
 
-    async def get_last_price(self, symbol):
+
+    def _get_exchange(self, symbol: str) -> str:
+        """Determines the exchange for a given symbol."""
+        if any(suffix in symbol for suffix in ["CE", "PE", "FUT"]):
+            return 'BFO' if any(idx in symbol for idx in ["SENSEX", "BANKEX"]) else 'NFO'
+        return 'NSE'
+
+    async def get_last_price(self, symbol: str) -> float:
         """Fetches last traded price for an asset."""
         tick_str = await self.redis.get(f"latest_tick:{symbol}")
         if tick_str:
             return float(json.loads(tick_str).get('price', 0.0))
         return 0.0
 
-    async def get_order_status(self, order_id):
+    async def get_order_status(self, order_id: str) -> str:
         """Polls broker for order status."""
         loop = asyncio.get_running_loop()
         res = await loop.run_in_executor(None, partial(self.api.single_order_history, orderno=order_id))
@@ -275,6 +293,7 @@ class LiveExecutionEngine:
                         execution['strategy_id'], execution['execution_type']
                     )
                     await self.update_portfolio(conn, execution, execution['fees'])
+
             
             # --- Phase 10: Triple-Barrier Handoff Ping ---
             handoff_payload = {
@@ -380,9 +399,12 @@ class LiveExecutionEngine:
                                 
                                 logger.critical(f"Panic Fire: {action} {qty} {symbol}")
                                 loop = asyncio.get_running_loop()
+                                # [Audit 9.3] Identify exchange dynamically
+                                panic_ex = self._get_exchange(symbol)
+                                
                                 # Blast market orders rapidly
-                                await loop.run_in_executor(None, lambda a=action, s=symbol, q=qty: self.api.place_order(
-                                    buy_or_sell=a[0], product_type='I', exchange='NSE', tradingsymbol=s, 
+                                await loop.run_in_executor(None, lambda a=action, s=symbol, q=qty, ex=panic_ex: self.api.place_order(
+                                    buy_or_sell=a[0], product_type='I', exchange=ex, tradingsymbol=s, 
                                     quantity=q, disclosedquantity=0, price_type='MKT', price=0, retention='DAY'
                                 ))
                                 
@@ -416,10 +438,13 @@ class LiveExecutionEngine:
                 symbol = pos['symbol']
                 
                 logger.critical(f"Rollback Fire: {action} {qty} {symbol}")
+                # [Audit 9.3] Identify exchange dynamically
+                rollback_ex = self._get_exchange(symbol)
+                
                 # Dispatch market order to broker
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, lambda a=action, s=symbol, q=qty: self.api.place_order(
-                    buy_or_sell=a[0], product_type='I', exchange='NSE', tradingsymbol=s, 
+                await loop.run_in_executor(None, lambda a=action, s=symbol, q=qty, ex=rollback_ex: self.api.place_order(
+                    buy_or_sell=a[0], product_type='I', exchange=ex, tradingsymbol=s, 
                     quantity=q, disclosedquantity=0, price_type='MKT', price=0, retention='DAY'
                 ))
             
@@ -450,8 +475,10 @@ async def main():
     logger.info("Initializing Live Bridge...")
     
     mq = MQManager()
-    pull_socket = mq.create_subscriber(Ports.ORDERS, topics=[Topics.ORDER_INTENT], bind=True)
-    redis_client = redis.Redis(host=REDIS_HOST, port=6379, db=0, decode_responses=True, socket_timeout=5.0)
+    # [Audit 4.2] Fix pull socket bind
+    pull_socket = mq.create_pull(Ports.ORDERS, bind=True)
+    # [Audit 14.1] Better async Redis config
+    redis_client = redis.from_url(f"redis://{REDIS_HOST}:6379", decode_responses=True, socket_timeout=5.0)
     
     pool = await asyncpg.create_pool(DB_DSN, command_timeout=10.0)
     

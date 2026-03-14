@@ -5,15 +5,18 @@ import logging
 import os
 import uuid
 import contextvars
+from datetime import datetime
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
 
 correlation_id_ctx = contextvars.ContextVar("correlation_id", default=None)
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
-        # Using strings for type names to avoid direct numpy dependency in core if possible,
-        # but since we already use numpy in most daemons, a soft check is safer.
-        try:
-            import numpy as np
+        if np:
             if isinstance(obj, np.integer):
                 return int(obj)
             if isinstance(obj, np.floating):
@@ -22,8 +25,6 @@ class NumpyEncoder(json.JSONEncoder):
                 return bool(obj)
             if isinstance(obj, np.ndarray):
                 return obj.tolist()
-        except ImportError:
-            pass
         return super().default(obj)
 
 
@@ -75,11 +76,13 @@ class MQManager:
         else:
             socket.connect(addr)
             self.logger.info(f"Publisher connected to {addr}")
-        socket.setsockopt(zmq.RCVTIMEO, 5000)
+        # Audit 2.4: PUB sockets do not receive, no RCVTIMEO needed.
         return socket
 
-    def create_subscriber(self, port: int, topics: list = [""], bind: bool = False):
+    def create_subscriber(self, port: int, topics: list | None = None, bind: bool = False):
         """Creates an async Subscriber socket."""
+        if topics is None:
+            topics = [""]
         socket = self.context.socket(zmq.SUB)
         host = self._get_host(port, bind)
         addr = f"tcp://{host}:{port}"
@@ -193,7 +196,7 @@ class MQManager:
         """Receives data and extracts correlation ID."""
         multipart = await socket.recv_multipart()
         if len(multipart) < 3:
-            return None, None
+            raise ValueError(f"Malformed message: expected 3 parts, got {len(multipart)}")
             
         topic = multipart[0].decode('utf-8')
         header = json.loads(multipart[1].decode('utf-8'))

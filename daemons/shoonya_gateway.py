@@ -45,6 +45,16 @@ class ShoonyaDataStreamer:
         self.active_tokens = {
             "26000": "NIFTY50",   # Hardcode NSE indices as fallbacks
             "26001": "BANKNIFTY", 
+            "1": "SENSEX",        # BSE Index
+            "1333": "HDFCBANK",   # Power 10 Heavyweights
+            "4963": "ICICIBANK",
+            "1594": "INFY",
+            "11536": "TCS",
+            "1660": "ITC",
+            "3045": "SBIN",
+            "5900": "AXISBANK",
+            "1922": "KOTAKBANK",
+            "11483": "LT",
             "2885": "RELIANCE"
         }
         
@@ -128,10 +138,15 @@ class ShoonyaDataStreamer:
         """Callback fired when WebSocket opens."""
         logger.info("Shoonya WebSocket Opened.")
         
-        # 1. Subscribe to base indices (NSE)
-        for token in ["26000", "26001", "2885"]:
-            self.api.subscribe(f"NSE|{token}")
-            logger.info(f"Subscribed to Base NSE|{token}")
+        # 1. Subscribe to base indices and Power 10 (NSE & BSE)
+        base_tokens = [
+            "NSE|26000", "NSE|26001", "BSE|1",
+            "NSE|1333", "NSE|4963", "NSE|1594", "NSE|11536", "NSE|1660",
+            "NSE|3045", "NSE|5900", "NSE|1922", "NSE|11483", "NSE|2885"
+        ]
+        for exch_token in base_tokens:
+            self.api.subscribe(exch_token)
+            logger.info(f"Subscribed to Base {exch_token}")
             
         # 2. Dynamically fetch deployed symbols from Redis, resolve NFO tokens, and subscribe
         try:

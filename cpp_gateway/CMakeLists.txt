@@ -11,14 +11,6 @@ find_package(Protobuf REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZMQ REQUIRED libzmq)
 
-# Include directories
-target_include_directories(cpp_gateway PRIVATE include)
-target_include_directories(cpp_gateway PRIVATE proto)
-target_include_directories(cpp_gateway PRIVATE ${PROTOBUF_INCLUDE_DIRS})
-target_include_directories(cpp_gateway PRIVATE /usr/local/include/uWebSockets)
-target_include_directories(cpp_gateway PRIVATE /usr/local/include/uSockets)
-target_include_directories(cpp_gateway PRIVATE /usr/local/include)
-
 # Source files (Protobuf generated manually in Docker)
 set(SOURCES
     src/main.cpp
@@ -30,6 +22,14 @@ set(SOURCES
 )
 
 add_executable(cpp_gateway ${SOURCES})
+
+# Include directories
+target_include_directories(cpp_gateway PRIVATE include)
+target_include_directories(cpp_gateway PRIVATE proto)
+target_include_directories(cpp_gateway PRIVATE ${PROTOBUF_INCLUDE_DIRS})
+target_include_directories(cpp_gateway PRIVATE /usr/local/include/uWebSockets)
+target_include_directories(cpp_gateway PRIVATE /usr/local/include/uSockets)
+target_include_directories(cpp_gateway PRIVATE /usr/local/include)
 
 target_link_libraries(cpp_gateway
     PRIVATE

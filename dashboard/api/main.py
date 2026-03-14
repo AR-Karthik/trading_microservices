@@ -188,8 +188,7 @@ def get_metrics():
         st = json.loads(st_raw) if st_raw else {}
         
         # HMM Regime
-        asset_short = "NIFTY" if asset == "NIFTY50" else asset
-        reg_raw = r.hget("hmm_regime_state", asset_short)
+        reg_raw = r.hget("hmm_regime_state", asset)
         reg_data = json.loads(reg_raw or "{}")
         
         index_states[asset] = {
@@ -217,11 +216,11 @@ def get_metrics():
     # Extract Power Five Matrix from Z-Scores in Redis
     # These are populated by MarketSensor
     power_five = {}
-    for idx in ["NIFTY", "BANKNIFTY", "SENSEX"]:
+    for idx in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
         power_five[idx] = {}
         # Fetch the top 5 weighted components for each index
         components = {
-            "NIFTY": ["HDFCBANK", "RELIANCE", "ICICIBANK", "INFY", "ITC"],
+            "NIFTY50": ["HDFCBANK", "RELIANCE", "ICICIBANK", "INFY", "ITC"],
             "BANKNIFTY": ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"],
             "SENSEX": ["HDFCBANK", "RELIANCE", "ICICIBANK", "ITC", "LT"]
         }[idx]
@@ -297,8 +296,8 @@ async def update_regime_config(config: RegimeConfigRequest):
     r.set("CONFIG:VPIN_TOXICITY", config.vpin_toxicity)
     r.set("PAPER_CAPITAL_LIMIT", config.paper_capital)
     r.set("LIVE_CAPITAL_LIMIT", config.live_capital)
-    r.set("CONFIG:MAX_RISK_PER_TRADE_PAPER", config.paper_max_risk)  # v8.0 paper path
-    r.set("CONFIG:MAX_RISK_PER_TRADE_LIVE",  config.live_max_risk)   # v8.0 live path
+    r.set("CONFIG:MAX_RISK_PER_TRADE_PAPER", config.paper_max_risk)
+    r.set("CONFIG:MAX_RISK_PER_TRADE_LIVE",  config.live_max_risk)
     
     # Also update available margins if needed (simple sync)
     # Note: In a production system, we'd handle this more carefully with delta checks
@@ -320,7 +319,7 @@ def update_capital(req: CapitalRequest):
 def get_regime_simulation():
     r = get_redis()
     engines = ["HMM", "DETERMINISTIC", "HYBRID"]
-    assets = ["NIFTY", "BANKNIFTY", "SENSEX"]
+    assets = ["NIFTY50", "BANKNIFTY", "SENSEX"]
     
     ranking = []
     equity_growth = [] # Simplified history
@@ -507,14 +506,14 @@ async def panic(mode: str = "Paper"):
 
 @app.get("/signals/history")
 def get_signal_history(limit: int = 100):
-    """v5.5: Returns rolling signal history for UI charting."""
+    """Returns rolling signal history for UI charting."""
     r = get_redis()
     history_raw = r.lrange("signal_history", 0, limit - 1)
     return [json.loads(h) for h in history_raw]
 
 @app.get("/greeks/sensitivity")
 def get_greek_sensitivity():
-    """v5.5: Returns Greek sensitivity matrix and alpha components."""
+    """Returns Greek sensitivity matrix and alpha components."""
     r = get_redis()
     state_raw = r.get("latest_market_state")
     if not state_raw:
@@ -534,7 +533,7 @@ def get_greek_sensitivity():
 @app.get("/barriers/attribution")
 def get_barrier_attribution():
     """
-    v8.0 Signal Attribution: reads `barrier_exits` from Redis.
+    Signal Attribution: reads `barrier_exits` from Redis.
     Returns a grouped summary (donut chart data) + recent exit feed (table data).
     """
     r = get_redis()
@@ -569,7 +568,7 @@ def get_barrier_attribution():
 @app.get("/sizing/inspector")
 def get_sizing_inspector():
     """
-    v8.0 Sizing Inspector: returns current ATR, unit_size, half_kelly, and final_lots
+    Sizing Inspector: returns current ATR, unit_size, half_kelly, and final_lots
     for each Tri-Brain asset so the dashboard can show the live hybrid sizing calculation.
     """
     r = get_redis()
@@ -603,7 +602,7 @@ def get_sizing_inspector():
             pass
 
     if not assets_data:
-        for a in ["NIFTY", "BANKNIFTY", "SENSEX"]:
+        for a in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
             assets_data.append({
                 "asset": a, "lots": round(unit_size * 0.01, 4),
                 "weight": 0.01, "unit_size": round(unit_size, 4),

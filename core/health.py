@@ -12,6 +12,24 @@ from typing import Dict, Optional
 
 logger = logging.getLogger("Health")
 
+class Daemons:
+    """Standardized daemon names for health tracking [Audit 11.2]."""
+    DATA_GATEWAY = "DataGateway"
+    MARKET_SENSOR = "MarketSensor"
+    HMM_NIFTY = "HMMEngine_NIFTY50"
+    HMM_BANKNIFTY = "HMMEngine_BANKNIFTY"
+    HMM_SENSEX = "HMMEngine_SENSEX"
+    META_ROUTER = "MetaRouter"
+    STRATEGY_ENGINE = "StrategyEngine"
+    PAPER_BRIDGE = "PaperBridge"
+    LIVE_BRIDGE = "LiveBridge"
+    LIQUIDATION_DAEMON = "LiquidationDaemon"
+    ORDER_RECONCILER = "OrderReconciler"
+    SYSTEM_CONTROLLER = "SystemController"
+    DATA_LOGGER = "DataLogger"
+    CLOUD_PUBLISHER = "CloudPublisher"
+    TELEGRAM_ALERTER = "TelegramAlerter"
+
 class HeartbeatProvider:
     """Mixin or helper to provide heartbeats to Redis."""
     def __init__(self, name: str, redis_client):
@@ -41,21 +59,40 @@ class HealthAggregator:
     def __init__(self, redis_client):
         self.redis = redis_client
         self.required_daemons = [
-            "DataGateway", "MarketSensor", "MetaRouter", 
-            "StrategyEngine", "PaperBridge", "LiveBridge",
-            "LiquidationDaemon", "OrderReconciler"
+            Daemons.DATA_GATEWAY, 
+            Daemons.MARKET_SENSOR, 
+            Daemons.HMM_NIFTY,
+            Daemons.HMM_BANKNIFTY,
+            Daemons.HMM_SENSEX,
+            Daemons.META_ROUTER, 
+            Daemons.STRATEGY_ENGINE, 
+            Daemons.PAPER_BRIDGE, 
+            Daemons.LIVE_BRIDGE,
+            Daemons.LIQUIDATION_DAEMON, 
+            Daemons.ORDER_RECONCILER,
+            Daemons.SYSTEM_CONTROLLER,
+            Daemons.DATA_LOGGER,
+            Daemons.CLOUD_PUBLISHER,
+            Daemons.TELEGRAM_ALERTER
         ]
 
     async def get_system_health(self) -> Dict:
         """Computes a health score (0.0 to 1.0) based on daemon heartbeats."""
         now = time.time()
-        heartbeats = await self.redis.hgetall("daemon_heartbeats")
+        # Ensure we decode responses if the client doesn't
+        heartbeats_raw = await self.redis.hgetall("daemon_heartbeats")
+        heartbeats = {}
+        for k, v in heartbeats_raw.items():
+            key = k if isinstance(k, str) else k.decode()
+            val = v if isinstance(v, str) else v.decode()
+            heartbeats[key] = val
         
         status = {}
         alive_count = 0
         
         for daemon in self.required_daemons:
-            hb = float(heartbeats.get(daemon, 0))
+            hb_val = heartbeats.get(daemon, 0)
+            hb = float(hb_val)
             is_alive = (now - hb) < 15 # 15s timeout
             status[daemon] = "ALIVE" if is_alive else "DEAD"
             if is_alive:

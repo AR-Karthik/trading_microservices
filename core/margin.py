@@ -41,59 +41,7 @@ return tostring(new_available)
 """
 
 class MarginManager:
-    """Manages the atomic Redis locks for capital allocation."""
-    
-    def __init__(self, redis_client: Redis):
-        self.r = redis_client
-        self._reserve_script = self.r.register_script(LUA_RESERVE)
-        self._release_script = self.r.register_script(LUA_RELEASE)
-
-    def _get_keys(self, execution_type: str) -> list[str]:
-        suffix = "LIVE" if execution_type.upper() == "ACTUAL" else "PAPER"
-        return [f"AVAILABLE_MARGIN_{suffix}", f"GLOBAL_CAPITAL_LIMIT_{suffix}"]
-
-    def reserve(self, required_margin: float, execution_type: str = "Paper") -> bool:
-        """
-        Atomically attempts to reserve margin for the specific execution type. 
-        Returns True if successful, False if breached.
-        """
-        try:
-            keys = self._get_keys(execution_type)
-            result = self._reserve_script(
-                keys=[keys[0]],
-                args=[required_margin]
-            )
-            return bool(result)
-        except Exception as e:
-            logger.error(f"Error executing LUA_RESERVE script: {e}")
-            return False
-
-    def release(self, amount: float, execution_type: str = "Paper") -> float:
-        """
-        Atomically releases margin back into the pool for the specific execution type.
-        """
-        try:
-            keys = self._get_keys(execution_type)
-            new_available = self._release_script(
-                keys=keys,
-                args=[amount]
-            )
-            return float(new_available)
-        except Exception as e:
-            logger.error(f"Error executing LUA_RELEASE script: {e}")
-            return 0.0
-
-    def get_available(self, execution_type: str = "Paper") -> float:
-        """Fetches the current available margin in real-time."""
-        try:
-            keys = self._get_keys(execution_type)
-            return float(self.r.get(keys[0]) or 0.0)
-        except Exception:
-            return 0.0
-
-
-class AsyncMarginManager:
-    """Async counterpart for daemons using redis.asyncio (like order_reconciler)."""
+    """Async manager for the atomic Redis locks for capital allocation [Audit 14.4]."""
     
     def __init__(self, async_redis_client):
         self.r = async_redis_client
@@ -135,3 +83,6 @@ class AsyncMarginManager:
             return float(val or 0.0)
         except Exception:
             return 0.0
+
+# Legacy compatibility alias [Audit 14.4]
+AsyncMarginManager = MarginManager

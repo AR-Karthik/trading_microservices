@@ -86,7 +86,7 @@ HEDGE_RESERVE_PCT = 0.15
 # T-1 Calendar Guard
 EXPIRY_MATRIX = {
     "BANKNIFTY": {"expiry_day": 2, "sweep_time": (15, 15)},  # Wednesday -> Tuesday 15:15
-    "NIFTY":   {"expiry_day": 3, "sweep_time": (15, 15)},  # Thursday -> Wednesday 15:15
+    "NIFTY50":   {"expiry_day": 3, "sweep_time": (15, 15)},  # Thursday -> Wednesday 15:15
     "SENSEX":    {"expiry_day": 4, "sweep_time": (15, 15)},  # Friday -> Thursday 15:15
 }
 
@@ -569,7 +569,7 @@ class SystemController:
             totp = pyotp.TOTP(factor2).now()
             self.api.login(userid=user, password=pwd, twoFA=totp, vendor_code=vc, api_secret=app_key, imei=imei)
             
-            for symbol in ["NSE|26000", "NSE|26009", "BSE|1"]: # Nifty, BankNifty, Sensex
+            for symbol in ["NSE|26000", "NSE|26001", "BSE|1"]: # Nifty, BankNifty, Sensex
                 # Fetch daily candles for the last 14 sessions
                 end_time = datetime.now().timestamp()
                 start_time = end_time - (20 * 86400) # 20 days to ensure 14 trading sessions
@@ -586,7 +586,7 @@ class SystemController:
                     ret.sort(key=lambda x: x['time'])
                     closes = [float(c['ssoc']) for c in ret[-LOOKBACK_DAYS:]]
                     
-                    asset_map = {"26000": "NIFTY", "26009": "BANKNIFTY", "1": "SENSEX"}
+                    asset_map = {"26000": "NIFTY50", "26001": "BANKNIFTY", "1": "SENSEX"}
                     asset_name = asset_map.get(symbol.split('|')[1], "UNKNOWN")
                     await self.redis.set(f"history_14d:{asset_name}", json.dumps(closes))
                     logger.info(f"✅ Stored 14D history for {asset_name}: {len(closes)} bars.")

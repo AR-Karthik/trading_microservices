@@ -24,30 +24,38 @@ class SignalVector:
     pcr: float = 0.0
     net_delta_nifty: float = 0.0
     net_delta_banknifty: float = 0.0
+    net_delta_sensex: float = 0.0
     veto: bool = False
 
 class ShmManager:
     """
-    Zero-latency Shared Memory IPC for Alpha Scores & Quantitative Signals (v6.0).
+    Zero-latency Shared Memory IPC for Alpha Scores & Quantitative Signals.
     Layout: [Timestamp] [Alpha] [VPIN] [OFI] [Vanna] [Charm] [ENV] [STR] [DIV] [RV] [ADX] [PCR] [ND_N] [ND_B] [Veto] [CRC]
     """
-    SHM_NAME = "/dev/shm/trading_alpha" if os.name != 'nt' else "trading_alpha"
-    SIZE = 256  # Increased for v6.0 resilience
+    SIZE = 256
     # Format: ts(d), s_total(d), vpin(d), ofi(d), vanna(d), charm(d), s_env(d), s_str(d), s_div(d), 
-    #         rv(d), adx(d), pcr(d), nd_nifty(d), nd_bnifty(d), veto(?), crc(d)
-    STRUCT_FORMAT = "ddddddddddddddd?d" 
+    #         rv(d), adx(d), pcr(d), nd_nifty(d), nd_bnifty(d), nd_sensex(d), veto(?), crc(d)
+    STRUCT_FORMAT = "dddddddddddddddd?d" 
 
-    def __init__(self, mode='r'):
+    def __init__(self, asset_id: str = "GLOBAL", mode='r'):
         self.mode = mode
+        self.asset_id = asset_id
+        
+        base_name = f"trading_alpha_{asset_id}"
+        if os.name != 'nt':
+            self.shm_path = f"/dev/shm/{base_name}"
+        else:
+            self.shm_path = base_name
+
         try:
             if os.name == 'nt':
-                self.shm = mmap.mmap(-1, self.SIZE, tagname=self.SHM_NAME)
+                self.shm = mmap.mmap(-1, self.SIZE, tagname=self.shm_path)
             else:
-                fd = os.open(self.SHM_NAME, os.O_RDWR | os.O_CREAT, 0o666)
+                fd = os.open(self.shm_path, os.O_RDWR | os.O_CREAT, 0o666)
                 os.ftruncate(fd, self.SIZE)
                 self.shm = mmap.mmap(fd, self.SIZE)
         except Exception as e:
-            logger.warning(f"Shared Memory initialization failed: {e}. Falling back to Redis.")
+            logger.warning(f"Shared Memory [{asset_id}] initialization failed: {e}. Falling back to Redis.")
             self.shm = None
 
     def write(self, signals: SignalVector):
@@ -59,7 +67,7 @@ class ShmManager:
             crc = (signals.s_total + signals.vpin + signals.ofi_z + signals.vanna + 
                    signals.charm + signals.s_env + signals.s_str + signals.s_div + 
                    signals.rv + signals.adx + signals.pcr + 
-                   signals.net_delta_nifty + signals.net_delta_banknifty +
+                   signals.net_delta_nifty + signals.net_delta_banknifty + signals.net_delta_sensex +
                    (100.0 if signals.veto else 0.0))
             
             data = struct.pack(
@@ -67,7 +75,7 @@ class ShmManager:
                 ts, signals.s_total, signals.vpin, signals.ofi_z, 
                 signals.vanna, signals.charm, signals.s_env, signals.s_str, 
                 signals.s_div, signals.rv, signals.adx, signals.pcr,
-                signals.net_delta_nifty, signals.net_delta_banknifty,
+                signals.net_delta_nifty, signals.net_delta_banknifty, signals.net_delta_sensex,
                 signals.veto, crc
             )
             self.shm.seek(0)
@@ -82,7 +90,7 @@ class ShmManager:
             fmt_size = struct.calcsize(self.STRUCT_FORMAT)
             data = self.shm.read(fmt_size)
             (ts, s_total, vpin, ofi_z, vanna, charm, s_env, s_str, s_div, 
-             rv, adx, pcr, nd_nifty, nd_bnifty, veto, crc) = struct.unpack(self.STRUCT_FORMAT, data)
+             rv, adx, pcr, nd_nifty, nd_bnifty, nd_sensex, veto, crc) = struct.unpack(self.STRUCT_FORMAT, data)
             
             # Check staleness (if > 1s, data is stale)
             if time.time() - ts > 1.0:
@@ -90,7 +98,7 @@ class ShmManager:
             
             # Integrity check
             check_val = (s_total + vpin + ofi_z + vanna + charm + s_env + s_str + s_div + 
-                         rv + adx + pcr + nd_nifty + nd_bnifty + (100.0 if veto else 0.0))
+                         rv + adx + pcr + nd_nifty + nd_bnifty + nd_sensex + (100.0 if veto else 0.0))
             if abs(crc - check_val) > 1e-4:
                 return None
                 
@@ -108,6 +116,7 @@ class ShmManager:
                 "pcr": pcr,
                 "net_delta_nifty": nd_nifty,
                 "net_delta_banknifty": nd_bnifty,
+                "net_delta_sensex": nd_sensex,
                 "toxic_veto": veto,
                 "timestamp": ts,
                 "source": "SHM"

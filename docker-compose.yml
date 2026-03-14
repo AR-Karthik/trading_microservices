@@ -19,14 +19,11 @@ services:
   timescaledb:
     image: timescale/timescaledb:latest-pg14
     container_name: trading_timescaledb
-    environment:
-      - POSTGRES_USER=trading_user
-      - POSTGRES_PASSWORD=trading_pass
-      - POSTGRES_DB=trading_db
+    env_file: .env # [Audit 8.3] Load secrets from env file, expecting POSTGRES_USER/PASSWORD/DB
     ports:
       - "5432:5432"
     volumes:
-      - ./data/db:/var/lib/postgresql/data
+      - timescaledb_data:/var/lib/postgresql/data # [Audit 7.4] Use proper named volume
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U trading_user -d trading_db"]
@@ -37,7 +34,7 @@ services:
 
   # 2. Data Ingestion (writes to Redis/SHM)
   data_gateway:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     build:
       context: .
       dockerfile: Dockerfile.local
@@ -54,7 +51,7 @@ services:
 
   # 3. Market State (Depends on data_gateway ticks)
   market_sensor:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     container_name: market_sensor
     command: python -m daemons.market_sensor
     depends_on:
@@ -68,7 +65,7 @@ services:
 
   # 4. HMM Engines (Depends on market_sensor state)
   hmm_engine_nifty:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     container_name: hmm_engine_nifty
     command: python -m daemons.hmm_engine --asset NIFTY --core 1
     depends_on:
@@ -81,7 +78,7 @@ services:
       - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
 
   hmm_engine_banknifty:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     container_name: hmm_engine_banknifty
     command: python -m daemons.hmm_engine --asset BANKNIFTY --core 1
     depends_on:
@@ -94,7 +91,7 @@ services:
       - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
 
   hmm_engine_sensex:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     container_name: hmm_engine_sensex
     command: python -m daemons.hmm_engine --asset SENSEX --core 1
     depends_on:
@@ -108,7 +105,7 @@ services:
 
   # 5. Meta Router (Depends on HMM regime)
   meta_router:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     container_name: meta_router
     command: python -m daemons.meta_router
     depends_on:
@@ -126,7 +123,7 @@ services:
 
   # 6. Trading Bridges: Paper (Schema Creation First)
   paper_bridge:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     container_name: paper_bridge
     command: python -m daemons.paper_bridge
     depends_on:
@@ -139,7 +136,7 @@ services:
 
   # 7. Trading Bridges: Live (Depends on paper_bridge for schema)
   live_bridge:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     container_name: live_bridge
     command: python -m daemons.live_bridge
     depends_on:
@@ -155,7 +152,7 @@ services:
 
   # 8. Strategy Engine (Depends on all above)
   strategy_engine:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     container_name: strategy_engine
     command: python -m daemons.strategy_engine
     depends_on:
@@ -173,7 +170,7 @@ services:
 
   # 9. Liquidation Daemon (Depends on position data)
   liquidation_daemon:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     container_name: liquidation_daemon
     command: python -m daemons.liquidation_daemon
     depends_on:
@@ -187,7 +184,7 @@ services:
 
   # 10. Order Reconciler (Depends on order data)
   order_reconciler:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     container_name: order_reconciler
     command: python -m daemons.order_reconciler
     depends_on:
@@ -200,7 +197,7 @@ services:
 
   # 11. System Controller (Lifecycle management)
   system_controller:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     container_name: system_controller
     command: python -m daemons.system_controller
     depends_on:
@@ -216,7 +213,7 @@ services:
 
   # 12. Telegram Alerter (Monitoring)
   telegram_alerter:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     container_name: telegram_alerter
     command: python -m utils.telegram_bot
     depends_on:
@@ -228,7 +225,7 @@ services:
 
   # 13. Cloud Publisher (Sync to cloud)
   cloud_publisher:
-    image: trading-app:v1.0.0
+    image: trading-app:latest
     container_name: cloud_publisher
     command: python -m daemons.cloud_publisher
     depends_on:

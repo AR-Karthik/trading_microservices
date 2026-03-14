@@ -121,7 +121,7 @@
         // --- SUB-COMPONENTS (Lifted Outside) ---
 
         const WarRoom = memo(({ state, positions, mode, handlePanic }) => {
-            const [selectedIdx, setSelectedIdx] = useState('NIFTY');
+            const [selectedIdx, setSelectedIdx] = useState('NIFTY50');
             const powerData = state.power_five?.[selectedIdx] || {};
 
             return (
@@ -131,7 +131,7 @@
                             <div className="flex justify-between items-center mb-2">
                                 <h3 className="text-[10px] font-black uppercase text-gray-500">Power Five Matrix (Z)</h3>
                                 <div className="flex gap-2">
-                                    {['NIFTY', 'BANKNIFTY', 'SENSEX'].map(idx => (
+                                    {['NIFTY50', 'BANKNIFTY', 'SENSEX'].map(idx => (
                                         <button key={idx} onClick={() => setSelectedIdx(idx)} className={`text-[8px] font-black px-1.5 py-0.5 rounded ${selectedIdx === idx ? 'bg-accent text-dark' : 'text-gray-600 hover:text-gray-400'}`}>
                                             {idx === 'BANKNIFTY' ? 'BN' : idx[0]}
                                         </button>
