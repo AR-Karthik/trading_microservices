@@ -37,6 +37,26 @@ void Shard::flush_to_regional_ssd() {
     }
 }
 
+void Shard::load_state() {
+    std::string filename = "recovery_" + shard_id + ".bin";
+    std::ifstream in(filename, std::ios::binary);
+    if (in.is_open()) {
+        std::cout << "[RECOVERY] " << shard_id << " loading state from " << filename << "...\n";
+        std::string serialized;
+        // Simple read for simulation: read all remaining content
+        serialized.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (!serialized.empty()) {
+             ram_tick_buffer.push_back(serialized);
+             std::cout << "[RECOVERY] Loaded " << serialized.size() << " bytes of tick data.\n";
+        }
+        in.close();
+        // Delete recovery file after load to prevent double-recovery
+        std::remove(filename.c_str());
+    } else {
+        std::cout << "[RECOVERY] No recovery file found for " << shard_id << ". Starting fresh.\n";
+    }
+}
+
 Shard::Shard(std::string id, std::string symbols, int target_core, int exchange) 
     : shard_id(id), symbols_list(symbols), core_pin_id(target_core), exchange_id(exchange) {}
 
@@ -57,6 +77,9 @@ void Shard::run(std::atomic<bool>& global_running) {
 #endif
 
     std::cout << "[INFO] " << shard_id << " active. Exchange ID: " << exchange_id << ". Monitoring: " << symbols_list << "\n";
+
+    // 1.5 Load existing state if available
+    load_state();
 
     // 2. Initialize Telemetry Publishers (Core 0 handles this downstream)
     ZmqPublisher zmq_pub("tcp://*:555" + std::to_string(core_pin_id)); 

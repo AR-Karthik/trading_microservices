@@ -13,8 +13,27 @@ def start_services():
         print("Continuing with local microservices (they may fail to connect to DB).")
         print("Please ensure Docker is installed and running if you need persistence.")
         
-    print("Waiting for databases to initialize...")
-    time.sleep(5)
+    print("Waiting for databases to initialize (Health Check)...")
+    import socket
+    
+    def wait_for_port(port, name, timeout=30):
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                with socket.create_connection(("localhost", port), timeout=1):
+                    print(f"  ✅ {name} (Port {port}) is ready.")
+                    return True
+            except (ConnectionRefusedError, socket.timeout):
+                time.sleep(1)
+        print(f"  ❌ Timeout waiting for {name} on port {port}.")
+        return False
+
+    redis_ready = wait_for_port(6379, "Redis")
+    db_ready = wait_for_port(5432, "TimescaleDB")
+    
+    if not (redis_ready and db_ready):
+        print("Warning: One or more databases are not responding. Microservices may crash.")
+        time.sleep(2)
 
     print("Starting Resilient Python Microservices...")
     

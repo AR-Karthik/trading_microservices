@@ -1,15 +1,11 @@
 """
 daemons/meta_router.py
 ======================
-Tri-Brain HMM Dispatcher & Portfolio Allocation (V8.0)
+Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)
 
 Architecture:
-  Main asyncio loop   → Reads Market State and Firestore settings;
-                        Delegates to RegimeOrchestrator;
-                        Dispatches commands via ZMQ.
-  RegimeOrchestrator  → Wrapper managing Providers (HMM, Deterministic, Hybrid).
-  Providers           → Logic for regime classification and signal weighting.
-
+  Main asyncio loop   → Orchestrates NIFTY, BANKNIFTY, SENSEX parallel flows.
+  RegimeOrchestrator  → Dispatches commands via ZMQ.
 """
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -25,15 +21,21 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
+import uuid
+import time
+from datetime import datetime, timezone
 
 import redis.asyncio as redis
+from core.logger import setup_logger
 from core.mq import MQManager, Ports, Topics
-from core.shm import ShmManager
+from core.shm import ShmManager, SignalVector
 from core.alerts import send_cloud_alert
+from core.greeks import BlackScholes
+import asyncpg
+from dotenv import load_dotenv
+load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("MetaRouter")
+logger = setup_logger("MetaRouter", log_file="logs/meta_router.log")
 
 class BaseStrategyLogic:
     def __init__(self, asset_id: str, redis_client):
@@ -69,7 +71,7 @@ class BaseStrategyLogic:
 
             # ── Step A: ATR Unit ──────────────────────────────────────────────
             try:
-                atr = float(await self.r.get("atr") or 20.0) if self.r else 20.0
+                atr = float(await self.r.get(f"atr:{self.asset_id}") or await self.r.get("atr") or 20.0) if self.r else 20.0
             except Exception:
                 atr = 20.0
             atr = max(atr, 1.0)  # Guard against zero ATR
@@ -94,17 +96,17 @@ class BaseStrategyLogic:
             kelly_f = p - ((1.0 - p) / b)
             half_kelly = max(0.01, 0.5 * kelly_f)
 
-            final_lots = round(unit_size * half_kelly, 4)
+            final_lots: float = round(float(unit_size * half_kelly), 4)
 
             return {
                 "asset": self.asset_id,
                 "regime": r_type,
                 "lots": final_lots,         # ATR-normalized lot count
-                "weight": half_kelly,        # Raw Half-Kelly fraction (used by heat constraint)
-                "unit_size": round(unit_size, 4),
-                "atr_used": round(atr, 4),
+                "weight": float(half_kelly), # Raw Half-Kelly fraction (used by heat constraint)
+                "unit_size": float(unit_size),
+                "atr_used": float(atr),
                 "provider": provider,
-                "score": p
+                "score": float(p)
             }
         except Exception as e:
             logger.error(f"Logic failure on {self.asset_id}: {e}")
@@ -112,79 +114,37 @@ class BaseStrategyLogic:
 
 # ── Providers: The Decision Engines ───────────────────────────────────────────
 
-class HMMProvider:
+# ── Phase 1.2: Lifecycle Mapping ─────────────────────────────────────────────
+LIFECYCLE_MAP = {
+    "GammaScalping": "KINETIC",
+    "OIPulse": "KINETIC",
+    "AnchoredVWAP": "KINETIC",
+    "IronCondor": "POSITIONAL",
+    "CreditSpread": "POSITIONAL",
+}
+
+class HeuristicRegimeReader:
+    """Reads the deterministic regime + heuristics from Redis (written by HeuristicEngine)."""
     async def get_context(self, asset: str, state: dict, redis_client) -> dict:
-        """Provider A: HMM (Probabilistic)"""
         raw = await redis_client.hget("hmm_regime_state", asset)
-        regime = json.loads(raw) if raw else {"regime": "RANGING", "prob": 0.5}
-        regime["provider"] = "HMM"
-        return regime
-
-class DeterministicProvider:
-    async def get_context(self, asset: str, state: dict, redis_client) -> dict:
-        """Provider B: Deterministic (Mathematical)"""
-        hurst = state.get("hurst", 0.5)
-        er = state.get("kaufman_er", 0.5)
-        adx = state.get("adx", 20.0)
-        
-        regime = "RANGING"
-        prob = 0.5
-        
-        if hurst > state.get("hurst_threshold", 0.55) and adx > 25 and er > 0.6:
-            regime = "TRENDING"
-            prob = min(0.9, 0.5 + (hurst - 0.5) + (adx - 20)/100)
-        elif hurst < (state.get("hurst_threshold", 0.55) - 0.1):
-            regime = "RANGING"
-            prob = 0.7
-            
-        return {"regime": regime, "prob": prob, "provider": "DETERMINISTIC"}
-
-class HybridProvider:
-    def __init__(self, hmm, det):
-        self.hmm = hmm
-        self.det = det
-
-    async def get_context(self, asset: str, state: dict, redis_client) -> dict:
-        """Provider C: Hybrid (Weighted Consensus)"""
-        h_ctx = await self.hmm.get_context(asset, state, redis_client)
-        d_ctx = await self.det.get_context(asset, state, redis_client)
-        
-        # Weighted Score: 40% HMM, 60% Math (Hurst/ER/ADX)
-        score = (0.4 * h_ctx["prob"]) + (0.6 * d_ctx["prob"])
-        
-        regime = "WAITING"
-        threshold = state.get("hybrid_confidence", 0.70)
-        if score > threshold:
-            # Dual-key agreement required for Trending
-            if h_ctx["regime"] == "TRENDING" and d_ctx["regime"] == "TRENDING":
-                regime = "TRENDING"
-            else:
-                regime = "RANGING" # Consensus says trend isn't confirmed
-                
-        return {"regime": regime, "prob": score, "provider": "HYBRID"}
+        if not raw:
+            return {"regime": "WAITING", "prob": 0.5, "heuristics": {"verdict": "YELLOW"}}
+        try:
+            return json.loads(raw)
+        except:
+            return {"regime": "WAITING", "prob": 0.5, "heuristics": {"verdict": "YELLOW"}}
 
 # ── The Regime Orchestrator ───────────────────────────────────────────────────
 
 class RegimeOrchestrator:
-    def __init__(self, hmm, det, hybrid):
-        self.providers = {
-            "HMM": hmm,
-            "DETERMINISTIC": det,
-            "HYBRID": hybrid
-        }
-        self.active_engine = "HYBRID" # Default conservative
+    def __init__(self, reader):
+        self.reader = reader
 
     async def get_decisions(self, asset: str, state: dict, redis_client, logic_class):
-        """Returns active decision + shadow signals for attribution."""
-        results = {}
-        for name, provider in self.providers.items():
-            ctx = await provider.get_context(asset, state, redis_client)
-            decision = await logic_class.calculate_weights(state, ctx)
-            results[name] = decision
-        
-        # Return the active one specifically marked
-        active_dec = results.get(self.active_engine, results["HYBRID"])
-        return active_dec, results
+        """Returns active decision + metadata for attribution."""
+        ctx = await self.reader.get_context(asset, state, redis_client)
+        decision = await logic_class.calculate_weights(state, ctx)
+        return decision, ctx
 
 class MetaRouter:
     def __init__(self, test_mode: bool = False):
@@ -199,10 +159,8 @@ class MetaRouter:
         else:
             self.shm = None
 
-        # Setup Orchestrator
-        hmm = HMMProvider()
-        det = DeterministicProvider()
-        self.orchestrator = RegimeOrchestrator(hmm, det, HybridProvider(hmm, det))
+        # Setup Orchestrator (Phase 1.2 Simplified)
+        self.orchestrator = RegimeOrchestrator(HeuristicRegimeReader())
         
         # Asset Logic
         self.brains = {
@@ -210,21 +168,22 @@ class MetaRouter:
             "BANKNIFTY": BaseStrategyLogic("BANKNIFTY", self._redis if not test_mode else None),
             "SENSEX": BaseStrategyLogic("SENSEX", self._redis if not test_mode else None),
         }
+
+        # Initialize attributes to defaults
+        self.heat_limit = DEFAULT_MAX_PORTFOLIO_HEAT
+        self.hurst_threshold = DEFAULT_HURST_THRESHOLD
+        self.hybrid_confidence = DEFAULT_HYBRID_CONFIDENCE
+        self.vpin_toxicity = DEFAULT_VPIN_TOXICITY
+        self.net_delta_nifty: float = 0.0
+        self.net_delta_banknifty: float = 0.0
+        self.last_greek_ts: float = 0.0
     
     async def _sync_settings(self):
         """Syncs engine mode and parameters from Redis (upstream Firestore)."""
         try:
-            # 1. Engine Mode
-            mode = await self._redis.get("CONFIG:REGIME_ENGINE")
-            if mode in self.orchestrator.providers:
-                if self.orchestrator.active_engine != mode:
-                    old_mode = self.orchestrator.active_engine
-                    logger.info(f"🔄 Switching Regime Engine: {old_mode} -> {mode}")
-                    self.orchestrator.active_engine = mode
-                    asyncio.create_task(send_cloud_alert(
-                        f"🔄 HOT-SWAP APPLIED: Regime engine switched from {old_mode} to {mode}.",
-                        alert_type="CONFIG"
-                    ))
+            # 1. Engine Mode (Simplified Phase 1.2)
+            # Legacy hot-swap removed to rely on deterministic HeuristicEngine
+            pass
             
             # 2. Sizing Constraints
             try:
@@ -265,6 +224,49 @@ class MetaRouter:
             return True
         return False
 
+    async def _calculate_portfolio_greeks(self):
+        """Phase 5: Calculates net delta across all live positions."""
+        try:
+            dsn = os.getenv("DB_DSN")
+            if not dsn: return
+            
+            conn = await asyncpg.connect(dsn)
+            rows = await conn.fetch("SELECT * FROM portfolio WHERE quantity != 0")
+            
+            n_delta: float = 0.0
+            b_delta: float = 0.0
+            
+            # Simplified Greek calculation logic
+            for row in rows:
+                qty = float(row['quantity'] or 0.0)
+                und = str(row['underlying'] or "UNKNOWN")
+                sym = str(row['symbol'] or "UNKNOWN")
+                
+                # Basic Delta assignments if not calculating Black-Scholes in-situ
+                # In production, we'd pull Spot/IV from Redis for each leg
+                if "CE" in sym:
+                    leg_delta = 0.5 # Placeholder
+                elif "PE" in sym:
+                    leg_delta = -0.5 # Placeholder
+                else:
+                    leg_delta = 1.0 if qty > 0 else -1.0 # Futures/Equity
+                
+                if und == "NIFTY":
+                    n_delta += float(leg_delta * qty)
+                elif und == "BANKNIFTY":
+                    b_delta += float(leg_delta * qty)
+            
+            self.net_delta_nifty = n_delta
+            self.net_delta_banknifty = b_delta
+            
+            await conn.close()
+            # Export to Redis for UI/Liquidation accessibility
+            await self._redis.set("NET_DELTA_NIFTY", f"{n_delta:.2f}")
+            await self._redis.set("NET_DELTA_BANKNIFTY", f"{b_delta:.2f}")
+            
+        except Exception as e:
+            logger.error(f"Greek calculation error: {e}")
+
     async def broadcast_decisions(self, market_state: dict, regimes: dict = None):
         """Formulate execution payloads and attribution logs."""
         if regimes is None: regimes = {}
@@ -274,6 +276,11 @@ class MetaRouter:
         await self._sync_settings()
 
         is_fractured = await self._check_cross_index_divergence(regimes)
+
+        # 4. Phase 5: Periodic Portfolio Greek Reconciliation
+        if time.time() - self.last_greek_ts > 10: # Every 10s
+            await self._calculate_portfolio_greeks()
+            self.last_greek_ts = time.time()
 
         for asset, logic in self.brains.items():
             state = market_state.get(asset, {})
@@ -286,27 +293,35 @@ class MetaRouter:
             state["hurst_threshold"] = self.hurst_threshold
             state["hybrid_confidence"] = self.hybrid_confidence
             
-            active_dec, all_decs = await self.orchestrator.get_decisions(
+            active_dec, ctx = await self.orchestrator.get_decisions(
                 asset, state, self._redis, logic
             )
             
+            # --- Phase 1.2: Payload Tagging ---
+            active_dec["parent_uuid"] = f"{asset}_{uuid.uuid4().hex[:8]}"
+            # Default to KINETIC if strategy_id not found or missing
+            strat_id = str(active_dec.get("strategy_id", "KINETIC"))
+            active_dec["lifecycle_class"] = str(LIFECYCLE_MAP.get(strat_id, "KINETIC"))
+            
+            # Use separate keys to avoid dict-indexing-on-str errors
+            audit = {
+                "regime": str(ctx.get("regime", "UNKNOWN")),
+                "vpin": float(state.get("vpin", 0.0)),
+                "heat_limit": float(self.heat_limit)
+            }
+            active_dec["audit_tags"] = audit
+            
             # ── A0: ATM Order Construction ───────────────────────────────────
-            # Construct real Shoonya scrip name if trading ATM options
             if active_dec.get("lots", 0) > 0:
                 await self._enrich_with_atm_symbol(asset, active_dec)
             
-            # Recalculate weights based on the regime
-            # (In v8.0, active_dec already contains the weights for the active engine)
             all_commands.append(active_dec)
             attribution_payloads.append({
                 "asset": asset,
-                "timestamp": datetime.now().isoformat(),
-                "decisions": all_decs,
-                "active_engine": self.orchestrator.active_engine
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "regime": ctx.get("regime"),
+                "active_engine": "HEURISTIC"
             })
-            
-            # ── Shadow P&L Tracking (What-If) ────────────────────────────────
-            await self._record_shadow_signals(asset, all_decs)
 
         if not self.test_mode:
             # ── A1: Global Portfolio Heat Constraint ───────────────────────────
@@ -342,13 +357,26 @@ class MetaRouter:
     async def _enrich_with_atm_symbol(self, asset: str, decision: dict):
         """Builds scrip name (e.g. NIFTY26MAR22350CE) for ATM options."""
         strikes = await self._redis.hgetall("optimal_strikes")
-        side = "CE" if decision.get("lots", 0) > 0 else "PE" # Simple directional bias
+        side = "CE" if decision.get("lots", 0) > 0 else "PE" 
         strike = strikes.get(f"{asset}_{side}")
-        expiry = await self._redis.get("CURRENT_EXPIRY_DATE") or "26MAR" # Expected from DataGateway
+        
+        # Use per-asset expiry key
+        expiry = await self._redis.get(f"EXPIRY:{asset}")
+        if not expiry:
+            # Fallback to legacy key for NIFTY or hardcoded default
+            expiry = await self._redis.get("CURRENT_EXPIRY_DATE") or "26MAR"
         
         if strike:
-            decision["tradingsymbol"] = f"{asset}{expiry}{int(float(strike))}{side}"
-            decision["exchange"] = "NFO"
+            tsym = f"{asset}{expiry}{int(float(strike))}{side}"
+            decision["tradingsymbol"] = tsym
+            decision["exchange"] = "BFO" if asset == "SENSEX" else "NFO"
+            
+            # Phase 6: Trigger JIT Subscription if not in simulation
+            if not self.test_mode:
+                # We need the token for JIT sub, but MetaRouter doesn't have it.
+                # DataGateway can resolve the tsym to token via search_scrip if we send the tsym.
+                # Let's send "NFO|TSYM" and let DataGateway handle it.
+                await self._redis.publish("dynamic_subscriptions", f"{decision['exchange']}|{tsym}")
         else:
             decision["tradingsymbol"] = asset # Fallback to index (sim only)
 
@@ -360,32 +388,40 @@ class MetaRouter:
             await self._redis.ltrim(key, 0, 100) # Keep 100 ticks of history
 
     async def run(self):
-        logger.info("MetaRouter [Core 3] Tri-Brain active. Waiting for market & model convergence...")
-        asyncio.create_task(send_cloud_alert("🚦 META ROUTER: Active and orchestrating strategy weights.", alert_type="SYSTEM"))
+        logger.info("Project K.A.R.T.H.I.K. Orchestrator Active. Managing NIFTY, BANKNIFTY, SENSEX parallel weights.")
+        asyncio.create_task(send_cloud_alert("🚦 PROJECT K.A.R.T.H.I.K.: Orchestrator online.", alert_type="SYSTEM"))
         
         # Start config listener in background
         asyncio.create_task(self._config_update_listener())
         
+        # ── Phase 9: UI & Observability heartbeat ──
+        from core.health import HeartbeatProvider
+        self.hb = HeartbeatProvider("MetaRouter", self._redis)
+        asyncio.create_task(self.hb.run_heartbeat())
+        
         while True:
             try:
-                # Fetch latest market state for all assets
-                state_raw = await self._redis.get("latest_market_state")
-                state = json.loads(state_raw) if state_raw else {}
+                # Polling Tri-Asset states and regimes
+                assets = ["NIFTY50", "BANKNIFTY", "SENSEX"]
+                multi_market_state = {}
                 
-                # Polling the Tri-Brain HMM states from Redis
+                # Regimes from hash
                 regimes_raw = await self._redis.hgetall("hmm_regime_state") if not self.test_mode else {}
                 regimes = {k: json.loads(v) for k, v in regimes_raw.items()}
 
-                # In v6.5, MetaRouter is state-aware, not just regime-aware
-                if len(regimes) == 3 or self.test_mode:
-                    mock_market_state = {"NIFTY": state, "BANKNIFTY": state, "SENSEX": state}
-                    await self.broadcast_decisions(mock_market_state, regimes)
-                
-                await asyncio.sleep(0.1) # 100ms router interval 
+                for asset in assets:
+                    # Fetch per-asset state
+                    st_raw = await self._redis.get(f"latest_market_state:{asset}")
+                    if not st_raw and asset == "NIFTY50":
+                        st_raw = await self._redis.get("latest_market_state") # legacy fallback
+                    
+                    multi_market_state[asset] = json.loads(st_raw) if st_raw else {}
 
-            except Exception as e:
-                logger.error(f"Router Exception: {e}")
-                await asyncio.sleep(1)
+                # Orchestrate if we have any data
+                if any(multi_market_state.values()) or self.test_mode:
+                    await self.broadcast_decisions(multi_market_state, regimes)
+                
+                await asyncio.sleep(0.1) 
 
             except Exception as e:
                 logger.error(f"Router Exception: {e}")

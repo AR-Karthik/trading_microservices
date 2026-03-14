@@ -10,7 +10,7 @@ import time
 import os
 
 st.set_page_config(
-    page_title="Karthik's Trading AI Assistant",
+    page_title="Project K.A.R.T.H.I.K.",
     page_icon="🦸",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -536,19 +536,27 @@ with tab_term:
         st.info("No trades recorded today.")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2: Market Signals (SRS §4)
+# TAB 2: Market Signals
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_signals:
     if r:
-        state_raw = r.get("latest_market_state")
+        selected_index = st.selectbox("Select Index", ["NIFTY50", "BANKNIFTY", "SENSEX"], key="signal_index_selector")
+        
+        state_raw = r.get(f"latest_market_state:{selected_index}") or r.get("latest_market_state")
         ms = json.loads(state_raw) if state_raw else {}
 
         # ── Row 1: Alpha & Regime ──────────────────────────────────────────
         st.markdown('<p class="section-header">Alpha Scoring & Regime</p>', unsafe_allow_html=True)
         c1, c2, c3, c4, c5 = st.columns(5)
         s_total = ms.get("s_total", 0.0)
-        hmm_r   = r.get("hmm_regime") or "RANGING"
-        gex     = r.get("gex_sign") or "POSITIVE"
+        
+        # HMM Regime Partitioned
+        asset_short = "NIFTY" if selected_index == "NIFTY50" else selected_index
+        hmm_raw = r.hget("hmm_regime_state", asset_short)
+        hmm_data = json.loads(hmm_raw) if hmm_raw else {}
+        hmm_r = hmm_data.get("regime", "RANGING")
+        
+        gex     = r.get(f"gex_sign:{selected_index}") or r.get("gex_sign") or "POSITIVE"
         hurst   = ms.get("hurst", 0.5)
         rv      = ms.get("rv", 0.0)
 
@@ -564,15 +572,15 @@ with tab_signals:
         st.markdown('<p class="section-header">Microstructure Signals (GIL Bypass Compute)</p>', unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns(4)
 
-        ofi_z = float(r.get("log_ofi_zscore") or ms.get("log_ofi_zscore", 0.0))
-        disp  = float(r.get("dispersion_coeff") or ms.get("dispersion_coeff", 0.5))
-        cvd_a = r.get("cvd_absorption") == "1"
-        cvd_f = int(r.get("cvd_flip_ticks") or ms.get("cvd_flip_ticks", 0))
-        dislo = r.get("price_dislocation") == "1"
+        ofi_z = float(r.get(f"log_ofi_zscore:{selected_index}") or r.get("log_ofi_zscore") or ms.get("log_ofi_zscore", 0.0))
+        disp  = float(r.get(f"dispersion_coeff:{selected_index}") or r.get("dispersion_coeff") or ms.get("dispersion_coeff", 0.5))
+        cvd_a = r.get(f"cvd_absorption:{selected_index}") == "1" or r.get("cvd_absorption") == "1"
+        cvd_f = int(r.get(f"cvd_flip_ticks:{selected_index}") or r.get("cvd_flip_ticks") or ms.get("cvd_flip_ticks", 0))
+        dislo = r.get(f"price_dislocation:{selected_index}") == "1" or r.get("price_dislocation") == "1"
         basis_z = float(ms.get("basis_zscore", 0.0))
         vtr   = float(ms.get("vol_term_ratio", 1.0))
         zgl   = float(ms.get("zero_gamma_level", 0.0))
-        atr   = float(r.get("atr") or ms.get("atr", 20.0))
+        atr   = float(r.get(f"atr:{selected_index}") or r.get("atr") or ms.get("atr", 20.0))
         toxic = ms.get("toxic_option", False)
 
         ofi_color = "#3fb950" if ofi_z > 2 else ("#f85149" if ofi_z < -2 else "#8b949e")

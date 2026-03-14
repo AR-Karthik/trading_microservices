@@ -152,7 +152,7 @@ def setup_secrets():
     if result.returncode != 0:
         import uuid
         new_key = str(uuid.uuid4()).replace("-", "").upper()[:16]
-        print(f"Creating new DASHBOARD_ACCESS_KEY secret (Key: {new_key})...")
+        print(f"Creating new DASHBOARD_ACCESS_KEY secret...")
         run_cmd(f"echo {new_key} | gcloud secrets create DASHBOARD_ACCESS_KEY --data-file=- --project={PROJECT_ID} --quiet")
     else:
         print("DASHBOARD_ACCESS_KEY secret already exists.")

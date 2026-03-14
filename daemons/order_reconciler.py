@@ -1,432 +1,195 @@
-"""
-daemons/order_reconciler.py
-===========================
-Decoupled State Reconciliation Daemon (SRS §2.5)
-
-Replaces the naive 200ms timeout with a dedicated, continuously-polling REST
-loop that verifies EVERY dispatched order against the exchange's physical state.
-
-Flow:
-  1. Strategy engine pushes ORDER_INTENT ID to Redis hash "pending_orders"
-     Format: HSET pending_orders <order_id> <json_metadata>
-  2. This daemon polls Shoonya single_order_history() every 500ms per pending order.
-  3. On confirmed execution  → removes from pending_orders, updates position state
-  4. On "Phantom" (3+ sec unrecognized) → fires Telegram CRITICAL, cleans up state
-"""
-
 import asyncio
 import json
 import logging
 import os
 import sys
 import time
-from datetime import datetime, timezone
-from typing import Optional
-
+from datetime import datetime
 import redis.asyncio as redis
-from dotenv import load_dotenv
+from core.mq import MQManager, Ports, Topics
+from core.logger import setup_logger
+from core.health import HeartbeatProvider
 
-from core.margin import AsyncMarginManager
-
-try:
-    import uvloop
-except ImportError:
-    uvloop = None
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    stream=sys.stdout
-)
-logger = logging.getLogger("OrderReconciler")
-
-# Timeouts
-POLL_INTERVAL_MS = 500          # ms between per-order polls
-PHANTOM_THRESHOLD_SEC = 3.0     # seconds before declaring phantom
-MAX_RETRIES_PER_ORDER = 6       # 3 seconds / 0.5s polling = 6 retries
-
-# Shoonya order status codes
-STATUS_COMPLETE = "COMPLETE"
-STATUS_REJECTED = "REJECTED"
-STATUS_CANCELLED = "CANCELLED"
-STATUS_OPEN = "OPEN"
-STATUS_PENDING = "PENDING"
-TERMINAL_STATUSES = {STATUS_COMPLETE, STATUS_REJECTED, STATUS_CANCELLED}
-
+logger = setup_logger("OrderReconciler", log_file="logs/order_reconciler.log")
 
 class OrderReconciler:
-    def __init__(self, redis_url: str = "redis://localhost:6379"):
-        load_dotenv()
-        self.redis_url = redis_url
-        self.redis: Optional[redis.Redis] = None
-        self._retry_counts: dict[str, int] = {}  # order_id → retry count
-        self._dispatch_times: dict[str, float] = {}  # order_id → epoch dispatch time
+    def __init__(self):
+        self.mq = MQManager()
+        redis_host = os.getenv("REDIS_HOST", "localhost")
+        self.r = redis.Redis(host=redis_host, port=6379, db=0, decode_responses=True)
+        
+        # In-flight baskets: {parent_uuid: {start_time, legs: []}}
+        self.inflight_baskets = {}
+        
+        # MQ Sockets
+        self.cmd_pub = None
+        self.order_push = None
+        self.hb = HeartbeatProvider("OrderReconciler", self.r)
 
-        # Shoonya API (lazy-loaded when available)
-        self._api = None
-        self._api_available = False
-        self._init_broker_api()
-
-    def _init_broker_api(self):
-        """Attempts to load the Shoonya API. Falls back to mock in paper trading."""
-        try:
-            import hashlib
-            from NorenRestApiPy.NorenApi import NorenApi  # type: ignore
-
-            host = os.getenv("SHOONYA_HOST", "")
-            if not host:
-                logger.warning("SHOONYA_HOST not set. Reconciler running in MOCK mode.")
-                return
-
-            ws_url = host.replace("https", "wss").replace("NorenWClientTP", "NorenWSTP")
-            if not ws_url.endswith("/"):
-                ws_url += "/"
-            self._api = NorenApi(host=host, websocket=ws_url)
-            self._api_available = True
-            logger.info("Reconciler: Shoonya API client initialized.")
-        except ImportError:
-            logger.warning("NorenRestApiPy not installed. Reconciler in MOCK mode.")
-        except Exception as e:
-            logger.error(f"API init error: {e}. Reconciler in MOCK mode.")
-
-    # ── Main Entry ───────────────────────────────────────────────────────────
-
-    async def start(self):
-        self.redis = redis.from_url(self.redis_url, decode_responses=True)
-        self._margin = AsyncMarginManager(self.redis)
-        logger.info("OrderReconciler started. Polling pending_orders every 500ms.")
-
-        # C2: Deterministic reboot audit — reconcile any orphaned orders from previous session
-        await self._reboot_audit()
-
+    async def _watchdog_loop(self):
+        """Monitors in-flight baskets and triggers reconciliation after 3s timeout."""
         while True:
             try:
-                await self._reconciliation_cycle()
-            except asyncio.CancelledError:
-                break
+                now = time.time()
+                to_reconcile = []
+                
+                for p_uuid, data in self.inflight_baskets.items():
+                    if now - data["start_time"] > 3.0:
+                        to_reconcile.append(p_uuid)
+                
+                for p_uuid in to_reconcile:
+                    await self.reconcile_basket(p_uuid)
+                    
+                await asyncio.sleep(0.5)
             except Exception as e:
-                logger.error(f"Reconciliation cycle error: {e}")
-            await asyncio.sleep(POLL_INTERVAL_MS / 1000.0)
+                logger.error(f"Watchdog error: {e}")
+                await asyncio.sleep(1)
 
-        await self.redis.aclose()
-
-    # ── C2: Reboot Audit ────────────────────────────────────────────────────
-
-    async def _reboot_audit(self):
+    async def reconcile_basket(self, p_uuid: str):
         """
-        On startup, performs deterministic reconciliation of ALL orders that were
-        in-flight when the previous session ended.
-
-        - COMPLETE (Filled): Confirm position state. If it was a BUY, handoff
-          to LiquidationDaemon so it can manage the 'ghost' position.
-        - OPEN: Cancel at the broker immediately to prevent double-fills.
-        - PHANTOM / PENDING (no broker record): Treat as phantom. Reverse margin.
+        Broken Condor Gap Reconciliation (Spec 11.1)
+        1. Query order status for all legs in parent_uuid.
+        2. If partial fill -> Force Market Order for remainder.
+        3. If rejection -> Trigger Rollback.
         """
-        pending = await self.redis.hgetall("pending_orders")
-        if not pending:
-            logger.info("Reboot Audit: Clean slate — no orphaned orders found.")
-            return
+        logger.info(f"🔍 Reconciling basket: {p_uuid}")
+        data = self.inflight_baskets.pop(p_uuid, None)
+        if not data: return
 
-        logger.warning(
-            f"⚠️  Reboot Audit: Found {len(pending)} orphaned pending orders. "
-            f"Reconciling deterministically..."
-        )
-
-        for order_id, meta_raw in pending.items():
-            try:
-                meta = json.loads(meta_raw)
-            except Exception:
-                await self.redis.hdel("pending_orders", order_id)
+        # In a real implementation, we would call the Bridge or Broker API here.
+        # For this architecture, we check Redis 'order_status:{order_id}' which Bridges update.
+        
+        all_filled = True
+        needs_force_fill = []
+        needs_rollback = False
+        
+        for order in data["legs"]:
+            order_id = order.get("order_id")
+            if not order_id: continue
+            
+            status_raw = await self.r.get(f"order_status:{order_id}")
+            status = json.loads(status_raw) if status_raw else {"status": "PENDING"}
+            
+            st = status.get("status")
+            if st == "COMPLETE":
                 continue
-
-            broker_order_id = meta.get("broker_order_id")
-            status, fill_price = await self._query_broker(broker_order_id, order_id)
-
-            if status == STATUS_COMPLETE:
-                logger.info(f"Reboot Audit: Order {order_id} was FILLED. Confirming state.")
-                await self._mark_order_confirmed(order_id, meta, fill_price)
-                # If it was a BUY, the position is open — hand off to LiquidationDaemon
-                if meta.get("action") == "BUY":
-                    await self._handoff_to_liquidation_daemon(meta, fill_price)
-
-            elif status == STATUS_OPEN:
-                logger.warning(
-                    f"Reboot Audit: Order {order_id} is OPEN at broker. Auto-cancelling."
-                )
-                await self._cancel_open_order(broker_order_id, order_id, meta)
-
+            elif st == "PARTIAL_FILL":
+                try:
+                    remaining = float(status.get("remaining_qty", 0))
+                except (TypeError, ValueError):
+                    remaining = 0.0
+                if remaining > 0:
+                    needs_force_fill.append({**order, "qty": remaining})
+                all_filled = False
+            elif st in ["REJECTED", "CANCELLED"]:
+                needs_rollback = True
+                all_filled = False
             else:
-                # PENDING / REJECTED / unknown — treat as phantom to clean up state
-                logger.warning(
-                    f"Reboot Audit: Order {order_id} is unconfirmed ({status}). Treating as phantom."
-                )
-                await self._handle_phantom(order_id, meta)
+                all_filled = False
+                # Still pending after 3s? Force fill or cancel.
+                needs_force_fill.append(order)
 
-        logger.info("Reboot Audit: Complete. Starting normal reconciliation loop.")
+        if needs_rollback:
+            await self.trigger_rollback(p_uuid, data["legs"])
+        elif needs_force_fill:
+            await self.force_fill(p_uuid, needs_force_fill)
+        elif all_filled:
+            logger.info(f"✅ Basket {p_uuid} reconciled: FULLY FILLED")
 
-    async def _handoff_to_liquidation_daemon(self, meta: dict, fill_price: float):
-        """Publishes a HANDOFF command so the LiquidationDaemon manages post-reboot ghost positions."""
-        try:
-            from core.mq import MQManager, Ports
-            mq = MQManager()
-            pub = mq.create_publisher(Ports.SYSTEM_CMD)
-            payload = {
-                **meta,
-                "price": fill_price,
-                "entry_time": time.time(),
-                "cmd": "HANDOFF",
-                "reboot_recovery": True,
+    async def force_fill(self, p_uuid: str, legs: list):
+        """Securing protective wings is non-negotiable. Pushes to Ports.ORDERS."""
+        logger.warning(f"⚠️ Partial fill detected for {p_uuid}. Forcing remainder via Market Orders.")
+        for leg in legs:
+            # Dispatch urgent market order to Bridge via Ports.ORDERS (PUSH)
+            order_cmd = {
+                "order_id": f"RECON_{int(time.time())}_{p_uuid[:8]}",
+                "parent_uuid": p_uuid,
+                "symbol": leg["symbol"],
+                "action": leg["side"], # side should be BUY/SELL
+                "quantity": leg["qty"],
+                "order_type": "MARKET",
+                "strategy_id": "RECONCILER",
+                "execution_type": leg.get("execution_type", "Paper"),
+                "reason": "RECONCILIATION_FORCE_FILL"
             }
-            await mq.send_json(pub, payload, topic="HANDOFF")
-            logger.info(
-                f"🔁 Reboot Handoff → LiquidationDaemon: "
-                f"{meta.get('symbol')} x{meta.get('quantity')} @ ₹{fill_price:.2f}"
-            )
-        except Exception as e:
-            logger.error(f"Reboot handoff failed for {meta.get('symbol')}: {e}")
+            # We use PUSH socket to ensure Bridge receives it
+            await self.mq.send_json(self.order_push, Topics.ORDER_INTENT, order_cmd)
 
-    async def _cancel_open_order(self, broker_order_id: str | None, order_id: str, meta: dict):
-        """Cancels an OPEN order at the broker on reboot to prevent double-fill on reconnect."""
-        if self._api_available and broker_order_id:
+    async def trigger_rollback(self, p_uuid: str, all_legs: list):
+        """
+        Circuit Breaker Rollback (Spec 11.3)
+        Close whatever legs did execute to avoid naked tail risk.
+        """
+        logger.error(f"🚨 Basket {p_uuid} failed (Rejection/Breaker). Triggering Rollback Protocol.")
+        
+        # 1. Fire a global rollback command to SYSTEM_CMD (PUB/SUB)
+        cmd = {
+            "cmd": "BASKET_ROLLBACK",
+            "parent_uuid": p_uuid,
+            "reason": "CIRCUIT_BREAKER_OR_REJECTION"
+        }
+        await self.mq.send_json(self.cmd_pub, "GLOBAL", cmd)
+
+        # 2. Proactively close executed legs
+        for leg in all_legs:
+            order_id = leg.get("order_id")
+            if not order_id: continue
+            
+            status_raw = await self.r.get(f"order_status:{order_id}")
+            status = json.loads(status_raw) if status_raw else {}
+            
+            # If the leg was partially or fully filled, it's a naked risk. Close it.
+            if status.get("status") in ["COMPLETE", "PARTIAL_FILL"]:
+                qty = float(status.get("filled_qty", 0))
+                if qty > 0:
+                    logger.warning(f"🔄 Rolling back executed leg: {leg['symbol']} ({qty} lots)")
+                    close_order = {
+                        "order_id": f"ROLL_{int(time.time())}_{p_uuid[:8]}",
+                        "parent_uuid": p_uuid,
+                        "symbol": leg["symbol"],
+                        "action": "SELL" if leg["side"] == "BUY" else "BUY",
+                        "quantity": qty,
+                        "order_type": "MARKET",
+                        "strategy_id": "RECONCILER_ROLLBACK",
+                        "execution_type": leg.get("execution_type", "Paper"),
+                        "reason": "RECONCILIATION_ROLLBACK_CLOSE"
+                    }
+                    await self.mq.send_json(self.order_push, Topics.ORDER_INTENT, close_order)
+
+    async def run(self):
+        logger.info("Order Reconciler active. Monitoring Multi-Leg Health.")
+        self.cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD)
+        self.order_push = self.mq.create_push(Ports.ORDERS, bind=False)
+        
+        # Listen for new basket originations from MetaRouter
+        sub = self.mq.create_subscriber(Ports.SYSTEM_CMD, topics=["BASKET_ORIGINATION"])
+        
+        asyncio.create_task(self._watchdog_loop())
+        
+        # ── Phase 9: UI & Observability heartbeat ──
+        if self.hb:
+            asyncio.create_task(self.hb.run_heartbeat())
+        
+        while True:
             try:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(
-                    None, lambda: self._api.cancel_order(orderno=broker_order_id)
-                )
-                logger.info(f"Reboot: CANCELLED OPEN order {broker_order_id} at broker.")
+                topic, msg = await self.mq.recv_json(sub)
+                if not msg: continue
+                
+                p_uuid = msg.get("parent_uuid")
+                if p_uuid:
+                    self.inflight_baskets[p_uuid] = {
+                        "start_time": time.time(),
+                        "legs": msg.get("legs", []),
+                        "asset": msg.get("asset")
+                    }
+                    logger.info(f"📥 Tracking new basket: {p_uuid}")
             except Exception as e:
-                logger.error(f"Reboot cancel failed for {broker_order_id}: {e}")
-        else:
-            logger.warning(
-                f"Reboot: Cannot cancel {order_id} (no broker API or no broker_order_id). "
-                f"Cleaning up locally."
-            )
-        # Always clean up local state regardless of API call success
-        await self._mark_order_failed(order_id, meta, STATUS_CANCELLED)
-
-    # ── Reconciliation Cycle ─────────────────────────────────────────────────
-
-    async def _reconciliation_cycle(self):
-        """One pass: checks every order in the pending_orders Redis hash."""
-        pending = await self.redis.hgetall("pending_orders")
-        if not pending:
-            return
-
-        # Run all order checks concurrently
-        tasks = [
-            self._check_order(order_id, meta_raw)
-            for order_id, meta_raw in pending.items()
-        ]
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def _check_order(self, order_id: str, meta_raw: str):
-        """Verify a single pending order against the exchange."""
-        try:
-            meta = json.loads(meta_raw)
-        except json.JSONDecodeError:
-            logger.warning(f"Corrupt pending_orders entry for {order_id}. Removing.")
-            await self.redis.hdel("pending_orders", order_id)
-            return
-
-        # Track dispatch time for phantom detection
-        if order_id not in self._dispatch_times:
-            self._dispatch_times[order_id] = meta.get("dispatch_time_epoch", time.time())
-            self._retry_counts[order_id] = 0
-
-        age_sec = time.time() - self._dispatch_times[order_id]
-        broker_order_id = meta.get("broker_order_id")  # Shoonya norenordno (may be None if not yet ACK'd)
-
-        # ── Poll broker status ────────────────────────────────────────────
-        status, fill_price = await self._query_broker(broker_order_id, order_id)
-
-        if status == STATUS_COMPLETE:
-            logger.info(
-                f"✅ CONFIRMED: Order {order_id} executed @ {fill_price}. "
-                f"Updating state."
-            )
-            await self._mark_order_confirmed(order_id, meta, fill_price)
-            return
-
-        if status in (STATUS_REJECTED, STATUS_CANCELLED):
-            logger.warning(f"❌ Order {order_id} terminal status: {status}. Cleaning up.")
-            await self._mark_order_failed(order_id, meta, status)
-            return
-
-        # Still open/pending — check for phantom threshold
-        self._retry_counts[order_id] = self._retry_counts.get(order_id, 0) + 1
-
-        if age_sec >= PHANTOM_THRESHOLD_SEC:
-            logger.error(
-                f"👻 PHANTOM ORDER DETECTED: {order_id} unrecognized after "
-                f"{age_sec:.1f}s. Flagging and cleaning up."
-            )
-            await self._handle_phantom(order_id, meta)
-
-    # ── Broker Query ─────────────────────────────────────────────────────────
-
-    async def _query_broker(self, broker_order_id: Optional[str], local_order_id: str) -> tuple[str, float]:
-        """
-        Queries single_order_history from Shoonya.
-        Returns (status, fill_price). Falls back to MOCK if API unavailable.
-        """
-        if not self._api_available or not broker_order_id:
-            # In paper trading / mock mode: simulate ~150ms network latency and
-            # "COMPLETE" after 2nd retry to test the happy path.
-            retries = self._retry_counts.get(local_order_id, 0)
-            await asyncio.sleep(0.05)  # simulate latency
-            if retries >= 2:
-                return STATUS_COMPLETE, 0.0
-            return STATUS_PENDING, 0.0
-
-        loop = asyncio.get_running_loop()
-        try:
-            result = await loop.run_in_executor(
-                None,
-                lambda: self._api.single_order_history(orderno=broker_order_id)
-            )
-
-            if not result or not isinstance(result, list):
-                return STATUS_PENDING, 0.0
-
-            # Shoonya returns list of history entries; latest is first
-            latest = result[0]
-            raw_status = latest.get("status", "").upper()
-
-            # Map to our canonical statuses
-            if raw_status in ("COMPLETE", "FILLED"):
-                fill_price = float(latest.get("prc", 0) or latest.get("rprc", 0) or 0)
-                return STATUS_COMPLETE, fill_price
-            elif raw_status in ("REJECTED", "CANCELLED"):
-                return STATUS_REJECTED if "REJECT" in raw_status else STATUS_CANCELLED, 0.0
-            else:
-                return STATUS_OPEN, 0.0
-
-        except Exception as e:
-            logger.debug(f"Broker query error for {broker_order_id}: {e}")
-            return STATUS_PENDING, 0.0
-
-    async def _cleanup_refinement_locks(self, order_id: str, symbol: str):
-        """Clears Double-Tap Guard lock and Pending Journal (SRS §2.6, §2.7)."""
-        await self.redis.delete(f"lock:{symbol}")
-        await self.redis.delete(f"Pending_Journal:{order_id}")
-        logger.debug(f"Cleaned refinement locks for {order_id} ({symbol})")
-
-    # ── State Update Helpers ─────────────────────────────────────────────────
-
-    async def _mark_order_confirmed(self, order_id: str, meta: dict, fill_price: float):
-        """Remove from pending, update confirmed position state in Redis."""
-        # Remove from pending
-        await self.redis.hdel("pending_orders", order_id)
-        self._dispatch_times.pop(order_id, None)
-        self._retry_counts.pop(order_id, None)
-        
-        # Clear Refinement Locks
-        await self._cleanup_refinement_locks(order_id, meta.get("symbol", "UNKNOWN"))
-
-        # Publish confirmed fill for downstream consumers (liquidation daemon, dashboard)
-        await self.redis.publish("order_confirmations", json.dumps({
-            "order_id": order_id,
-            "status": "CONFIRMED",
-            "fill_price": fill_price,
-            "symbol": meta.get("symbol"),
-            "action": meta.get("action"),
-            "quantity": meta.get("quantity"),
-            "strategy_id": meta.get("strategy_id"),
-            "execution_type": meta.get("execution_type"),
-            "confirmed_at": datetime.now(timezone.utc).isoformat()
-        }))
-
-        # Update position in Redis for quick reads
-        symbol = meta.get("symbol", "UNKNOWN")
-        strat = meta.get("strategy_id", "UNKNOWN")
-        qty_delta = meta.get("quantity", 0) if meta.get("action") == "BUY" else -meta.get("quantity", 0)
-        pos_key = f"position:{symbol}:{strat}"
-        await self.redis.incrbyfloat(pos_key, qty_delta)
-        await self.redis.expire(pos_key, 86400)  # 24h TTL
-
-        # Release Margin on SELL
-        if meta.get("action") == "SELL":
-            refund_amount = fill_price * abs(meta.get("quantity", 0))
-            if refund_amount > 0:
-                execution_type = meta.get("execution_type", "Paper")
-                await self._margin.release(refund_amount, execution_type)
-                logger.info(f"Released ₹{refund_amount:.2f} {execution_type} margin after SELL execution.")
-
-    async def _mark_order_failed(self, order_id: str, meta: dict, status: str):
-        """Clean up a rejected/cancelled order."""
-        await self.redis.hdel("pending_orders", order_id)
-        self._dispatch_times.pop(order_id, None)
-        self._retry_counts.pop(order_id, None)
-        
-        # Clear Refinement Locks
-        await self._cleanup_refinement_locks(order_id, meta.get("symbol", "UNKNOWN"))
-
-        await self.redis.publish("order_confirmations", json.dumps({
-            "order_id": order_id,
-            "status": status,
-            "symbol": meta.get("symbol"),
-            "strategy_id": meta.get("strategy_id"),
-            "failed_at": datetime.now(timezone.utc).isoformat()
-        }))
-
-        # Alert on rejection
-        await self._telegram_alert(
-            f"❌ Order {order_id} REJECTED/CANCELLED by exchange. "
-            f"Symbol: {meta.get('symbol')} | Strategy: {meta.get('strategy_id')}"
-        )
-
-    async def _handle_phantom(self, order_id: str, meta: dict):
-        """Handle a phantom order: local state believed dispatched but exchange has no record."""
-        await self.redis.hdel("pending_orders", order_id)
-        self._dispatch_times.pop(order_id, None)
-        self._retry_counts.pop(order_id, None)
-        
-        # Clear Refinement Locks
-        await self._cleanup_refinement_locks(order_id, meta.get("symbol", "UNKNOWN"))
-
-        alert = (
-            f"👻 PHANTOM ORDER: {order_id}\n"
-            f"Symbol: {meta.get('symbol')} | Action: {meta.get('action')} "
-            f"| Qty: {meta.get('quantity')} | Strategy: {meta.get('strategy_id')}\n"
-            f"Exchange has no record. Local trade state cancelled."
-        )
-        logger.critical(alert)
-        await self._telegram_alert(alert)
-
-        # Push phantom event to Redis for dashboard
-        await self.redis.lpush("phantom_orders", json.dumps({
-            "order_id": order_id,
-            "meta": meta,
-            "detected_at": datetime.now(timezone.utc).isoformat()
-        }))
-        await self.redis.ltrim("phantom_orders", 0, 99)
-
-        # Reverse reserved margin for failed entry
-        if meta.get("action") == "BUY":
-            refund_amount = meta.get("price", 0.0) * meta.get("quantity", 0)
-            if refund_amount > 0:
-                execution_type = meta.get("execution_type", "Paper")
-                await self._margin.release(refund_amount, execution_type)
-                logger.info(f"Refunded ₹{refund_amount:.2f} {execution_type} margin for phantom BUY order {order_id}.")
-
-    # ── Telegram Alert Helper ────────────────────────────────────────────────
-
-    async def _telegram_alert(self, message: str):
-        try:
-            await self.redis.lpush("telegram_alerts", json.dumps({
-                "message": message,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "type": "RECONCILER"
-            }))
-        except Exception as e:
-            logger.error(f"Telegram alert push failed: {e}")
-
+                logger.error(f"Recv error: {e}")
+                await asyncio.sleep(1)
 
 if __name__ == "__main__":
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    elif uvloop:
-        uvloop.install()
-
+    
     reconciler = OrderReconciler()
-    asyncio.run(reconciler.start())
+    asyncio.run(reconciler.run())

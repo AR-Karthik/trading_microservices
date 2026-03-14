@@ -30,6 +30,23 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import requests
+import asyncio
+import socket
+from core.network_utils import exponential_backoff
+
+# --- Simple DNS Caching (SRS §127) ---
+_dns_cache = {}
+_real_getaddrinfo = socket.getaddrinfo
+
+def _cached_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    key = (host, port, family, type, proto, flags)
+    if key in _dns_cache:
+        return _dns_cache[key]
+    res = _real_getaddrinfo(host, port, family, type, proto, flags)
+    _dns_cache[key] = res
+    return res
+
+socket.getaddrinfo = _cached_getaddrinfo
 
 logger = logging.getLogger("MacroEventFetcher")
 
@@ -58,7 +75,8 @@ CALENDAR_PATH = Path(__file__).parent.parent / "data" / "macro_calendar.json"
 REQUEST_TIMEOUT = 15
 
 
-def fetch_forex_factory() -> list[dict]:
+@exponential_backoff(max_retries=3)
+async def fetch_forex_factory() -> list[dict]:
     """
     Fetches ForexFactory JSON calendar for current + next week.
     Returns list of normalised event dicts.
@@ -105,7 +123,8 @@ def fetch_forex_factory() -> list[dict]:
     return events
 
 
-def fetch_fmp_economic_calendar(days_ahead: int = 14) -> list[dict]:
+@exponential_backoff(max_retries=3)
+async def fetch_fmp_economic_calendar(days_ahead: int = 14) -> list[dict]:
     """
     Fetches economic calendar events from FMP for next `days_ahead` days.
     Filters on US (USD) and India (INR) with high impact.
@@ -192,7 +211,7 @@ def sort_chronologically(events: list[dict]) -> list[dict]:
     return sorted(events, key=lambda e: e["datetime"])
 
 
-def fetch_and_write(write_to_disk: bool = True, write_to_redis: bool = False,
+async def fetch_and_write(write_to_disk: bool = True, write_to_redis: bool = False,
                     redis_client=None) -> list[dict]:
     """
     Main entrypoint: fetches from both sources, merges, deduplicates, sorts.
@@ -203,8 +222,17 @@ def fetch_and_write(write_to_disk: bool = True, write_to_redis: bool = False,
     logger.info("Starting macro event fetch (ForexFactory + FMP)...")
 
     all_events = []
-    all_events.extend(fetch_forex_factory())
-    all_events.extend(fetch_fmp_economic_calendar())
+    # Using asyncio.gather instead of sequential calls
+    results = await asyncio.gather(
+        fetch_forex_factory(),
+        fetch_fmp_economic_calendar(),
+        return_exceptions=True
+    )
+    for res in results:
+        if isinstance(res, list):
+            all_events.extend(res)
+        else:
+            logger.error(f"Fetch task failed: {res}")
 
     merged = deduplicate(all_events)
     merged = sort_chronologically(merged)
@@ -232,7 +260,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
                         stream=sys.stdout)
-    events = fetch_and_write(write_to_disk=True, write_to_redis=False)
+    events = asyncio.run(fetch_and_write(write_to_disk=True, write_to_redis=False))
     print(f"\nFetched {len(events)} events. Saved to {CALENDAR_PATH}")
     for ev in events[:10]:
         print(f"  [{ev['source']:15}] {ev['datetime'][:16]} {ev['currency']:3} {ev['name'][:50]}")

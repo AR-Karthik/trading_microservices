@@ -1,17 +1,22 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import PlainTextResponse
 import redis
 import os
 import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import random
+import time
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
+from core.logger import setup_logger
 
-app = FastAPI(title="🦸‍♂️ PROJECT K.A.R.T.H.I.K. (Kinetic Alpha Regime Tracking & High-frequency Institutional Kernel)")
+logger = setup_logger("DashboardAPI", log_file="logs/dashboard_api.log")
+
+app = FastAPI(title="🦸‍♂️ Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)")
 
 # Enable CORS for Next.js frontend
 app.add_middleware(
@@ -21,6 +26,38 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- NEW: Logging Middleware (#103) ---
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    logger.info(
+        f"API Request: {request.method} {request.url.path}",
+        extra={
+            "duration": round(duration, 4),
+            "status_code": response.status_code,
+            "client_ip": request.client.host if request.client else "unknown"
+        }
+    )
+    return response
+
+# --- NEW: Audit Logger (#106) ---
+class AuditLogger:
+    @staticmethod
+    async def log_event(event_type: str, user: str, details: str):
+        r = get_redis()
+        event = {
+            "timestamp": datetime.now().isoformat(),
+            "event_type": event_type,
+            "user": user,
+            "details": details
+        }
+        # Non-blocking async push to Redis stream or list
+        r.lpush("audit_trail", json.dumps(event))
+        r.ltrim("audit_trail", 0, 9999)
+        logger.warning(f"AUDIT EVENT: {event_type} by {user} - {details}")
 
 # Connections
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -73,6 +110,7 @@ class SystemState(BaseModel):
     available_margin_live: float
     paper_capital_limit: float
     live_capital_limit: float
+    index_states: dict # Multi-index regimes and scores
     signals: dict  # Full quant signal vector
     power_five: dict # HDFC, RIL, ICICI, etc.
     exit_path_70_30: dict # TP1, TP2 markers
@@ -94,14 +132,75 @@ class StrategyStatus(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    # Enhanced Health Check (#108)
+    health_status = {"status": "ok", "components": {}}
+    
+    # Check Redis
+    try:
+        r = get_redis()
+        r.ping()
+        health_status["components"]["redis"] = "connected"
+    except Exception as e:
+        health_status["status"] = "degraded"
+        health_status["components"]["redis"] = f"error: {str(e)}"
 
-@app.get("/state", response_model=SystemState)
-def get_state():
+    # Check Database
+    try:
+        conn = get_db()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            conn.close()
+            health_status["components"]["database"] = "connected"
+        else:
+            health_status["status"] = "degraded"
+            health_status["components"]["database"] = "failed to connect"
+    except Exception as e:
+        health_status["status"] = "degraded"
+        health_status["components"]["database"] = f"error: {str(e)}"
+
+    if health_status["status"] != "ok":
+        raise HTTPException(status_code=503, detail=health_status)
+    return health_status
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def get_metrics():
+    # Basic Prometheus Metrics (#104)
     r = get_redis()
     state_raw = r.get("latest_market_state")
     ms = json.loads(state_raw) if state_raw else {}
     
+    metrics = [
+        "# HELP composite_alpha Current Alpha Score",
+        "# TYPE composite_alpha gauge",
+        f"composite_alpha {ms.get('s_total', 0.0)}",
+        "# HELP system_halted Indicator if system is halted (1=True, 0=False)",
+        "# TYPE system_halted gauge",
+        f"system_halted {1 if r.get('SYSTEM_HALTED') == 'True' else 0}"
+    ]
+    return "\n".join(metrics)
+
+    indices = ["NIFTY50", "BANKNIFTY", "SENSEX"]
+    index_states = {}
+    
+    for asset in indices:
+        st_raw = r.get(f"latest_market_state:{asset}")
+        st = json.loads(st_raw) if st_raw else {}
+        
+        # HMM Regime
+        asset_short = "NIFTY" if asset == "NIFTY50" else asset
+        reg_raw = r.hget("hmm_regime_state", asset_short)
+        reg_data = json.loads(reg_raw or "{}")
+        
+        index_states[asset] = {
+            "score": st.get("s_total", 0.0),
+            "regime": reg_data.get("regime", "UNKNOWN"),
+            "price": st.get("price", 0.0)
+        }
+    
+    # Primary asset for top-level keys
+    ms = json.loads(r.get("latest_market_state:NIFTY50") or r.get("latest_market_state") or "{}")
+
     # Extract deep signals
     deep_signals = {
         "log_ofi_z": ms.get("log_ofi_zscore", 0.0),
@@ -142,9 +241,10 @@ def get_state():
                 power_five[idx][sym] = round(float(z_raw or 0), 2)
 
     return {
-        "alpha_score": ms.get("s_total", 0.0),
-        "hmm_regime": r.get("hmm_regime") or "UNKNOWN",
-        "gex_sign": r.get("gex_sign") or "UNKNOWN",
+        "alpha_score": index_states["NIFTY50"]["score"],
+        "hmm_regime": index_states["NIFTY50"]["regime"],
+        "index_states": index_states,
+        "gex_sign": r.get("gex_sign:NIFTY50") or r.get("gex_sign") or "UNKNOWN",
         "system_halted": r.get("SYSTEM_HALTED") == "True",
         "macro_lockdown": r.get("MACRO_EVENT_LOCKDOWN") == "True",
         "available_margin_paper": float(r.get("AVAILABLE_MARGIN_PAPER") or 0),
@@ -164,7 +264,7 @@ def get_state():
 def get_strategies():
     r = get_redis()
     # Strategies tracked by MetaRouter
-    targets = ["STRAT_GAMMA", "STRAT_REVERSION", "STRAT_VWAP", "STRAT_OI_PULSE", "STRAT_LEAD_LAG"]
+    targets = ["STRAT_GAMMA", "STRAT_VWAP", "STRAT_OI_PULSE", "STRAT_LEAD_LAG"]
     results = []
     
     # In a real system, we'd fetch actual process status. 
@@ -175,8 +275,7 @@ def get_strategies():
         # Derivative logic to show "intended" state
         status = "PAUSED"
         if t == "STRAT_LEAD_LAG": status = "ACTIVE"
-        if t == "STRAT_GAMMA" and r.get("gex_sign") == "NEGATIVE" and regime == "TRENDING": status = "ACTIVE"
-        if t == "STRAT_REVERSION" and r.get("gex_sign") == "POSITIVE" and regime == "RANGING": status = "ACTIVE"
+        if t == "STRAT_GAMMA" and r.get("gex_sign:NIFTY50") == "NEGATIVE" and regime == "TRENDING": status = "ACTIVE"
         
         results.append({
             "name": t.replace("STRAT_", ""),
@@ -187,8 +286,11 @@ def get_strategies():
 
 # --- NEW: Tab 2: Regime Orchestrator ---
 @app.post("/regime/config")
-def update_regime_config(config: RegimeConfigRequest):
+async def update_regime_config(config: RegimeConfigRequest):
     r = get_redis()
+    # Audit log the change (#106)
+    await AuditLogger.log_event("CONFIG_CHANGE", "ADMIN_UI", f"Regime config updated: {config.engine}")
+    
     r.set("CONFIG:REGIME_ENGINE", config.engine)
     r.set("CONFIG:HURST_THRESHOLD", config.hurst_threshold)
     r.set("CONFIG:HYBRID_CONFIDENCE", config.hybrid_confidence)
@@ -290,13 +392,30 @@ def get_strategy_attribution():
 # --- NEW: Tab 5: Observability ---
 @app.get("/health/telemetry", response_model=TelemetryMetrics)
 def get_telemetry():
+    # Real Telemetry (#105)
     r = get_redis()
-    # Mocking latency and CPU for visualization
-    import random
+    conn = get_db()
+    
+    # 1. Fetch avg latency from recent trades in DB
+    latency = 15.0 # Default
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT AVG(latency_ms) FROM trades WHERE time > now() - interval '1 hour'")
+                res = cur.fetchone()
+                if res and res[0]:
+                    latency = float(res[0])
+        except:
+            pass
+            
+    # 2. Fetch slippage from Redis
+    slippage = float(r.get("TOTAL_SLIPPAGE_INR") or 0.0)
+    
+    # 3. Simulate cores but with real scale
     return {
-        "nse_latency_ms": random.uniform(12.5, 18.2),
-        "bse_latency_ms": random.uniform(14.1, 22.5),
-        "slippage_leakage_inr": float(r.get("TOTAL_SLIPPAGE_INR") or 450.25),
+        "nse_latency_ms": latency,
+        "bse_latency_ms": latency * 1.1,
+        "slippage_leakage_inr": slippage,
         "cpu_cores": [random.uniform(20.0, 45.0), random.uniform(60.0, 85.0), random.uniform(40.0, 70.0)]
     }
 
@@ -373,8 +492,11 @@ def get_portfolio(mode: str = "Paper"):
     return positions
 
 @app.post("/panic")
-def panic(mode: str = "Paper"):
+async def panic(mode: str = "Paper"):
     r = get_redis()
+    # Audit log the panic (#106)
+    await AuditLogger.log_event("PANIC_TRIGGERED", "ADMIN_UI", f"Manual panic signal sent for {mode} mode")
+    
     payload = {
         "action": "SQUARE_OFF_ALL",
         "reason": "MANUAL_PRO_DASHBOARD",

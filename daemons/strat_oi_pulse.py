@@ -58,6 +58,8 @@ class OIPulseStrategy:
 
         # OI history: {strike: deque of (timestamp, oi) pairs}
         self._oi_history: dict[int, collections.deque] = {}
+        # Price history for trending check
+        self._price_history: collections.deque = collections.deque(maxlen=100)
         # OI wall breach tracker: {strike: first_breach_timestamp}
         self._wall_breach_times: dict[int, float] = {}
 
@@ -132,13 +134,14 @@ class OIPulseStrategy:
         for strike in strikes:
             accel = self._compute_oi_acceleration(strike)
             if accel > OI_ACCEL_THRESHOLD and accel > best_accel:
+                # Update price history
+                self._price_history.append((time.time(), spot))
                 # Spot must be trending TOWARD this strike
-                last_prices = [t.get("price", spot) for t in
-                               list(self._oi_history.get(strike, []))[-5:]]
-                if len(last_prices) >= 2:
+                recent_prices = [p for ts, p in self._price_history]
+                if len(recent_prices) >= 2:
                     trending_toward = (
-                        (strike > spot and last_prices[-1] > last_prices[0]) or
-                        (strike < spot and last_prices[-1] < last_prices[0])
+                        (strike > spot and recent_prices[-1] > recent_prices[0]) or
+                        (strike < spot and recent_prices[-1] < recent_prices[0])
                     )
                     if trending_toward:
                         best_strike = strike

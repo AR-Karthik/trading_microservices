@@ -1,5 +1,141 @@
 services:
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=trading
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+
   data_gateway:
     build:
       context: .
       dockerfile: Dockerfile.local
+    command: python -m daemons.data_gateway
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - .:/app
+      - /dev/shm:/ram_disk
+
+  hmm_engine_nifty:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m daemons.hmm_engine --asset NIFTY --core 1
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+      - /dev/shm:/ram_disk
+
+  hmm_engine_banknifty:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m daemons.hmm_engine --asset BANKNIFTY --core 2
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+      - /dev/shm:/ram_disk
+
+  hmm_engine_sensex:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m daemons.hmm_engine --asset SENSEX --core 4
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+      - /dev/shm:/ram_disk
+
+  market_sensor:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m daemons.market_sensor
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+      - /dev/shm:/ram_disk
+
+  meta_router:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m daemons.meta_router
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - .:/app
+
+  strategy_engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m daemons.strategy_engine
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+
+  liquidation_daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m daemons.liquidation_daemon
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - .:/app
+
+  system_controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m daemons.system_controller
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - .:/app
+
+  paper_bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m daemons.paper_bridge
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - .:/app
+
+  order_reconciler:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: python -m daemons.order_reconciler
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - .:/app
+
+volumes:
+  pgdata:

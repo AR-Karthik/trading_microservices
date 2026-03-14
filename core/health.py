@@ -1,60 +1,70 @@
-import asyncio
-import logging
+"""
+core/health.py
+==============
+Standardized heartbeat and health tracking for Project K.A.R.T.H.I.K.
+"""
+
 import time
-import requests
-import os
-import signal
-from core.mq import MQManager, Ports
+import json
+import logging
+import asyncio
+from typing import Dict, Optional
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Health")
 
-class SystemHealth:
-    """
-    --- Recommendation 10 & 11: Heartbeat & Preemption ---
-    Monitors system vitals and GCP Spot VM termination notices.
-    """
-    def __init__(self, mq_manager: MQManager):
-        self.mq = mq_manager
-        self.heartbeat_interval = 5.0 # seconds
-        self.preemption_url = "http://metadata.google.internal/computeMetadata/v1/instance/preempted"
-        self.is_running = True
+class HeartbeatProvider:
+    """Mixin or helper to provide heartbeats to Redis."""
+    def __init__(self, name: str, redis_client):
+        self.name = name
+        self.redis = redis_client
+        self._stopped = False
 
-    async def start_heartbeat(self):
-        """Publishes a heartbeat every 5 seconds."""
-        logger.info("💓 Starting Heartbeat Monitor...")
-        while self.is_running:
-            payload = {
-                "type": "HEARTBEAT",
-                "timestamp": time.time(),
-                "node": "GATEWAY"
-            }
-            await self.mq.publish(Ports.TICK_STREAM, "HEARTBEAT", payload)
-            await asyncio.sleep(self.heartbeat_interval)
-
-    async def watch_preemption(self):
-        """
-        Polls the Google Metadata server for termination notice.
-        If a notice is found, it triggers an emergency liquidation signal.
-        """
-        if os.getenv("RUNNING_ON_GCP") != "TRUE":
-            logger.info("🛡️ Preemption Watcher skipped (Local environment).")
-            return
-
-        logger.info("📡 Starting GCP Preemption Watcher...")
-        headers = {"Metadata-Flavor": "Google"}
-        
-        while self.is_running:
+    async def run_heartbeat(self, interval: int = 5):
+        """Sends a periodic heartbeat to Redis: health:daemon_name = timestamp"""
+        logger.info(f"Health heartbeat started for {self.name}")
+        while not self._stopped:
             try:
-                # GCP Metadata server returns 'TRUE' if preemption is imminent
-                response = requests.get(self.preemption_url, headers=headers, timeout=2)
-                if response.text == "TRUE":
-                    logger.warning("🚨 GCP PREEMPTION DETECTED! Triggering Emergency Close...")
-                    # Publish panic signal
-                    await self.mq.publish(Ports.TICK_STREAM, "PANIC", {"reason": "GCP_PREEMPTION"})
-                    break
-            except Exception:
-                pass
-            await asyncio.sleep(5)
+                # Update daemon-specific heartbeat
+                ts = time.time()
+                await self.redis.hset("daemon_heartbeats", self.name, ts)
+                # Keep individual key for easy TTL monitoring if needed
+                await self.redis.set(f"heartbeat:{self.name}", ts, ex=30)
+            except Exception as e:
+                logger.error(f"Heartbeat failed for {self.name}: {e}")
+            await asyncio.sleep(interval)
 
-    def stop(self):
-        self.is_running = False
+    def stop_heartbeat(self):
+        self._stopped = True
+
+class HealthAggregator:
+    """Used by SystemController to compute aggregate health scores."""
+    def __init__(self, redis_client):
+        self.redis = redis_client
+        self.required_daemons = [
+            "DataGateway", "MarketSensor", "MetaRouter", 
+            "StrategyEngine", "PaperBridge", "LiveBridge",
+            "LiquidationDaemon", "OrderReconciler"
+        ]
+
+    async def get_system_health(self) -> Dict:
+        """Computes a health score (0.0 to 1.0) based on daemon heartbeats."""
+        now = time.time()
+        heartbeats = await self.redis.hgetall("daemon_heartbeats")
+        
+        status = {}
+        alive_count = 0
+        
+        for daemon in self.required_daemons:
+            hb = float(heartbeats.get(daemon, 0))
+            is_alive = (now - hb) < 15 # 15s timeout
+            status[daemon] = "ALIVE" if is_alive else "DEAD"
+            if is_alive:
+                alive_count += 1
+                
+        score = alive_count / len(self.required_daemons) if self.required_daemons else 1.0
+        
+        return {
+            "score": round(score, 2),
+            "daemon_status": status,
+            "timestamp": now
+        }

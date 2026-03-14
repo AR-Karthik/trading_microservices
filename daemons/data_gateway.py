@@ -1,12 +1,12 @@
 """
 daemons/data_gateway.py
 =======================
-The Resilient Firehose (SRS §2.2)
+Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)
 
 Responsibilities:
-- Dynamic lot size fetch at 09:01 IST (Nifty=65, BankNifty=30) → Redis
+- Dynamic lot size fetch at 09:01 IST (Nifty=65, BankNifty=30, Sensex=10) → Redis
 - Tick staleness watchdog (>1000ms → TCP socket reset)
-- SEBI Circuit Breaker broadcasts (10% / 15% / 20% halt → SYSTEM_HALT)
+- SEBI Circuit Breaker broadcasts
 - High-frequency tick streaming via ZeroMQ PUB to all consumers
 """
 
@@ -27,6 +27,7 @@ import redis.asyncio as redis
 from core.mq import MQManager, Ports, Topics
 from core.greeks import BlackScholes
 from core.alerts import send_cloud_alert
+from core.network_utils import exponential_backoff
 from NorenRestApiPy.NorenApi import NorenApi
 
 load_dotenv()
@@ -80,7 +81,7 @@ SHOONYA_SUBSCRIPTIONS = [
 ]
 
 # Default dynamic lot sizes (updated from broker at 09:01 IST)
-DEFAULT_LOT_SIZES = {"NIFTY50": 65, "BANKNIFTY": 30}
+DEFAULT_LOT_SIZES = {"NIFTY50": 65, "BANKNIFTY": 30, "SENSEX": 10}
 
 # Staleness threshold — if last tick delta exceeds this, force reconnect
 STALENESS_THRESHOLD_MS = 1000
@@ -158,10 +159,22 @@ class DataGateway:
             logger.error(f"❌ Shoonya Login exception: {e}")
             return False
 
+    @exponential_backoff(max_retries=10, base_delay=5)
+    async def _ensure_login(self):
+        """Ensures login succeeds with retries."""
+        if self._login():
+            return True
+        raise Exception("Shoonya Login Failed")
+
     # ── Gateway Startup ──────────────────────────────────────────────────────
 
     async def start(self):
-        self.redis_client = redis.from_url(self.redis_url, decode_responses=True)
+        self.redis_client = redis.from_url(
+            self.redis_url, 
+            decode_responses=True,
+            socket_timeout=5.0,
+            socket_connect_timeout=5.0
+        )
         logger.info("DataGateway initialised. Starting sub-tasks...")
         asyncio.create_task(send_cloud_alert("🚀 DATA GATEWAY: Service active. Monitoring 13 heavyweights + Indices.", alert_type="SYSTEM"))
         self._data_flow_alert_sent = False
@@ -173,7 +186,15 @@ class DataGateway:
             self._staleness_watchdog(),
             self._circuit_breaker_monitor(),
             self._dynamic_subscription_manager(),
+            self._dynamic_subscription_listener(), # Phase 6
+            self._pcr_ingestion_loop(), # Phase 0: Heuristic PCR ingestion
+            self._run_heartbeat(),      # Phase 9: UI & Observability
         )
+
+    async def _run_heartbeat(self):
+        from core.health import HeartbeatProvider
+        hb = HeartbeatProvider("DataGateway", self.redis_client)
+        await hb.run_heartbeat()
 
     # ── Strike Selection (SRS Phase 2) ───────────────────────────────────────
 
@@ -236,6 +257,33 @@ class DataGateway:
             
             await asyncio.sleep(60) # Check every minute
 
+    # ── JIT WebSocket Subscriptions (Phase 6) ────────────────────────────────
+
+    async def _dynamic_subscription_listener(self):
+        """Listens for on-demand subscription requests from other daemons."""
+        pubsub = self.redis_client.pubsub()
+        await pubsub.subscribe("dynamic_subscriptions")
+        logger.info("JIT Subscription Listener active on channel 'dynamic_subscriptions'.")
+        
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    symbol_data = message["data"] # "EXCH|TOKEN" or "NSE|26000"
+                    if not symbol_data or "|" not in symbol_data: continue
+                    
+                    logger.info(f"⚡ JIT Subscription Request: {symbol_data}")
+                    self.api.subscribe(symbol_data)
+                    
+                    # If it's an option symbol from a specific exchange
+                    if symbol_data.startswith("NFO|"):
+                        token = symbol_data.split("|")[1]
+                        # We might need to fetch the tradingsymbol if it's not known
+                        # and update self.active_option_tokens
+                        # For now, we assume the requester handles symbol resolution
+                        pass
+                except Exception as e:
+                    logger.error(f"JIT sub listener error: {e}")
+
     # ── Tick Stream ──────────────────────────────────────────────────────────
 
     async def _tick_stream(self):
@@ -246,65 +294,74 @@ class DataGateway:
         logger.info("Starting live Shoonya WebSocket integration...")
         sim_enabled = os.getenv("ENABLE_OFF_HOUR_SIMULATOR", "true").lower() == "true"
         sim_mode_global = os.getenv("SIMULATION_MODE", "false").lower() == "true"
-
-        if not self._login():
-            logger.error("Could not log in to Shoonya.")
-            if is_market_hours() and not sim_mode_global:
-                logger.error("Market is OPEN but Shoonya login failed. Zero data flow!")
-                asyncio.create_task(send_cloud_alert("🚨 DATA GATEWAY: Shoonya login failed during market hours! No live data flow.", alert_type="CRITICAL"))
-                return
-            elif not is_market_hours() and sim_enabled:
-                logger.warning("Falling back to SIMULATOR (Off-hours).")
-                self.sim_mode = True
-                asyncio.create_task(send_cloud_alert("ℹ️ DATA GATEWAY: Shoonya offline. Activating off-hour simulator.", alert_type="INFO"))
-            else:
-                logger.error("Shoonya login failed and Off-hour simulator is disabled or market is closed. Shutting down.")
-                return
-        else:
-            self.sim_mode = sim_mode_global
-
         loop = asyncio.get_running_loop()
-        feed_opened = threading.Event()
 
-        def on_feed_update(tick_msg):
-            # Safe queuing from the WebSocket thread
-            loop.call_soon_threadsafe(self.tick_queue.put_nowait, tick_msg)
+        while True:
+            if not self.sim_mode:
+                try:
+                    await self._ensure_login()
+                except Exception:
+                    if is_market_hours():
+                        logger.error("Market is OPEN but Shoonya login failed. Zero data flow!")
+                        asyncio.create_task(send_cloud_alert("🚨 DATA GATEWAY: Shoonya login failed during market hours!", alert_type="CRITICAL"))
+                    # Fallback to simulation if off-hours and enabled
+                    if not is_market_hours() and sim_enabled:
+                         self.sim_mode = True
+                         continue
+                    else:
+                        await asyncio.sleep(60)
+                        continue
 
-        def on_open():
-            logger.info("✅ Shoonya WebSocket Connected")
-            feed_opened.set()
-            for sub in SHOONYA_SUBSCRIPTIONS:
-                self.api.subscribe(sub)
-                logger.info(f"Subscribed to {sub}")
+            feed_opened = threading.Event()
+            ws_stopped = threading.Event()
 
-        def on_error(err):
-            logger.error(f"Shoonya WS Error: {err}")
+            def on_feed_update(tick_msg):
+                loop.call_soon_threadsafe(self.tick_queue.put_nowait, tick_msg)
 
-        def on_close():
-            logger.warning("Shoonya WS Closed")
+            def on_open():
+                logger.info("✅ Shoonya WebSocket Connected")
+                feed_opened.set()
+                for sub in SHOONYA_SUBSCRIPTIONS:
+                    self.api.subscribe(sub)
 
-        ws_thread = threading.Thread(
-            target=self.api.start_websocket,
-            kwargs={
-                "subscribe_callback": on_feed_update,
-                "order_update_callback": lambda o: None,
-                "socket_open_callback": on_open,
-                "socket_error_callback": on_error,
-                "socket_close_callback": on_close
-            },
-            daemon=True
-        )
-        ws_thread.start()
+            def on_error(err):
+                logger.error(f"Shoonya WS Error: {err}")
 
-        def _wait_for_feed():
-            return feed_opened.wait(20.0)
-            
-        # Wait for socket to open with a generous timeout for staging environments
-        if not self.sim_mode:
-            await asyncio.to_thread(_wait_for_feed)
-            if not feed_opened.is_set():
-                logger.error("WebSocket failed to connect within 20 seconds. Falling back to simulation if requested.")
-                if not self.sim_mode: return
+            def on_close():
+                logger.warning("Shoonya WS Closed. Triggering reconnect...")
+                ws_stopped.set()
+
+            ws_thread = threading.Thread(
+                target=self.api.start_websocket,
+                kwargs={
+                    "subscribe_callback": on_feed_update,
+                    "order_update_callback": lambda o: None,
+                    "socket_open_callback": on_open,
+                    "socket_error_callback": on_error,
+                    "socket_close_callback": on_close
+                },
+                daemon=True
+            )
+            ws_thread.start()
+
+            if not self.sim_mode:
+                # Wait for socket to open
+                success = await asyncio.to_thread(lambda: feed_opened.wait(30.0))
+                if not success:
+                    logger.error("WebSocket failed to connect. Retrying...")
+                    # We don't 'stop' the api because it likely failed to start
+                    await asyncio.sleep(5)
+                    continue
+                
+                # Monitor for closure
+                while not ws_stopped.is_set():
+                    await asyncio.sleep(1)
+                
+                logger.warning("WebSocket stopped. Re-initiating startup sequence...")
+                await asyncio.sleep(5)
+            else:
+                # Simulation mode: break the inner loop and run simulation logic
+                break
 
         while True:
             if self._system_halted:
@@ -454,31 +511,52 @@ class DataGateway:
             await asyncio.sleep(300) # Every 5 mins
 
     async def _sync_expiries(self):
-        """Fetches the nearest expiry for indices from Shoonya."""
+        """Fetches the nearest expiry for all major indices from Shoonya."""
+        indices = [
+            {"id": "NIFTY50", "tradingsymbol": "NIFTY", "exchange": "NFO"},
+            {"id": "BANKNIFTY", "tradingsymbol": "BANKNIFTY", "exchange": "NFO"},
+            {"id": "SENSEX", "tradingsymbol": "SENSEX", "exchange": "BFO"}
+        ]
+
         if os.getenv("SIMULATION_MODE", "false").lower() == "true" or not is_market_hours():
-            # Mock expiry for simulation/off-hours
+            # Mock expiries for simulation/off-hours
+            for idx in indices:
+                await self.redis_client.set(f"EXPIRY:{idx['id']}", "26MAR")
+            # Legacy compatibility
             await self.redis_client.set("CURRENT_EXPIRY_DATE", "26MAR")
             return
             
-        try:
-            # Fetch for NIFTY as baseline
-            res = self.api.get_option_chain(exchange='NFO', tradingsymbol='NIFTY', strike=22000, count=1)
-            if res and isinstance(res, dict) and res.get('stat') == 'Ok':
-                # Example response: {'stat': 'Ok', 'values': [{'exDate': '26-MAR-2026', ...}]}
-                values = res.get('values', [])
-                if values:
-                    expiry = values[0].get('exDate') # e.g. "26-MAR-2026"
-                    # Format for scrip search: "26MAR"
-                    parts = expiry.split('-')
-                    formatted = f"{parts[0]}{parts[1]}"
-                    await self.redis_client.set("CURRENT_EXPIRY_DATE", formatted)
-                    logger.info(f"Sync'd current expiry: {formatted}")
-        except Exception as e:
-            logger.error(f"Expiry sync failed: {e}")
+        for idx in indices:
+            try:
+                # Use a mid-strike to get the chain
+                strike = 25000 if idx['tradingsymbol'] == "NIFTY" else (50000 if idx['tradingsymbol'] == "BANKNIFTY" else 75000)
+                res = self.api.get_option_chain(exchange=idx['exchange'], tradingsymbol=idx['tradingsymbol'], strike=strike, count=1)
+                if res and isinstance(res, dict) and res.get('stat') == 'Ok':
+                    values = res.get('values', [])
+                    if values:
+                        expiry = values[0].get('exDate') # e.g. "26-MAR-2026"
+                        parts = expiry.split('-')
+                        formatted = f"{parts[0]}{parts[1]}"
+                        await self.redis_client.set(f"EXPIRY:{idx['id']}", formatted)
+                        
+                        # Set legacy key for NIFTY to prevent breakage in older logic
+                        if idx['id'] == "NIFTY50":
+                            await self.redis_client.set("CURRENT_EXPIRY_DATE", formatted)
+                            
+                        logger.info(f"Sync'd expiry for {idx['id']}: {formatted}")
+            except Exception as e:
+                logger.error(f"Expiry sync failed for {idx['id']}: {e}")
 
     async def _ensure_option_subscription(self, idx: str, strike: float, otype: str):
         """Finds token for strike/type and subscribes if not active."""
-        expiry = await self.redis_client.get("CURRENT_EXPIRY_DATE") or "26MAR"
+        # Normalize symbol for Redis lookup and Shoonya search
+        asset_id = idx
+        if idx == "NIFTY": asset_id = "NIFTY50"
+        
+        # Pull from per-asset expiry key
+        expiry = await self.redis_client.get(f"EXPIRY:{asset_id}") or "26MAR"
+        exch = "BFO" if asset_id == "SENSEX" else "NFO"
+        
         search_text = f"{idx} {expiry} {int(strike)} {otype}"
         
         try:
@@ -488,7 +566,7 @@ class DataGateway:
                 self.active_option_tokens[fake_token] = f"{idx} {expiry} {int(strike)} {otype}"
                 return
 
-            res = self.api.search_scrip(exchange='NFO', searchtext=search_text)
+            res = self.api.search_scrip(exchange=exch, searchtext=search_text)
             if res and res.get('stat') == 'Ok':
                 values = res.get('values', [])
                 if values:
@@ -498,7 +576,7 @@ class DataGateway:
                     if token not in self.active_option_tokens:
                         logger.info(f"New ATM Option found: {tsym} (Token: {token})")
                         self.active_option_tokens[token] = tsym
-                        self.api.subscribe(f"NFO|{token}")
+                        self.api.subscribe(f"{exch}|{token}")
         except Exception as e:
             logger.error(f"Option subscription failed for {search_text}: {e}")
 
@@ -536,11 +614,10 @@ class DataGateway:
         try:
             # Mock for simulation
             if os.getenv("SIMULATION_MODE", "false").lower() == "true":
-                lot_sizes = {"NIFTY50": 65, "BANKNIFTY": 30}
+                lot_sizes = {"NIFTY50": 65, "BANKNIFTY": 30, "SENSEX": 10}
             else:
                 # In production: call Shoonya get_contracts() or search_scrip()
-                # For now use known 2026 values as per SRS
-                lot_sizes = {"NIFTY50": 65, "BANKNIFTY": 30}
+                lot_sizes = {"NIFTY50": 65, "BANKNIFTY": 30, "SENSEX": 10}
             logger.info(f"Lot sizes fetched: {lot_sizes}")
         except Exception as e:
             logger.warning(f"Lot size fetch failed ({e}). Using defaults: {lot_sizes}")
@@ -592,6 +669,66 @@ class DataGateway:
             "symbol": symbol,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }))
+
+    # ── PCR Heuristic Ingestion (Phase 0) ────────────────────────────────────
+
+    async def _pcr_ingestion_loop(self):
+        """Fetches live Put-Call Ratio (PCR) for Nifty & BankNifty every 5 minutes."""
+        logger.info("PCR ingestion loop active.")
+        while True:
+            if not is_market_hours() and not self.sim_mode:
+                await asyncio.sleep(60)
+                continue
+
+            try:
+                for symbol in ["NIFTY", "BANKNIFTY"]:
+                    pcr = await self._calculate_pcr(symbol)
+                    if pcr:
+                        await self.redis_client.set(f"live_pcr:{symbol}", pcr)
+                        logger.info(f"📈 PCR {symbol}: {pcr:.2f}")
+            except Exception as e:
+                logger.error(f"PCR ingestion error: {e}")
+            
+            await asyncio.sleep(300) # 5-minute interval
+
+    async def _calculate_pcr(self, symbol: str) -> float | None:
+        """Calculates PCR by summing OI of Puts / Calls for the nearest expiry."""
+        if self.sim_mode:
+            return random.uniform(0.7, 1.3)
+
+        try:
+            # Get current expiry token/price to find ATM
+            spot = self._prices.get(f"{symbol}50" if symbol == "NIFTY" else symbol)
+            if not spot: return None
+
+            expiry = await self.redis_client.get("CURRENT_EXPIRY_DATE") or "26MAR"
+            
+            # Shoonya get_option_chain expects strike for chain discovery
+            # We'll pull strikes +/- 500 around spot to get most the OI
+            res = self.api.get_option_chain(exchange='NFO', tradingsymbol=symbol, strike=round(spot/50)*50, count=10)
+            
+            if res and res.get('stat') == 'Ok':
+                values = res.get('values', [])
+                call_oi = 0
+                put_oi = 0
+                for v in values:
+                    # Filter for current expiry only
+                    # Scrip name: NIFTY26MAR22350CE
+                    tsym = v.get('tsym', '')
+                    if expiry not in tsym: continue
+                    
+                    oi = int(v.get('oi', 0))
+                    if tsym.endswith('CE'):
+                        call_oi += oi
+                    elif tsym.endswith('PE'):
+                        put_oi += oi
+                
+                if call_oi > 0:
+                    return put_oi / call_oi
+                    
+        except Exception as e:
+            logger.error(f"Failed to calculate PCR for {symbol}: {e}")
+        return None
 
     # ── SEBI Circuit Breaker Monitor ─────────────────────────────────────────
 

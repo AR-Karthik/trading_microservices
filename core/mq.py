@@ -3,6 +3,10 @@ import zmq.asyncio
 import json
 import logging
 import os
+import uuid
+import contextvars
+
+correlation_id_ctx = contextvars.ContextVar("correlation_id", default=None)
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -28,6 +32,8 @@ class MQManager:
     
     def __init__(self):
         self.context = zmq.asyncio.Context()
+        # Set a global receive timeout of 5 seconds for all sockets created from this context
+        # Actually, ZMQ context doesn't have a default RCVTIMEO, so we'll set it in create methods
         self.logger = logging.getLogger("MQ")
         # In Docker, bind to 0.0.0.0 to be reachable from other containers
         self.host = "0.0.0.0"
@@ -69,6 +75,7 @@ class MQManager:
         else:
             socket.connect(addr)
             self.logger.info(f"Publisher connected to {addr}")
+        socket.setsockopt(zmq.RCVTIMEO, 5000)
         return socket
 
     def create_subscriber(self, port: int, topics: list = [""], bind: bool = False):
@@ -88,6 +95,7 @@ class MQManager:
                 socket.setsockopt_string(zmq.SUBSCRIBE, topic)
             else:
                 socket.setsockopt(zmq.SUBSCRIBE, topic)
+        socket.setsockopt(zmq.RCVTIMEO, 5000)
         return socket
 
     def create_push(self, port: int, bind: bool = True):
@@ -101,6 +109,7 @@ class MQManager:
         else:
             socket.connect(addr)
             self.logger.info(f"Push socket connected to {addr}")
+        socket.setsockopt(zmq.RCVTIMEO, 5000)
         return socket
 
     def create_pull(self, port: int, bind: bool = False):
@@ -114,6 +123,7 @@ class MQManager:
         else:
             socket.connect(addr)
             self.logger.info(f"Pull socket connected to {addr}")
+        socket.setsockopt(zmq.RCVTIMEO, 5000)
         return socket
 
     def create_dealer(self, port: int, identity: bytes | None = None, bind: bool = False):
@@ -129,6 +139,7 @@ class MQManager:
         else:
             socket.connect(addr)
             self.logger.info(f"Dealer socket connected to {addr}")
+        socket.setsockopt(zmq.RCVTIMEO, 5000)
         return socket
 
     def create_router(self, port: int, bind: bool = True):
@@ -142,6 +153,7 @@ class MQManager:
         else:
             socket.connect(addr)
             self.logger.info(f"Router socket connected to {addr}")
+        socket.setsockopt(zmq.RCVTIMEO, 5000)
         return socket
 
     async def send_dealer(self, socket, data: dict, topic: str = None):
@@ -167,39 +179,32 @@ class MQManager:
         except json.JSONDecodeError:
             return identity, None, payload_raw
 
-    async def send_json(self, socket, data: dict, topic: str = None):
-        """Helper to send JSON payloads, optionally with a topic prefix for Pub/Sub."""
-        payload = json.dumps(data, cls=NumpyEncoder)
-        if topic:
-            await socket.send_string(f"{topic} {payload}")
-        else:
-            await socket.send_string(payload)
+    async def send_json(self, socket, topic, data):
+        """Sends data as a multipart message with correlation ID."""
+        correlation_id = correlation_id_ctx.get() or str(uuid.uuid4())
+        header = {"correlation_id": correlation_id}
+        await socket.send_multipart([
+            topic.encode('utf-8'),
+            json.dumps(header).encode('utf-8'),
+            json.dumps(data, cls=NumpyEncoder).encode('utf-8')
+        ])
 
     async def recv_json(self, socket):
-        """Helper to receive JSON payloads. Returns (topic, data) for Sub sockets."""
-        message = await socket.recv_string()
-        # If it starts with { or [, it's raw JSON without a topic
-        if message.startswith("{") or message.startswith("["):
-            try:
-                return None, json.loads(message)
-            except json.JSONDecodeError:
-                return None, message
+        """Receives data and extracts correlation ID."""
+        multipart = await socket.recv_multipart()
+        if len(multipart) < 3:
+            return None, None
+            
+        topic = multipart[0].decode('utf-8')
+        header = json.loads(multipart[1].decode('utf-8'))
+        data = json.loads(multipart[2].decode('utf-8'))
+        
+        correlation_id = header.get("correlation_id")
+        if correlation_id:
+            correlation_id_ctx.set(correlation_id)
+            
+        return topic, data
 
-        # If there's a space, we assume it's topic + payload (PUB/SUB)
-        if " " in message:
-            parts = message.split(" ", 1)
-            try:
-                return parts[0], json.loads(parts[1])
-            except json.JSONDecodeError:
-                return parts[0], parts[1]
-                
-        # Otherwise just payload (PUSH/PULL or topic-less)
-        try:
-            return None, json.loads(message)
-        except json.JSONDecodeError:
-            return None, message
-
-from datetime import datetime
 import redis.asyncio as redis
 
 # Common Ports Configuration

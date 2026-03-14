@@ -30,7 +30,6 @@ SHOONYA_HOST=https://api.shoonya.com/NorenWClientTP/
 TELEGRAM_BOT_TOKEN=8500172196:AAEGDbqPXTLksEdvpuUVJOBRfBPJvRTNxRM
 TELEGRAM_CHAT_ID=1173952032
 GCP_PROJECT_ID=karthiks-trading-assistant
-GCS_MODEL_BUCKET=karthiks-trading-models
 DASHBOARD_ACCESS_KEY=K_A_R_T_H_I_K_2026_PRO
 SIMULATION_MODE=true
 REDIS_HOST=redis
@@ -112,11 +111,22 @@ mount_disk() {
     fi
 }
 
+validate_mounts() {
+    local points=("/ram_disk" "/mnt/hot_nvme")
+    for p in "${points[@]}"; do
+        if ! mountpoint -q "$p"; then
+            echo "CRITICAL: Mount point $p is NOT active. Storage failure!"
+            exit 1
+        fi
+        echo "✅ Validation: $p is active."
+    done
+}
+
 # Mount NVMe/SSD (Disk 2) for Hot Storage (Redis/Timescale WAL)
 mount_disk "b" "/mnt/hot_nvme"
 
-# Mount Regional SSD/SSD (Disk 3) for Cold Storage (HMM Data)
-mount_disk "c" "/mnt/cold_ssd"
+# Validate all mounts before starting Docker
+validate_mounts
 
 # 5. Launch all services
 # Symlink Docker volumes to the high-performance disks

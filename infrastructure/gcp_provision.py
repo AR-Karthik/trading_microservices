@@ -85,7 +85,6 @@ ENV_VARS = {
     "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", ""),
     "TELEGRAM_CHAT_ID":   os.getenv("TELEGRAM_CHAT_ID", ""),
     "GCP_PROJECT_ID":     PROJECT_ID,
-    "GCS_MODEL_BUCKET":   os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models"),
     "DASHBOARD_ACCESS_KEY": os.getenv("DASHBOARD_ACCESS_KEY", "K_A_R_T_H_I_K_2026_PRO"),
     "SIMULATION_MODE":    os.getenv("SIMULATION_MODE", "false"),
     "REDIS_HOST":         "redis",
@@ -198,9 +197,6 @@ mount_disk() {{
 
 # Mount NVMe/SSD (Disk 2) for Hot Storage (Redis/Timescale WAL)
 mount_disk "b" "/mnt/hot_nvme"
-
-# Mount Regional SSD/SSD (Disk 3) for Cold Storage (HMM Data)
-mount_disk "c" "/mnt/cold_ssd"
 
 # 5. Launch all services
 # Symlink Docker volumes to the high-performance disks
@@ -342,17 +338,7 @@ def create_spot_instance():
         )
     )
 
-    # Disk 3: SSD for Cold Storage
-    disk3 = compute_v1.AttachedDisk(
-        auto_delete=False,
-        boot=False,
-        initialize_params=compute_v1.AttachedDiskInitializeParams(
-            disk_size_gb=200,
-            disk_type=f"zones/{ZONE}/diskTypes/pd-ssd"
-        )
-    )
-
-    instance.disks = [disk1, disk2, disk3]
+    instance.disks = [disk1, disk2]
 
     # Network with Premium Tier & GVNIC
     access_config = compute_v1.AccessConfig(

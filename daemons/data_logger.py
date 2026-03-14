@@ -1,13 +1,13 @@
 """
 daemons/data_logger.py
 ======================
-The HMM Data Lifecycle Collector (SRS Phase 10)
+Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)
 
 Responsibilities:
-- Subscribes to Ports.MARKET_STATE (where engineered features live).
-- Batches writes to 'market_history' in TimescaleDB every 10 seconds.
-- Respects SYSTEM_HALTED and LOGGER_STOP flags for clean data ingestion.
-- Ensures no MOC (Market on Close) noise pollutes the training dataset.
+- Subscribes to Ports.MARKET_STATE (engineered features).
+- Batches writes to 'market_history' in TimescaleDB.
+- Respects SYSTEM_HALTED and LOGGER_STOP flags.
+- Ensures clean data ingestion (all indices: NIFTY, BANKNIFTY, SENSEX).
 """
 
 import asyncio
@@ -94,10 +94,9 @@ class DataLogger:
                     # Columns: time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, vol_term_ratio
                     data_to_insert = []
                     for s in current_batch:
-                        # Extract NIFTY50 spot price from state or fallback
-                        # In MarketSensor, price passed is symbol price.
-                        # For HMM, we usually track NIFTY50.
-                        if s.get("symbol") != "NIFTY50" and s.get("symbol") != "BANKNIFTY":
+                        # Log all indices and heavyweight signals
+                        symbol = s.get("symbol")
+                        if not symbol:
                             continue
                             
                         data_to_insert.append((

@@ -19,12 +19,13 @@ import collections
 import json
 import logging
 import sys
+import time
 from datetime import datetime, timezone
 
-import redis
+import redis.asyncio as redis
 
 from core.mq import MQManager, Ports, Topics
-from core.margin import MarginManager
+from core.margin import AsyncMarginManager
 
 logger = logging.getLogger("StratGamma")
 logging.basicConfig(level=logging.INFO,
@@ -46,8 +47,8 @@ class LongGammaMomentumStrategy:
     def __init__(self, redis_client: redis.Redis, mq: MQManager, execution_type: str = "Paper"):
         self._redis = redis_client
         self._mq = mq
-        self._push = mq.create_push(Ports.ORDERS, bind=False)
-        self._margin = MarginManager(self._redis)
+        self._push = mq.create_publisher(Ports.ORDERS, bind=False)
+        self._margin = AsyncMarginManager(self._redis)
         self.execution_type = execution_type
         self._active = False
         self._position = 0  # number of lots currently held
@@ -78,14 +79,25 @@ class LongGammaMomentumStrategy:
             return False
 
         # Guard 1: Regime (enforced upstream by MetaRouter — double-check Redis)
-        if self._redis.get("gex_sign") != "NEGATIVE":
+        if await self._redis.get("gex_sign") != "NEGATIVE":
             return False
-        if self._redis.get("hmm_regime") != "TRENDING":
+        if await self._redis.get("hmm_regime") != "TRENDING":
             return False
+
+        # Guard 1.5: Sentiment Conviction (Phase 12 Integration)
+        try:
+            sentiment = float(await self._redis.get("sentiment_score") or 0.0)
+            # If sentiment is severely opposing our trend, veto
+            # Gamma Strategy buys on momentum. If sentiment is < -0.3, it's a bearish headwind.
+            if sentiment < -0.3:
+                logger.warning(f"STRAT_GAMMA: Vetoed by Sentiment ({sentiment})")
+                return False
+        except (TypeError, ValueError):
+            pass
 
         # Guard 2: DTE ≤ 2 (read from options chain snapshot in Redis)
         try:
-            dte = int(self._redis.get("current_dte") or 99)
+            dte = int(await self._redis.get("current_dte") or 99)
         except (TypeError, ValueError):
             dte = 99
         if dte > self.MAX_DTE:
@@ -93,7 +105,7 @@ class LongGammaMomentumStrategy:
 
         # Guard 3: ATM Delta ∈ [0.45, 0.55]
         try:
-            delta = float(self._redis.get("atm_delta") or 0.5)
+            delta = float(await self._redis.get("atm_delta") or 0.5)
         except (TypeError, ValueError):
             delta = 0.5
         if not (self.TARGET_DELTA_LOW <= delta <= self.TARGET_DELTA_HIGH):
@@ -101,7 +113,7 @@ class LongGammaMomentumStrategy:
 
         # Guard 4: Log-OFI Z > +2.0
         try:
-            ofi_z = float(self._redis.get("log_ofi_zscore") or 0.0)
+            ofi_z = float(await self._redis.get("log_ofi_zscore") or 0.0)
         except (TypeError, ValueError):
             ofi_z = 0.0
         if ofi_z < self.OFI_Z_THRESHOLD:
@@ -114,7 +126,7 @@ class LongGammaMomentumStrategy:
 
         # Guard 6: Top-5 correlation > 0.50
         try:
-            disp = float(self._redis.get("dispersion_coeff") or 0.5)
+            disp = float(await self._redis.get("dispersion_coeff") or 0.5)
             # High dispersion_coeff means CORRELATED (Pearson ≈ 1.0 across stocks)
             if disp < self.CORR_THRESHOLD:
                 return False
@@ -131,8 +143,13 @@ class LongGammaMomentumStrategy:
         recent = [p for ts, p in self._price_window if ts >= cutoff]
         if len(recent) < 10:
             return False
-        window_high = max(recent[:-1])
-        window_low = min(recent[:-1])
+        # Calculate window high/low excluding current spot (the latest entry)
+        # Slicing correctly creates a new list segment
+        window_history = recent[:-1]
+        if not window_history:
+            return False
+        window_high = max(window_history)
+        window_low = min(window_history)
         return spot > window_high or spot < window_low
 
     # ── Order Dispatch ────────────────────────────────────────────────────────
@@ -146,7 +163,7 @@ class LongGammaMomentumStrategy:
         
         # --- Hard Global Budget Check ---
         required_margin = spot * lot_size
-        if not self._margin.reserve(required_margin, self.execution_type):
+        if not await self._margin.reserve(required_margin, self.execution_type):
             logger.error(f"❌ MARGIN REJECTED: {symbol} needs ₹{required_margin:,.2f} but {self.execution_type} budget is exhausted.")
             # Veto the trade, do not dispatch
             return None
@@ -167,11 +184,11 @@ class LongGammaMomentumStrategy:
         }
 
         # Register in pending_orders for reconciler
-        self._redis.hset("pending_orders", order_id, json.dumps({
+        await self._redis.hset("pending_orders", order_id, json.dumps({
             **order, "broker_order_id": None
         }))
 
-        await self._mq.send_json(self._push, order, topic=Topics.ORDER_INTENT)
+        await self._mq.send_json(self._push, Topics.ORDER_INTENT, order)
         self._position += lot_size
         self._entry_price = spot
         self._entry_time = time.time()
@@ -200,7 +217,8 @@ async def run_strategy():
     cmd_sub = mq.create_subscriber(Ports.SYSTEM_CMD, topics=[LongGammaMomentumStrategy.STRATEGY_ID])
     state_sub = mq.create_subscriber(Ports.MARKET_STATE, topics=["STATE"])
 
-    lot_size = int(r.hget("lot_sizes", "NIFTY50") or 65)
+    lot_size_raw = await r.hget("lot_sizes", "NIFTY50")
+    lot_size = int(lot_size_raw or 65)
 
     async def cmd_handler():
         while True:
@@ -213,7 +231,8 @@ async def run_strategy():
         while True:
             _, state = await mq.recv_json(state_sub)
             if state:
-                lot_size = int(r.hget("lot_sizes", "NIFTY50") or lot_size)
+                lot_size_raw = await r.hget("lot_sizes", "NIFTY50")
+                lot_size = int(lot_size_raw or lot_size)
                 # DTE-based sizing: Wed/Thu=100%, Fri-Tue=50%
                 day = datetime.now().strftime("%A")
                 sized_lots = lot_size if day in ("Wednesday", "Thursday") else max(1, lot_size // 2)

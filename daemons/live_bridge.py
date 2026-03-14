@@ -8,24 +8,43 @@ import hashlib
 import time
 from collections import deque
 from datetime import datetime, timezone
+from redis import asyncio as redis
+from functools import partial
 
 import asyncpg
-import redis.asyncio as redis
-from dotenv import load_dotenv
+from core.logger import setup_logger
 from core.mq import MQManager, Ports, Topics
 from core.alerts import send_cloud_alert
 from core.execution_wrapper import MultiLegExecutor
+from core.db_retry import with_db_retry
 from NorenRestApiPy.NorenApi import NorenApi
+from dotenv import load_dotenv
 
 try:
     import uvloop
 except ImportError:
     uvloop = None
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("LiveBridge-Shoonya")
+logger = setup_logger("LiveBridge", log_file="logs/live_bridge.log")
 
-DB_DSN = "postgres://trading_user:trading_pass@localhost:5432/trading_db"
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_DSN = f"postgres://trading_user:trading_pass@{DB_HOST}:5432/trading_db"
+
+class TokenBucketRateLimiter:
+    def __init__(self, rate=8, per=1.0):
+        self.rate = rate
+        self.per = per
+        self.tokens = rate
+        self.last_refill = time.monotonic()
+    
+    async def acquire(self):
+        while self.tokens < 1:
+            await asyncio.sleep(0.05)
+            elapsed = time.monotonic() - self.last_refill
+            self.tokens = min(self.rate, self.tokens + elapsed * (self.rate / self.per))
+            self.last_refill = time.monotonic()
+        self.tokens -= 1
 
 class LiveExecutionEngine:
     def __init__(self, mq_manager, pool, redis_client):
@@ -46,8 +65,9 @@ class LiveExecutionEngine:
         self.is_kill_switch_triggered = False
         self.total_realized_pnl = 0.0
         self.multileg_executor = MultiLegExecutor(self)
-        self.order_timestamps = deque()         # Layer 1: 10 OPS token bucket
-        self.minute_timestamps = deque()        # Layer 2: 190req/60s rolling window
+        
+        # Spec 11.5: Token Bucket Rate Limiter
+        self.rate_limiter = TokenBucketRateLimiter(rate=8, per=1.0)
 
         ws_url = self.host.replace('https', 'wss').replace('NorenWClientTP', 'NorenWSTP')
         if not ws_url.endswith('/'): ws_url += '/'
@@ -56,6 +76,7 @@ class LiveExecutionEngine:
 
     async def authenticate(self):
         """Logs into the broker API."""
+        load_dotenv()
         logger.info("Authenticating Execution Bridge with Shoonya APIs...")
         
         pwd = hashlib.sha256(self.pwd.encode('utf-8')).hexdigest()
@@ -65,14 +86,9 @@ class LiveExecutionEngine:
         # We need to run synchronous requests.post login in a thread pool ideally
         # to not block the asyncio loop, but startup is okay.
         loop = asyncio.get_running_loop()
-        res = await loop.run_in_executor(None, lambda: self.api.login(
-            userid=self.user, 
-            password=pwd, 
-            twoFA=self.factor2, 
-            vendor_code=self.vc, 
-            api_secret=app_key, 
-            imei=self.imei
-        ))
+        res = await loop.run_in_executor(None, partial(self.api.login, 
+            userid=self.user, password=pwd, twoFA=self.factor2, 
+            vendor_code=self.vc, api_secret=app_key, imei=self.imei))
         
         if res and res.get('stat') == 'Ok':
             logger.info("✅ Live Bridge Authentication Successful.")
@@ -81,6 +97,18 @@ class LiveExecutionEngine:
             logger.error(f"❌ Live Bridge Auth Failed: {res}")
             return False
 
+    async def _reconnect_pool(self):
+        """Phase 11.8: Attempt to reconnect the DB pool on failure."""
+        try:
+            if self.pool:
+                await self.pool.close()
+            self.pool = await asyncpg.create_pool(DB_DSN, command_timeout=10.0)
+            logger.info("✅ Live DB Pool reconnected successfully.")
+        except Exception as e:
+            logger.error(f"❌ Failed to reconnect Live DB pool: {e}")
+            raise
+
+    @with_db_retry(max_retries=3, backoff=0.5)
     async def update_portfolio(self, conn, execution, fees):
         """Maintains the running real portfolio state in the DB."""
         symbol = execution['symbol']
@@ -116,9 +144,7 @@ class LiveExecutionEngine:
             closed_qty = min(abs(current_qty), qty)
             realized_pnl += float(closed_qty) * (float(avg_price) - float(price)) - float(fees)
             if new_qty == 0: new_avg_price = 0.0
-        elif current_qty >= 0 and qty > 0:
-            new_avg_price = (float(current_qty * avg_price) + float(qty * price)) / float(new_qty)
-        elif current_qty <= 0 and qty < 0:
+        elif abs(new_qty) > abs(current_qty):
             new_avg_price = (float(abs(current_qty) * avg_price) + float(abs(qty) * price)) / float(abs(new_qty))
             
         await conn.execute(
@@ -148,34 +174,12 @@ class LiveExecutionEngine:
         """Dispatches real network requests to Shoonya routing engine."""
         action_map = {"BUY": "B", "SELL": "S"}
         
-        # Assuming NSE Equities for the dummy symbols. In prod we extract exchange prefix from the symbol mapping.
-        exchange = 'NSE'
+        exchange = 'NSE' # Fallback
         symbol = order['symbol']
         action = action_map.get(order['action'], 'B')
         
-        # --- Dual-Layer Rate Limiting (SRS §5) ---
-        # Layer 1: 10 OPS Token Bucket (SEBI Algo Rule)
-        while True:
-            now = time.time()
-            while self.order_timestamps and self.order_timestamps[0] <= now - 1.0:
-                self.order_timestamps.popleft()
-            if len(self.order_timestamps) < 10:
-                self.order_timestamps.append(now)
-                break
-            wait_time = self.order_timestamps[0] + 1.001 - now
-            await asyncio.sleep(max(0, wait_time))
-
-        # Layer 2: 190req/60s Rolling Window (prevents Shoonya 200/min lockout)
-        while True:
-            now = time.time()
-            while self.minute_timestamps and self.minute_timestamps[0] <= now - 60.0:
-                self.minute_timestamps.popleft()
-            if len(self.minute_timestamps) < 190:
-                self.minute_timestamps.append(now)
-                break
-            wait_time = self.minute_timestamps[0] + 60.001 - now
-            logger.warning(f"Rate limiter L2: 190req/60s reached. Waiting {wait_time:.2f}s")
-            await asyncio.sleep(max(0, wait_time))
+        # --- Spec 11.5: Rate Limiting ---
+        await self.rate_limiter.acquire()
 
         logger.warning(f"🚀 SENDING LIVE MKT ORDER: {action} {order['quantity']} {symbol}")
         
@@ -187,37 +191,23 @@ class LiveExecutionEngine:
             tradingsymbol=symbol,
             quantity=order['quantity'],
             disclosedquantity=0,
-            price_type='MKT',
-            price=0,
+            price_type=order.get('order_type', 'MKT'),
+            price=order.get('price', 0),
             retention='DAY'
         ))
         
         if res and res.get('stat') == 'Ok':
             broker_oid = res['norenordno']
             logger.info(f"✅ Live Order Accepted. Shoonya ID: {broker_oid}")
-
-            # Update pending_orders with broker_order_id so reconciler can poll it
-            local_oid = order.get('order_id')
-            if local_oid:
-                import json as _json
-                existing_raw = await self.redis.hget('pending_orders', local_oid)
-                if existing_raw:
-                    existing = _json.loads(existing_raw)
-                    existing['broker_order_id'] = broker_oid
-                    await self.redis.hset('pending_orders', local_oid, _json.dumps(existing))
-
-            tick_str = await self.redis.get(f"latest_tick:{symbol}")
-            exec_price = float(order['price'])
-            if tick_str:
-                exec_price = float(json.loads(tick_str)['price'])
-
+            
+            # Reconstruct execution record for DB and confirmation
             return {
                 "id": broker_oid,
                 "time": datetime.now(timezone.utc),
                 "symbol": symbol,
                 "action": order['action'],
                 "quantity": order['quantity'],
-                "price": exec_price,
+                "price": order.get('price', 0.0), # Will be reconciled later
                 "fees": 20.0,
                 "strategy_id": order['strategy_id'],
                 "execution_type": "Actual"
@@ -225,6 +215,30 @@ class LiveExecutionEngine:
         else:
             logger.error(f"❌ Live Order Rejected by Broker: {res}")
             return None
+
+    async def get_last_price(self, symbol):
+        """Fetches last traded price for an asset."""
+        tick_str = await self.redis.get(f"latest_tick:{symbol}")
+        if tick_str:
+            return float(json.loads(tick_str).get('price', 0.0))
+        return 0.0
+
+    async def get_order_status(self, order_id):
+        """Polls broker for order status."""
+        loop = asyncio.get_running_loop()
+        res = await loop.run_in_executor(None, partial(self.api.single_order_history, orderno=order_id))
+        if res and isinstance(res, list) and len(res) > 0:
+            status = res[0].get('status')
+            if status == 'COMPLETE': return 'COMPLETE'
+            if status == 'REJECTED': return 'REJECTED'
+            if status == 'CANCELED': return 'CANCELLED'
+            return 'PENDING'
+        return 'UNKNOWN'
+
+    async def cancel_order(self, order_id):
+        """Cancels a pending order."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, partial(self.api.cancel_order, orderno=order_id))
 
     async def handle_order(self, order, trade_pub_socket):
         """Async task handler for a single order to avoid blocking the main loop."""
@@ -255,18 +269,31 @@ class LiveExecutionEngine:
                         INSERT INTO trades (id, time, symbol, action, quantity, price, fees, strategy_id, execution_type)
                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                         """,
-                        uuid.UUID(int=hash(execution['id'])),
+                        str(uuid.uuid4()), # Use unique ID for trade table
                         execution['time'], execution['symbol'], execution['action'],
                         execution['quantity'], execution['price'], execution['fees'], 
                         execution['strategy_id'], execution['execution_type']
                     )
                     await self.update_portfolio(conn, execution, execution['fees'])
             
-            # --- Resilience: Clear Pending Journal ---
-            # Order successfully written to DB and confirmed by broker execution state
-            await self.redis.delete(pending_key)
-            # lock:{symbol} is cleared by order_reconciler.py as per spec.
+            # --- Phase 10: Triple-Barrier Handoff Ping ---
+            handoff_payload = {
+                "parent_uuid": order.get('parent_uuid'), 
+                "symbol": order['symbol'],
+                "strategy_id": order['strategy_id'],
+                "execution_type": "Actual"
+            }
+            await self.redis.publish("NEW_POSITION_ALERTS", json.dumps(handoff_payload))
             
+            # Clear pending journal on fill
+            await self.redis.delete(f"Pending_Journal:{order['order_id']}")
+            
+            # 4. Broadcast execution confirmation via ZMQ
+            await trade_pub_socket.send_json({
+                "id": execution["id"],
+                "symbol": execution["symbol"],
+                "price": float(execution["price"]),
+                "type": "EXECUTION"
             }, topic=f"EXEC.{execution['symbol']}")
             
             # --- Pub/Sub Alert: Transaction Confirmation ---
@@ -279,13 +306,11 @@ class LiveExecutionEngine:
             
             # Publish live P&L and lot count to Redis for cloud_publisher and UI
             await self.redis.set("DAILY_REALIZED_PNL_LIVE", str(self.total_realized_pnl))
-            # Increment active lots count; decremented on SELL/CLOSE by reconciler
             if execution["action"] == "BUY":
                 await self.redis.incr("ACTIVE_LOTS_COUNT")
             elif execution["action"] == "SELL":
                 await self.redis.decr("ACTIVE_LOTS_COUNT")
             
-            # Check kill switch after every trade execution
             await self.check_kill_switch()
 
     async def run(self, pull_socket):
@@ -300,19 +325,29 @@ class LiveExecutionEngine:
                 topic, order = await self.mq.recv_json(pull_socket)
                 if not order: continue
                     
-                exec_type = order.get('execution_type', 'Paper')
+                exec_type = order.get('execution_type', 'Actual')
                 if exec_type != "Actual":
                     continue
                     
+                # Phase 13.3: Command Handling
+                if order.get("cmd") == "FORCE_MARKET_ORDER":
+                    logger.warning(f"⚠️ FORCING MARKET ORDER: {order.get('symbol')} Qty={order.get('qty')}")
+                    order["order_type"] = "MKT"
+                    order["action"] = order.get("side", order.get("action"))
+                    order["quantity"] = order.get("qty", order.get("quantity"))
+                    # Fall through to standard handle_order
+                elif order.get("cmd") == "BASKET_ROLLBACK":
+                    # Rollbacks should technically go through the rollback listener, 
+                    # but if sent here, we handle it too.
+                    asyncio.create_task(self._handle_basket_rollback(order.get("parent_uuid")))
+                    continue
+
                 logger.info(f"[LIVE SIGNAL] Queueing order: {order.get('action', 'MULTI_LEG')} {order.get('quantity', 'N/A')} {order.get('symbol', 'N/A')}")
                 
                 # --- Recommendation 4: Fire-and-Forget Execution ---
-                # We don't 'await' the full handler, we fire a task
                 if order.get('type') == 'MULTI_LEG':
-                    # Recommendation 5: Multi-Leg Atomic Execution
                     asyncio.create_task(self.multileg_executor.execute_legs(order['legs']))
                 else:
-                    # Regular single order
                     asyncio.create_task(self.handle_order(order, trade_pub_socket))
                 
             except asyncio.CancelledError:
@@ -363,14 +398,62 @@ class LiveExecutionEngine:
                 except Exception as e:
                     logger.error(f"Live Panic exception: {e}")
 
+    async def _handle_basket_rollback(self, parent_uuid: str):
+        """Phase 13.3: Rapid Liquidation of all Live legs in a basket."""
+        if not parent_uuid or parent_uuid == "NONE": return
+        
+        logger.critical(f"🚨 LIVE ROLLBACK: Closing all positions for {parent_uuid}")
+        async with self.pool.acquire() as conn:
+            # Query our internal truth for this basket
+            positions = await conn.fetch(
+                "SELECT symbol, quantity FROM portfolio WHERE parent_uuid = $1 AND quantity != 0 AND execution_type = 'Actual'",
+                parent_uuid
+            )
+            
+            for pos in positions:
+                action = "SELL" if pos['quantity'] > 0 else "BUY"
+                qty = abs(pos['quantity'])
+                symbol = pos['symbol']
+                
+                logger.critical(f"Rollback Fire: {action} {qty} {symbol}")
+                # Dispatch market order to broker
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, lambda a=action, s=symbol, q=qty: self.api.place_order(
+                    buy_or_sell=a[0], product_type='I', exchange='NSE', tradingsymbol=s, 
+                    quantity=q, disclosedquantity=0, price_type='MKT', price=0, retention='DAY'
+                ))
+            
+            # Clear them from portfolio
+            await conn.execute("UPDATE portfolio SET quantity = 0, avg_price = 0 WHERE parent_uuid = $1 AND execution_type = 'Actual'", parent_uuid)
+            
+        logger.info(f"✅ Live Rollback complete for {parent_uuid}")
+
+    async def cmd_listener(self):
+        """Listens for systemic commands including Rollbacks via SYSTEM_CMD."""
+        sub = self.mq.create_subscriber(Ports.SYSTEM_CMD, topics=["GLOBAL", "RECONCILER"])
+        logger.info("Live Command listener active on SYSTEM_CMD.")
+        while True:
+            try:
+                topic, msg = await self.mq.recv_json(sub)
+                if msg and msg.get("cmd") == "BASKET_ROLLBACK":
+                    asyncio.create_task(self._handle_basket_rollback(msg.get("parent_uuid")))
+            except Exception as e:
+                logger.error(f"Cmd listener error: {e}")
+                await asyncio.sleep(1)
+
+async def _run_heartbeat(r):
+    from core.health import HeartbeatProvider
+    hb = HeartbeatProvider("LiveBridge", r)
+    await hb.run_heartbeat()
+
 async def main():
     logger.info("Initializing Live Bridge...")
     
     mq = MQManager()
     pull_socket = mq.create_subscriber(Ports.ORDERS, topics=[Topics.ORDER_INTENT], bind=True)
-    redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+    redis_client = redis.Redis(host=REDIS_HOST, port=6379, db=0, decode_responses=True, socket_timeout=5.0)
     
-    pool = await asyncpg.create_pool(DB_DSN)
+    pool = await asyncpg.create_pool(DB_DSN, command_timeout=10.0)
     
     engine = LiveExecutionEngine(mq, pool, redis_client)
     auth_success = await engine.authenticate()
@@ -379,7 +462,9 @@ async def main():
         try:
             await asyncio.gather(
                 engine.run(pull_socket),
-                engine.panic_listener()
+                engine.panic_listener(),
+                engine.cmd_listener(),       # Phase 13.3
+                _run_heartbeat(redis_client), # Phase 9: UI & Observability
             )
         except KeyboardInterrupt:
             logger.info("Shutting down live bridge safely.")

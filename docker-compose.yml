@@ -1,4 +1,5 @@
 services:
+  # 1. Infrastructure (must be healthy first)
   redis:
     image: redis:alpine
     container_name: trading_redis
@@ -6,7 +7,7 @@ services:
       - "6379:6379"
     volumes:
       - ./data/redis:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --save 900 1 --save 300 10
     restart: always
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -34,12 +35,12 @@ services:
       retries: 10
     cpuset: "3"
 
+  # 2. Data Ingestion (writes to Redis/SHM)
   data_gateway:
-    image: trading-app:latest
+    image: trading-app:v1.0.0
     build:
       context: .
       dockerfile: Dockerfile.local
-      network: host
     container_name: data_gateway
     command: python -m daemons.data_gateway
     depends_on:
@@ -51,15 +52,12 @@ services:
     volumes:
       - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
 
+  # 3. Market State (Depends on data_gateway ticks)
   market_sensor:
-    image: trading-app:latest
+    image: trading-app:v1.0.0
     container_name: market_sensor
     command: python -m daemons.market_sensor
     depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
       data_gateway:
         condition: service_started
     restart: always
@@ -68,56 +66,70 @@ services:
     volumes:
       - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
 
+  # 4. HMM Engines (Depends on market_sensor state)
+  hmm_engine_nifty:
+    image: trading-app:v1.0.0
+    container_name: hmm_engine_nifty
+    command: python -m daemons.hmm_engine --asset NIFTY --core 1
+    depends_on:
+      market_sensor:
+        condition: service_started
+    restart: always
+    env_file: .env
+    cpuset: "1"
+    volumes:
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+
+  hmm_engine_banknifty:
+    image: trading-app:v1.0.0
+    container_name: hmm_engine_banknifty
+    command: python -m daemons.hmm_engine --asset BANKNIFTY --core 1
+    depends_on:
+      market_sensor:
+        condition: service_started
+    restart: always
+    env_file: .env
+    cpuset: "1"
+    volumes:
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+
+  hmm_engine_sensex:
+    image: trading-app:v1.0.0
+    container_name: hmm_engine_sensex
+    command: python -m daemons.hmm_engine --asset SENSEX --core 1
+    depends_on:
+      market_sensor:
+        condition: service_started
+    restart: always
+    env_file: .env
+    cpuset: "1"
+    volumes:
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+
+  # 5. Meta Router (Depends on HMM regime)
   meta_router:
-    image: trading-app:latest
+    image: trading-app:v1.0.0
     container_name: meta_router
     command: python -m daemons.meta_router
     depends_on:
-      redis:
-        condition: service_healthy
+      hmm_engine_nifty:
+        condition: service_started
+      hmm_engine_banknifty:
+        condition: service_started
+      hmm_engine_sensex:
+        condition: service_started
     restart: always
     env_file: .env
     cpuset: "1"
     volumes:
       - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
 
-  strategy_engine:
-    image: trading-app:latest
-    container_name: strategy_engine
-    command: python -m daemons.strategy_engine
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-      data_gateway:
-        condition: service_started
-    restart: always
-    env_file: .env
-    cpuset: "2"
-    volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
-
-  liquidation_daemon:
-    image: trading-app:latest
-    container_name: liquidation_daemon
-    command: python -m daemons.liquidation_daemon
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: always
-    env_file: .env
-    cpuset: "3"
-    volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
-
+  # 6. Trading Bridges: Paper (Schema Creation First)
   paper_bridge:
-    image: trading-app:latest
+    image: trading-app:v1.0.0
     container_name: paper_bridge
     command: python -m daemons.paper_bridge
     depends_on:
-      redis:
-        condition: service_healthy
       timescaledb:
         condition: service_healthy
     restart: always
@@ -125,15 +137,14 @@ services:
     volumes:
       - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
 
+  # 7. Trading Bridges: Live (Depends on paper_bridge for schema)
   live_bridge:
-    image: trading-app:latest
+    image: trading-app:v1.0.0
     container_name: live_bridge
     command: python -m daemons.live_bridge
     depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
+      paper_bridge:
+        condition: service_started
     restart: always
     env_file: .env
     volumes:
@@ -142,8 +153,82 @@ services:
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
 
+  # 8. Strategy Engine (Depends on all above)
+  strategy_engine:
+    image: trading-app:v1.0.0
+    container_name: strategy_engine
+    command: python -m daemons.strategy_engine
+    depends_on:
+      meta_router:
+        condition: service_started
+      live_bridge:
+        condition: service_started
+      data_gateway:
+        condition: service_started
+    restart: always
+    env_file: .env
+    cpuset: "2"
+    volumes:
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+
+  # 9. Liquidation Daemon (Depends on position data)
+  liquidation_daemon:
+    image: trading-app:v1.0.0
+    container_name: liquidation_daemon
+    command: python -m daemons.liquidation_daemon
+    depends_on:
+      strategy_engine:
+        condition: service_started
+    restart: always
+    env_file: .env
+    cpuset: "3"
+    volumes:
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+
+  # 10. Order Reconciler (Depends on order data)
+  order_reconciler:
+    image: trading-app:v1.0.0
+    container_name: order_reconciler
+    command: python -m daemons.order_reconciler
+    depends_on:
+      strategy_engine:
+        condition: service_started
+    restart: always
+    env_file: .env
+    volumes:
+      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+
+  # 11. System Controller (Lifecycle management)
+  system_controller:
+    image: trading-app:v1.0.0
+    container_name: system_controller
+    command: python -m daemons.system_controller
+    depends_on:
+      strategy_engine:
+        condition: service_started
+    restart: always
+    env_file: .env
+    volumes:
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+      - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
+
+  # 12. Telegram Alerter (Monitoring)
+  telegram_alerter:
+    image: trading-app:v1.0.0
+    container_name: telegram_alerter
+    command: python -m utils.telegram_bot
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+    env_file: .env
+    cpuset: "3"
+
+  # 13. Cloud Publisher (Sync to cloud)
   cloud_publisher:
-    image: trading-app:latest
+    image: trading-app:v1.0.0
     container_name: cloud_publisher
     command: python -m daemons.cloud_publisher
     depends_on:
@@ -158,17 +243,7 @@ services:
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
 
-  telegram_alerter:
-    image: trading-app:latest
-    container_name: telegram_alerter
-    command: python -m utils.telegram_bot
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: always
-    env_file: .env
-    cpuset: "3"
-
+  # 14. Dashboard API & Frontend (UI - depends on all data sources)
   dashboard_api:
     image: trading-app:latest
     container_name: dashboard_api
@@ -185,23 +260,6 @@ services:
     volumes:
       - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
-    environment:
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-
-  system_controller:
-    image: trading-app:latest
-    container_name: system_controller
-    command: python -m daemons.system_controller
-    depends_on:
-      redis:
-        condition: service_healthy
-      data_gateway:
-        condition: service_started
-    restart: always
-    env_file: .env
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
-      - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
 

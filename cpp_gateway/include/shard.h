@@ -9,6 +9,7 @@ class Shard {
 public:
     Shard(std::string id, std::string symbols, int target_core, int exchange_id);
     void run(std::atomic<bool>& global_running);
+    void load_state();
 
 private:
     std::string shard_id;

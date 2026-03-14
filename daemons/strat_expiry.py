@@ -12,8 +12,8 @@ class ExpiryScalper:
     Regime: EXPIRY / VOLATILE.
     Focus: Rapid scalp of ATM/OTM options on expiry days.
     """
-    def __init__(self, symbols=["NIFTY50", "BANKNIFTY"]):
-        self.mq = MQManager()
+    def __init__(self, mq: MQManager = None, symbols=["NIFTY50", "BANKNIFTY"]):
+        self.mq = mq or MQManager()
         self.symbols = symbols
         self.state = "SLEEP"
         self.positions = {}

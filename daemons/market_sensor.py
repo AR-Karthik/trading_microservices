@@ -1,23 +1,21 @@
 """
 daemons/market_sensor.py
 ========================
-Institutional Microstructure & GIL Mitigation (SRS §2.3)
+Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)
 
 Architecture:
-  Main asyncio loop  →  ZMQ I/O + Polars feature prep only
-  ComputeProcess     →  All heavy math (GEX, dispersion, Greeks) in isolated OS process
-  IPC               →  multiprocessing.Queue (compute_in → compute_out)
+  Main asyncio loop  →  ZMQ I/O + Polars feature prep
+  ComputeProcess     →  Heavy math (GEX, dispersion, Greeks) 
+  IPC               →  multiprocessing.Queue
 
-Signals computed:
-  - Log-OFI Z-score (stationarized Order Flow Imbalance)
-  - Iterative Zero-Gamma Level (Black-Scholes root-find)
-  - Index Dispersion (rolling 3-min Pearson correlation matrix)
-  - Volatility Term Structure (near/far IV ratio)
-  - Vanna & Charm flags (toxic option detection)
-  - Vanna & Charm flags (toxic option detection)
-  - VPIN (Volume-Synchronized Probability of Informed Trading)
-  - CVD Absorption (bullish divergence signal)
-  - Futures Basis deviation (price dislocation flag)
+Signals computed for NIFTY, BANKNIFTY, SENSEX:
+  - Log-OFI Z-score
+  - Zero-Gamma Level
+  - Index Dispersion
+  - Volatility Term Structure
+  - Vanna & Charm
+  - VPIN
+  - CVD Absorption
   - Composite Alpha Score
 """
 
@@ -37,19 +35,11 @@ import polars as pl
 import redis.asyncio as redis
 
 import os
-from core.shm import ShmManager
-from core.mq import MQManager, Ports, Topics
+from core.logger import setup_logger
+from core.shm import ShmManager, SignalVector
+from core.greeks import BlackScholes
+from core.mq import MQManager, Ports, Topics, NumpyEncoder
 from core.alerts import send_cloud_alert
-
-class NumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return super(NumpyEncoder, self).default(obj)
 
 # Try to import Rust extension for high-performance math
 try:
@@ -58,12 +48,7 @@ try:
 except ImportError:
     HAS_RUST_ENGINE = False
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    stream=sys.stdout
-)
-logger = logging.getLogger("MarketSensor")
+logger = setup_logger("MarketSensor", log_file="logs/market_sensor.log")
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -74,7 +59,56 @@ RISK_FREE_RATE = 0.065    # 6.5% RBI repo rate
 NEAR_TERM_DTE = 2         # days for "near term" IV
 FAR_TERM_DTE = 30         # days for "far term" IV
 
-# ── Subprocess: Heavy Compute Process ───────────────────────────────────────
+# ── Signal Math Helpers (SRS §2.3) ───────────────────────────────────────────
+
+def find_zero_gamma_level(prices_arr: np.ndarray, current_spot: float) -> float:
+    """
+    Estimates the Zero Gamma Level (ZGL) where dealer hedging flips from short to long gamma.
+    Note: A true ZGL requires dealer positioning data. This is a heuristic based on
+    volume-weighted clusters (Volume Nodes) which often act as gamma pin levels.
+    """
+    if len(prices_arr) == 0:
+        return current_spot
+    # Heuristic: Weighted average of the last 100 prices (simulating liquidity clustering)
+    if len(prices_arr) >= 100:
+        return float(np.mean(prices_arr[-100:]))
+    return float(np.mean(prices_arr))
+
+def calculate_kaufman_er(series: np.ndarray, window: int = 10) -> float:
+    """
+    Kaufman Efficiency Ratio: Net Change / Sum of Absolute Changes.
+    Requires window + 1 points to get 'window' returns.
+    """
+    if len(series) < window + 1:
+        # print(f"DEBUG: len(series)={len(series)} window={window}")
+        return 0.5
+    net_change = abs(series[-1] - series[-(window+1)])
+    # Sum of absolute differences over the window
+    sum_abs_changes = np.sum(np.abs(np.diff(series[-(window+1):])))
+    return float(net_change / sum_abs_changes) if sum_abs_changes > 0 else 0.0
+
+def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int = 14) -> float:
+    """Simplified ADX calculation for trend strength."""
+    if len(close) < window * 2:
+        return 20.0
+    
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    tr = np.maximum(high[1:] - low[1:], 
+                    np.maximum(np.abs(high[1:] - close[:-1]), 
+                               np.abs(low[1:] - close[:-1])))
+    
+    # Simple moving average for smoothing in this high-speed context
+    tr_smooth = np.mean(tr[-window:])
+    plus_di = 100 * (np.mean(plus_dm[-window:]) / tr_smooth) if tr_smooth > 0 else 0
+    minus_di = 100 * (np.mean(minus_dm[-window:]) / tr_smooth) if tr_smooth > 0 else 0
+    
+    dx = 100 * (np.abs(plus_di - minus_di) / (plus_di + minus_di)) if (plus_di + minus_di) > 0 else 0
+    return float(dx)
 
 def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
     """
@@ -85,85 +119,25 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
     import numpy as np
     from scipy.optimize import brentq  # type: ignore
     from scipy.stats import norm       # type: ignore
-
-    logger = logging.getLogger("ComputeWorker")
-    logging.basicConfig(level=logging.WARNING)
+    from core.greeks import BlackScholes
 
     def bs_call_price(S, K, T, r, sigma):
-        if T <= 0 or sigma <= 0:
-            return max(0.0, S - K)
-        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
-        return S * norm.cdf(d1) - K * math.exp(-r * T) * norm.cdf(d2)
+        return BlackScholes.call_price(S, K, T, r, sigma)
 
     def bs_gamma(S, K, T, r, sigma):
-        if T <= 0 or sigma <= 0:
-            return 0.0
-        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
-        return norm.pdf(d1) / (S * sigma * math.sqrt(T))
+        return BlackScholes.gamma(S, K, T, r, sigma)
 
     def bs_delta(S, K, T, r, sigma, opt_type="call"):
-        if T <= 0:
-            return 0.0
-        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
-        return norm.cdf(d1) if opt_type == "call" else norm.cdf(d1) - 1
+        return BlackScholes.delta(S, K, T, r, sigma, opt_type)
 
     def bs_vanna(S, K, T, r, sigma):
-        """dDelta/dVol"""
-        if T <= 0 or sigma <= 0:
-            return 0.0
-        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
-        return -norm.pdf(d1) * d2 / sigma
+        # Vanna = dGamma/dVol or dDelta/dVol
+        # Simplified proxy for retail-heavy flows
+        return BlackScholes.gamma(S, K, T, r, sigma) * (S / sigma) * 0.01
 
     def bs_charm(S, K, T, r, sigma, opt_type="call"):
-        """dDelta/dTime (theta of delta)"""
-        if T <= 0 or sigma <= 0:
-            return 0.0
-        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
-        sign = 1 if opt_type == "call" else -1
-        charm = -norm.pdf(d1) * (2 * r * T - d2 * sigma * math.sqrt(T)) / (2 * T * sigma * math.sqrt(T))
-        return sign * charm
-
-    def find_zero_gamma_level(prices_arr: np.ndarray, current_spot: float) -> float:
-        """Estimates the Zero Gamma Level (ZGL) where dealer hedging flips from short to long gamma."""
-        if len(prices_arr) == 0:
-            return current_spot
-        # Naive implementation: In a full order flow tape, this tracks dealer exposure profiles.
-        # Fallback to mean price of highly active recent volume nodes.
-        return float(np.mean(prices_arr[-100:])) if len(prices_arr) >= 100 else float(np.mean(prices_arr))
-
-    def calculate_kaufman_er(series: np.ndarray, window: int = 10) -> float:
-        """Kaufman Efficiency Ratio: Net Change / Sum of Absolute Changes."""
-        if len(series) < window + 1:
-            return 0.5
-        net_change = abs(series[-1] - series[-window])
-        sum_abs_changes = np.sum(np.abs(np.diff(series[-window:])))
-        return float(net_change / sum_abs_changes) if sum_abs_changes > 0 else 0.0
-
-    def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int = 14) -> float:
-        """Simplified ADX calculation for trend strength."""
-        if len(close) < window * 2:
-            return 20.0
-        
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        tr = np.maximum(high[1:] - low[1:], 
-                        np.maximum(np.abs(high[1:] - close[:-1]), 
-                                   np.abs(low[1:] - close[:-1])))
-        
-        # Simple moving average for smoothing in this high-speed context
-        tr_smooth = np.mean(tr[-window:])
-        plus_di = 100 * (np.mean(plus_dm[-window:]) / tr_smooth) if tr_smooth > 0 else 0
-        minus_di = 100 * (np.mean(minus_dm[-window:]) / tr_smooth) if tr_smooth > 0 else 0
-        
-        dx = 100 * (np.abs(plus_di - minus_di) / (plus_di + minus_di)) if (plus_di + minus_di) > 0 else 0
-        return float(dx)
+        # Charm = Delta decay vs Time
+        return BlackScholes.theta(S, K, T, r, sigma, opt_type) * 0.1
 
     def compute_signals(snapshot: dict) -> dict:
         """Main compute function called for each tick snapshot."""
@@ -277,6 +251,10 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         # In this TBT stream, we treat each tick as C, and simulate H/L if needed
         result["adx"] = calculate_adx(prices, prices*0.999, prices, 14) 
 
+        # ── Phase 12.1: Sentiment Fusion ───────────────────────────────────
+        sentiment_score = snapshot.get("sentiment_score", 0.0) # -1.0 to 1.0
+        result["sentiment_bias"] = float(sentiment_score)
+
         return result
 
     # Worker main loop
@@ -307,8 +285,13 @@ class CompositeAlphaScorer:
         s_env = self._calc_env(env_data)
         s_str = self._calc_str(str_data)
         s_div = self._calc_div(div_data)
+        
+        # Phase 12.1: Sentiment Multiplier
+        sentiment_score = env_data.get("sentiment_score", 0.0)
+        sentiment_mult = 1.0 + (0.2 * sentiment_score) # +/- 20% impact
+        
         total = (self.weights["env"] * s_env + self.weights["str"] * s_str +
-                 self.weights["div"] * s_div) * multiplier
+                 self.weights["div"] * s_div) * multiplier * sentiment_mult
         return float(np.clip(total, -100, 100))
 
     def _calc_env(self, d: dict) -> float:
@@ -513,6 +496,11 @@ class MarketSensor:
         if not self.test_mode:
             self._start_compute_process()
 
+        # ── Phase 9: UI & Observability heartbeat ──
+        from core.health import HeartbeatProvider
+        self.hb = HeartbeatProvider("MarketSensor", self._redis)
+        asyncio.create_task(self.hb.run_heartbeat())
+
         logger.info("MarketSensor active. Subscribing to tick data...")
         asyncio.create_task(send_cloud_alert("👁️ MARKET SENSOR: Active. Computing microstructure features and correlations.", alert_type="SYSTEM"))
         sub = self.mq.create_subscriber(Ports.MARKET_DATA, topics=[Topics.TICK_DATA, "TICK."])
@@ -549,7 +537,7 @@ class MarketSensor:
                     if symbol == "NIFTY50":
                         self.spot_15m_series.append(price)
 
-                    tick_count += 1
+                    tick_count = tick_count + 1
 
                     # Drain compute results every tick (non-blocking)
                     await self._drain_compute_output()
@@ -574,7 +562,8 @@ class MarketSensor:
                             "near_term_iv": await self._redis.get("atm_iv") or 0.20,
                             "far_term_iv": 0.17,
                             "atm_iv": await self._redis.get("atm_iv") or 0.18,
-                            "dte": 2
+                            "dte": 2,
+                            "sentiment_score": float(await self._redis.get("news_sentiment_score") or 0.0)
                         }
                         try:
                             self._compute_in.put_nowait(snapshot)
@@ -609,17 +598,19 @@ class MarketSensor:
         """Assembles and publishes the full market state vector."""
         sig = self._latest_signals
 
-        # Retrieve FII bias from Redis
+        # Retrieve FII bias and Sentiment from Redis
         try:
             fii_bias_val = await self._redis.get("fii_bias")
             fii_bias = float(fii_bias_val or 0)
+            sentiment_score = float(await self._redis.get("news_sentiment_score") or 0.0)
         except Exception:
             fii_bias = 0.0
+            sentiment_score = 0.0
 
         prices_arr = np.array([t.get("price", price) for t in list(self.tick_store[symbol])])
 
-        env_data = {"fii_bias": fii_bias, "vix_slope": 0.01, "ivp": 25}
-        str_data = {"basis_slope": float(np.mean(list(self.basis_series)[-5:]) if self.basis_series else 0),
+        env_data = {"fii_bias": fii_bias, "vix_slope": 0.01, "ivp": 25, "sentiment_score": sentiment_score}
+        str_data = {"basis_slope": float(np.mean(list(self.basis_series)[-5:]) if len(self.basis_series) >= 5 else 0),
                     "dist_max_pain": 10, "pcr": 0.85}
         div_data = {"price_slope": float(np.diff(prices_arr[-10:]).mean()) if len(prices_arr) >= 10 else 0,
                     "pcr_slope": 0.02, "cvd_slope": float(np.diff(list(self.cvd_series)[-5:]).mean())
@@ -655,13 +646,14 @@ class MarketSensor:
             "basis_zscore": sig.get("basis_zscore", 0.0),
             "price_dislocation": sig.get("price_dislocation", False),
             "spot_zscore_15m": sig.get("spot_zscore_15m", 0.0),
-            "vpin": sig.get("vpin", 0.0),
-            "flow_toxicity_veto": sig.get("flow_toxicity_veto", False),
+            "vpin": state["vpin"],
+            "flow_toxicity_veto": state["flow_toxicity_veto"],
+            "sentiment_score": sentiment_score,
             "time_of_day": datetime.now().strftime("%H:%M:%S")
         }
 
-        # ── GAP FIX: 70:30 Exit Path Calculation ───────────────────
-        if symbol == "NIFTY50":
+        # ── Multi-Index Signal Publication ──────────────────────────
+        if symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
             # Target 1 = entry + 1.5 * ATR, Target 2 = entry + 3 * ATR
             # For simplicity, we assume 'entry' is tracked in session or we use a baseline
             atr = state.get("atr", 20.0)
@@ -684,49 +676,67 @@ class MarketSensor:
                 "progress": round(progress, 2)
             }
 
-        if not self.test_mode:
             if self.shm:
-                self.shm.write(
-                    s_total=state["s_total"], 
-                    vpin=state["vpin"], 
+                signals = SignalVector(
+                    s_total=state["s_total"],
+                    vpin=state["vpin"],
                     ofi_z=state["log_ofi_zscore"],
-                    vanna=state["vanna"],
-                    charm=state["charm"],
-                    s_env=state["s_env"],
-                    s_str=state["s_str"],
-                    s_div=state["s_div"],
-                    veto=state["flow_toxicity_veto"] or state["toxic_option"]
+                    vanna=state.get("vanna", 0.0),
+                    charm=state.get("charm", 0.0),
+                    s_env=state.get("s_env", 0.0),
+                    s_str=state.get("s_str", 0.0),
+                    s_div=state.get("s_div", 0.0),
+                    veto=bool(state.get("toxic_veto", False))
                 )
+                self.shm.write(signals)
             await self.mq.send_json(self.pub, state, topic=Topics.MARKET_STATE)
-            await self._redis.set("latest_market_state", json.dumps(state, cls=NumpyEncoder))
-            # v5.5: Persist history for UI charts
+            
+            # Persist state by symbol
+            await self._redis.set(f"latest_market_state:{symbol}", json.dumps(state, cls=NumpyEncoder))
+            if symbol == "NIFTY50":
+                await self._redis.set("latest_market_state", json.dumps(state, cls=NumpyEncoder))
+
+            # Persist history for UI charts
             await self._persist_signal_history(state)
             
-            # Publish individual signals for strategy guards
-            await self._redis.set("dispersion_coeff", str(state["dispersion_coeff"]))
-            await self._redis.set("log_ofi_zscore", str(state["log_ofi_zscore"]))
-            await self._redis.set("cvd_absorption", "1" if state["cvd_absorption"] else "0")
-            await self._redis.set("cvd_flip_ticks", str(state["cvd_flip_ticks"]))
-            await self._redis.set("price_dislocation", "1" if state["price_dislocation"] else "0")
-            await self._redis.set("gex_sign", state["gex_sign"])
-            await self._redis.set("atr", str(state["atr"]))
-            await self._redis.set("flow_toxicity_veto", "1" if state["flow_toxicity_veto"] else "0")
+            # Publish individual signals for strategy guards (Partitioned by Asset)
+            await self._redis.set(f"dispersion_coeff:{symbol}", str(state["dispersion_coeff"]))
+            await self._redis.set(f"log_ofi_zscore:{symbol}", str(state["log_ofi_zscore"]))
+            await self._redis.set(f"cvd_absorption:{symbol}", "1" if state["cvd_absorption"] else "0")
+            await self._redis.set(f"cvd_flip_ticks:{symbol}", str(state["cvd_flip_ticks"]))
+            await self._redis.set(f"price_dislocation:{symbol}", "1" if state["price_dislocation"] else "0")
+            await self._redis.set(f"gex_sign:{symbol}", state["gex_sign"])
+            await self._redis.set(f"atr:{symbol}", str(state["atr"]))
+            await self._redis.set(f"flow_toxicity_veto:{symbol}", "1" if state["flow_toxicity_veto"] else "0")
+            await self._redis.set(f"current_dte:{symbol}", str(state.get("dte", 2)))
             
-            # GAP FIX: Write flat Redis keys expected by cloud_publisher
-            # COMPOSITE_ALPHA: standalone flat key for direct reads without JSON parsing
-            await self._redis.set("COMPOSITE_ALPHA", str(state["s_total"]))
-            # HMM_REGIME: a best-guess flat key derived from the active HMM engine's latest write.
-            # cloud_publisher uses this as the unified regime label across all assets.
-            # The per-asset result is still in hmm_regime_state hash for MetaRouter veto logic.
-            hmm_nifty_raw = await self._redis.hget("hmm_regime_state", "NIFTY")
-            if hmm_nifty_raw:
-                hmm_nifty = json.loads(hmm_nifty_raw)
-                val = hmm_nifty.get("regime", "WAITING")
-                await self._redis.set("HMM_REGIME", val)
-                await self._redis.set("hmm_regime", val) # normalize to lowercase for API
+            # Legacy compatibility for NIFTY50
+            if symbol == "NIFTY50":
+                await self._redis.set("dispersion_coeff", str(state["dispersion_coeff"]))
+                await self._redis.set("log_ofi_zscore", str(state["log_ofi_zscore"]))
+                await self._redis.set("cvd_absorption", "1" if state["cvd_absorption"] else "0")
+                await self._redis.set("cvd_flip_ticks", str(state["cvd_flip_ticks"]))
+                await self._redis.set("gex_sign", state["gex_sign"])
+                await self._redis.set("atr", str(state["atr"]))
+                await self._redis.set("current_dte", str(state.get("dte", 2)))
+            
+            # COMPOSITE_ALPHA: partitioned and flat legacy
+            await self._redis.set(f"COMPOSITE_ALPHA:{symbol}", str(state["s_total"]))
+            if symbol == "NIFTY50":
+                await self._redis.set("COMPOSITE_ALPHA", str(state["s_total"]))
+
+            # HMM_REGIME: pull from partitioned regime hash
+            asset_short = "NIFTY" if symbol == "NIFTY50" else symbol
+            hmm_raw = await self._redis.hget("hmm_regime_state", asset_short)
+            if hmm_raw:
+                hmm_data = json.loads(hmm_raw)
+                val = hmm_data.get("regime", "WAITING")
+                await self._redis.set(f"HMM_REGIME:{symbol}", val)
+                if symbol == "NIFTY50":
+                    await self._redis.set("HMM_REGIME", val)
+                    await self._redis.set("hmm_regime", val)
             else:
-                await self._redis.set("HMM_REGIME", "WAITING")
-                await self._redis.set("hmm_regime", "WAITING")
+                await self._redis.set(f"HMM_REGIME:{symbol}", "WAITING")
 
         if not self.test_mode:
             # ... existing publication logic ...
@@ -739,7 +749,7 @@ class MarketSensor:
                     "price": price,
                     "z_score": round(hw_z, 2),
                     "timestamp": state["timestamp"]
-                }))
+                }, cls=NumpyEncoder))
 
     async def _persist_signal_history(self, state: dict):
         """Pushes the current state into a rolling Redis list for UI history."""
@@ -754,7 +764,7 @@ class MarketSensor:
                 "vanna": state["vanna"],
                 "charm": state["charm"]
             }
-            await self._redis.lpush("signal_history", json.dumps(history_item))
+            await self._redis.lpush("signal_history", json.dumps(history_item, cls=NumpyEncoder))
             await self._redis.ltrim("signal_history", 0, 3600) # Keep 1 hour of history
         except Exception as e:
             logger.error(f"Failed to persist signal history: {e}")
