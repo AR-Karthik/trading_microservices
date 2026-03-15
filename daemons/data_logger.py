@@ -17,8 +17,9 @@ import os
 import sys
 from datetime import datetime, timezone
 import asyncpg
-from core.mq import MQManager, Ports, Topics
 import redis.asyncio as redis
+from core.db_retry import with_db_retry
+from core.health import HeartbeatProvider
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,8 +59,9 @@ class DataLogger:
 
         sub = self.mq.create_subscriber(Ports.MARKET_STATE, topics=[Topics.MARKET_STATE])
         
-        # Start the batch writer task
-        writer_task = asyncio.create_task(self._batch_writer())
+        # Phase 11: Heartbeat
+        self.hb = HeartbeatProvider("DataLogger", self._redis)
+        asyncio.create_task(self.hb.run_heartbeat())
         
         logger.info("DataLogger active. Listening for market state updates...")
         
@@ -85,6 +87,17 @@ class DataLogger:
             await self._redis.aclose()
             logger.info("DataLogger shut down.")
 
+    async def _reconnect_pool(self):
+        """Helper for @with_db_retry to restore connectivity."""
+        logger.warning("Attempting to reconnect TimescaleDB pool...")
+        if self.pool:
+            try:
+                await self.pool.close()
+            except Exception:
+                pass
+        self.pool = await asyncpg.create_pool(DB_DSN)
+
+    @with_db_retry(max_retries=5, backoff=2.0)
     async def _batch_writer(self):
         """Periodically flushes the batch to TimescaleDB."""
         while True:

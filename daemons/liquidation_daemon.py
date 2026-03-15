@@ -500,7 +500,7 @@ class LiquidationDaemon:
         }
         
         try:
-            await self.mq.send_json(self.order_pub, order, topic=Topics.ORDER_INTENT)
+            await self.mq.send_json(self.order_pub, Topics.ORDER_INTENT, order)
             logger.info(f"✅ PARTIAL EXIT ORDER sent: SELL {exit_qty} {symbol} @ {price:.2f} ({reason})")
             pos["quantity"] = qty - exit_qty
             await self._redis.delete(f"Pending_Journal:{order['order_id']}")
@@ -539,7 +539,7 @@ class LiquidationDaemon:
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
-                await self.mq.send_json(self.order_pub, order, topic=Topics.ORDER_INTENT)
+                await self.mq.send_json(self.order_pub, Topics.ORDER_INTENT, order)
                 logger.info(f"✅ EXIT ORDER sent: SELL {qty} {symbol} @ {price:.2f} ({reason})")
                 self.orphaned_positions.pop(symbol, None)
                 await self._redis.delete(f"Pending_Journal:{order['order_id']}")

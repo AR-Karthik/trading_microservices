@@ -37,6 +37,11 @@ import numpy as np # type: ignore
 import polars as pl # type: ignore
 import redis.asyncio as redis # type: ignore
 
+try:
+    import uvloop
+except ImportError:
+    uvloop = None
+
 import os
 from core.logger import setup_logger # type: ignore
 from core.shm import ShmManager, SignalVector # type: ignore
@@ -62,7 +67,7 @@ TOP_10_HEAVYWEIGHTS = [
 ]
 OFI_WINDOW = 100          # ticks for rolling OFI
 DISPERSION_WINDOW_MIN = 3 # minutes for correlation rolling window
-RISK_FREE_RATE = 0.065    # 6.5% RBI repo rate
+# RISK_FREE_RATE now dynamic (Audit 5.1)
 NEAR_TERM_DTE = 2         # days for "near term" IV
 FAR_TERM_DTE = 30         # days for "far term" IV
 
@@ -200,13 +205,14 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         has_liquid_options = (len(strikes) >= 5 and 0.05 < iv < 1.5 and T > 0)
         
         if has_liquid_options:
+            r = float(snapshot.get("risk_free_rate", 0.065))
             result["zero_gamma_level"] = find_zero_gamma_level(np.array(snapshot.get("price_series", [spot])), spot)
-            gex_vals = [bs_gamma(spot, K, T, RISK_FREE_RATE, iv) * (1 if K >= spot else -1) for K in strikes]
+            gex_vals = [bs_gamma(spot, K, T, r, iv) * (1 if K >= spot else -1) for K in strikes]
             result["gex_sign"] = "NEGATIVE" if sum(gex_vals) < 0 else "POSITIVE"
             
             K_atm = min(strikes, key=lambda k: abs(k - spot))
-            result["charm"] = float(bs_charm(spot, K_atm, T, RISK_FREE_RATE, iv, "call"))
-            result["vanna"] = float(bs_vanna(spot, K_atm, T, RISK_FREE_RATE, iv))
+            result["charm"] = float(bs_charm(spot, K_atm, T, r, iv, "call"))
+            result["vanna"] = float(bs_vanna(spot, K_atm, T, r, iv))
             result["toxic_option"] = bool(result["charm"] < -0.05)
         else:
             result["zero_gamma_level"] = spot
@@ -390,8 +396,9 @@ class MarketSensor:
         self.tick_store: dict[str, collections.deque[dict[str, Any]]] = collections.defaultdict(
             lambda: collections.deque(maxlen=2000)
         )
+        all_assets = ["NIFTY50", "BANKNIFTY", "SENSEX"] + TOP_10_HEAVYWEIGHTS
         self.hw_prices: dict[str, collections.deque[float]] = {
-            sym: collections.deque(maxlen=500) for sym in TOP_10_HEAVYWEIGHTS
+            sym: collections.deque(maxlen=500) for sym in all_assets
         }
         self.ofi_series: collections.deque[float] = collections.deque(maxlen=200)
         self.cvd: float = 0.0
@@ -456,9 +463,9 @@ class MarketSensor:
         if self._compute_proc:
             if self._compute_proc.is_alive():
                 logger.info("Waiting for compute process to finish...")
-                # Send sentinel to compute process to shut down gracefully
+                # Send sentinel to compute process to shut down gracefully (Non-blocking)
                 try:
-                    self._compute_in.put(None)
+                    self._compute_in.put_nowait(None)
                 except Exception as e:
                     logger.warning(f"Could not send sentinel to compute process: {e}")
                 self._compute_proc.join(timeout=2)
@@ -652,7 +659,8 @@ class MarketSensor:
                             "far_term_iv": 0.17,
                             "atm_iv": await self._redis.get("atm_iv") or 0.18,
                             "dte": 2,
-                            "sentiment_score": float(await self._redis.get("news_sentiment_score") or 0.0)
+                            "sentiment_score": float(await self._redis.get("news_sentiment_score") or 0.0),
+                            "risk_free_rate": float(await self._redis.get("CONFIG:RISK_FREE_RATE") or 0.065)
                         }
                         try:
                             self._compute_in.put_nowait(snapshot)
@@ -783,6 +791,11 @@ class MarketSensor:
                 for idx, sym in enumerate(TOP_10_HEAVYWEIGHTS):
                     hw_list[idx] = float(hw_scores.get(sym, 0.0))
 
+                # [Audit 14.2] Fetch net deltas for signal vector
+                nd_nifty = float(await self._redis.get("net_delta_nifty50") or 0.0)
+                nd_bank = float(await self._redis.get("net_delta_banknifty") or 0.0)
+                nd_sensex = float(await self._redis.get("net_delta_sensex") or 0.0)
+
                 signals = SignalVector(
                     s_total=state["s_total"],
                     vpin=state["vpin"],
@@ -795,14 +808,15 @@ class MarketSensor:
                     rv=state["rv"],
                     adx=state["adx"],
                     pcr=state.get("pcr", 0.85),
-                    net_delta_nifty=float(await self._redis.get("net_delta_nifty50") or 0.0),
-                    net_delta_banknifty=float(await self._redis.get("net_delta_banknifty") or 0.0),
-                    net_delta_sensex=float(await self._redis.get("net_delta_sensex") or 0.0),
+                    net_delta_nifty=nd_nifty,
+                    net_delta_banknifty=nd_bank,
+                    net_delta_sensex=nd_sensex,
                     veto=bool(state.get("flow_toxicity_veto", False)),
                     hw_alpha=hw_list
                 )
                 self.shm.write(signals)
-              # 3. Publish over ZeroMQ [Audit 2.2: Fix parameter order]
+            
+            # 3. Publish over ZeroMQ [Audit 2.2: Fix parameter order]
             await self.mq.send_json(self.pub, Topics.MARKET_STATE, state)
             
             # Persist state by symbol

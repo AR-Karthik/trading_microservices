@@ -59,6 +59,9 @@ class ShoonyaDataStreamer:
             "2885": "RELIANCE"
         }
         
+        # [Audit 13.2] Initialize NorenApi with explicit host/websocket
+        self.api = NorenApi(host=self.host, websocket=ws_url)
+        
         # Shared Memory Setup
         self.shm = TickSharedMemory(create=True)
         self.symbol_slots = {}
@@ -131,7 +134,7 @@ class ShoonyaDataStreamer:
         # 3. Push directly to ZeroMQ (Brokerless) for Strategy Engine (Event trigger)
         topic = f"TICK.{symbol}"
         # We can now just send the topic or a minimal payload since data is in SHM
-        await self.mq_manager.send_json(self.pub_socket, payload, topic=topic)
+        await self.mq_manager.send_json(self.pub_socket, topic, payload)
         
         logger.debug(f"Broadcasted live {symbol} @ {payload['price']} [SHM Slot {self.symbol_slots.get(symbol)}]")
 
@@ -187,6 +190,10 @@ class ShoonyaDataStreamer:
             logger.info(f"Successfully logged in as {res.get('uname')}")
             
             logger.info("Starting WebSockets feed...")
+            # [Audit 11.1] Heartbeat integration
+            self.hb = HeartbeatProvider("ShoonyaGateway", self.redis)
+            asyncio.create_task(self.hb.run_heartbeat())
+            
             asyncio.create_task(send_cloud_alert("🌐 SHOONYA GATEWAY: Active and streaming live market data.", alert_type="SYSTEM"))
             self.api.start_websocket(
                 order_update_callback=lambda x: None, 
@@ -194,9 +201,15 @@ class ShoonyaDataStreamer:
                 socket_open_callback=self.open_callback
             )
             
-            # Keep alive
-            while True:
-                await asyncio.sleep(60)
+            # Keep alive and monitor (Audit 9.1)
+            self._shutdown_event = asyncio.Event()
+            logger.info("Gateway keep-alive active. Monitoring WebSocket...")
+            try:
+                await self._shutdown_event.wait()
+            except asyncio.CancelledError:
+                logger.info("Shutdown event cancelled.")
+            finally:
+                self.api.close_websocket()
         else:
             logger.error(f"Failed to authenticate with Shoonya. Halting Data Gateway. Details: {res}")
 
@@ -204,7 +217,8 @@ async def main():
     logger.info("Starting Shoonya Live Data Gateway...")
     
     # Connect to Data Vault & ZeroMQ
-    redis_client = redis.Redis(host='localhost', port=6379, db=0)
+    redis_host = os.getenv("REDIS_HOST", "localhost")
+    redis_client = redis.Redis(host=redis_host, port=6379, db=0)
     mq = MQManager()
     pub_socket = mq.create_publisher(Ports.MARKET_DATA)
     

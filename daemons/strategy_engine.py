@@ -25,16 +25,7 @@ except ImportError:
 logger = setup_logger("StrategyEngine", log_file="logs/strategy_engine.log")
 redis_logger = RedisLogger()
 
-class NumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
-        try:
-            import numpy as np
-            if isinstance(obj, np.integer): return int(obj)
-            if isinstance(obj, np.floating): return float(obj)
-            if isinstance(obj, np.ndarray): return obj.tolist()
-        except (ImportError, AttributeError):
-            pass
-        return super().default(obj)
+# NumpyEncoder now imported from core.mq (Audit 4.1)
 
 # --- Recommendation 7: Shadow Trading Flag ---
 IS_SHADOW_MODE = "--shadow" in sys.argv
@@ -240,7 +231,7 @@ class CreditSpreadStrategy(BaseStrategy):
     def on_tick(self, symbol: str, data: dict) -> list | None:
         price = float(data['price'])
         T = self.expiry_years
-        r = 0.065 # Standardized Risk-free rate (Audit 5.1)
+        r = float(self._redis.get("CONFIG:RISK_FREE_RATE") or 0.065)
         iv = self.iv
         parent_uuid = f"CS_{uuid.uuid4().hex[:8]}"
 

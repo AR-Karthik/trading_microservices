@@ -32,7 +32,7 @@ from NorenRestApiPy.NorenApi import NorenApi
 
 load_dotenv()
 
-RISK_FREE_RATE = 0.065
+# RISK_FREE_RATE now dynamic (Audit 5.1)
 
 try:
     import uvloop
@@ -225,16 +225,19 @@ class DataGateway:
 
     # ── Strike Selection (SRS Phase 2) ───────────────────────────────────────
 
-    def get_optimal_strike(self, spot: float, option_type: str = "call", expiry_years: float = 2.0/365, iv: float = 0.18) -> float:
+    async def get_optimal_strike(self, spot: float, option_type: str = "call", expiry_years: float = 2.0/365, iv: float = 0.18) -> float:
         """Filters option chain for Delta between 0.40 and 0.60 (Delta-Theta Balance)."""
         best_strike = spot
         closest_delta_diff = 1.0
         
         # Check strikes +/- 500 from spot in intervals of 50
         base_strike = round(spot / 50) * 50
+        # Audit 5.1: Dynamic Risk-Free Rate
+        r = float(await self.redis_client.get("CONFIG:RISK_FREE_RATE") or 0.065)
+
         for offset in range(-500, 550, 50):
             strike = base_strike + offset
-            delta = BlackScholes.delta(spot, strike, expiry_years, RISK_FREE_RATE, iv, option_type)
+            delta = BlackScholes.delta(spot, strike, expiry_years, r, iv, option_type)
             abs_delta = abs(delta)
             
             # Filter for Delta [0.40, 0.60]
@@ -475,19 +478,19 @@ class DataGateway:
                 }
 
                 # Update Redis [Audit 10.2: Match tick_history format for consistency]
-                await self.redis_client.set(f"latest_tick:{symbol}", json.dumps(tick))
-                # Push to list for fast Historical lookup (e.g. Market Sensor VWAP)
-                history_key = f"tick_history:{symbol}"
-                await self.redis_client.rpush(history_key, json.dumps(tick))
-                # LTRIM to keep only last 10,000 ticks per symbol
-                await self.redis_client.ltrim(history_key, -10000, -1)
+                async with self.redis_client.pipeline(transaction=True) as pipe:
+                    pipe.set(f"latest_tick:{symbol}", json.dumps(tick, cls=NumpyEncoder))
+                    history_key = f"tick_history:{symbol}"
+                    pipe.rpush(history_key, json.dumps(tick, cls=NumpyEncoder))
+                    pipe.ltrim(history_key, -10000, -1)
+                    await pipe.execute()
                 
                 self._last_tick_ts[symbol] = now_ts.timestamp()
 
                 # Simulate Strike Selection
                 if symbol == "NIFTY50":
-                    optimal_ce_strike = self.get_optimal_strike(price, "call", 2/365, 0.18)
-                    optimal_pe_strike = self.get_optimal_strike(price, "put", 2/365, 0.18)
+                    optimal_ce_strike = await self.get_optimal_strike(price, "call", 2/365, 0.18)
+                    optimal_pe_strike = await self.get_optimal_strike(price, "put", 2/365, 0.18)
                     
                     await self.redis_client.hset("optimal_strikes", mapping={
                         "NIFTY_CE": optimal_ce_strike,
@@ -496,7 +499,7 @@ class DataGateway:
 
                 # Publish via ZMQ
                 topic = f"TICK.{symbol}"
-                await self.mq.send_json(self.pub_socket, tick, topic=topic)
+                await self.mq.send_json(self.pub_socket, topic, tick)
                 
                 # Debug sample to keep terminal clean
                 if random.random() < 0.05:

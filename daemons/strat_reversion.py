@@ -165,7 +165,7 @@ class InstitutionalFadeStrategy:
             self._spread_baseline = 0.5
 
         self._redis.hset("pending_orders", order_id, json.dumps({**order, "broker_order_id": None}))
-        await self._mq.send_json(self._push, order, topic=Topics.ORDER_INTENT)
+        await self._mq.send_json(self._push, Topics.ORDER_INTENT, order)
         self._position += effective_lots
         self._entry_price = spot
         self._entry_time = time.time()
@@ -174,7 +174,7 @@ class InstitutionalFadeStrategy:
         return order_id
 
     async def _issue_orphan(self):
-        await self._mq.send_json(self._push, {
+        await self._mq.send_json(self._push, "ORPHAN", {
             "symbol": "NIFTY_ATM_CE",
             "action": "BUY",
             "quantity": self._position,
@@ -182,7 +182,7 @@ class InstitutionalFadeStrategy:
             "strategy_id": self.STRATEGY_ID,
             "command": "ORPHAN",
             "execution_type": "Paper"
-        }, topic="ORPHAN")
+        })
         self._position = 0
 
 

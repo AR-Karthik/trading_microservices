@@ -2,9 +2,9 @@
 import asyncio
 import json
 import unittest
-from unittest.mock import MagicMock, patch
 import os
 import sys
+from unittest.mock import MagicMock, patch, AsyncMock
 
 # Ensure core is in path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -64,26 +64,19 @@ class TestPower13Integration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sensor.hw_prices["RELIANCE"][0], 2500.0)
 
     async def test_multi_heavyweight_dispersion(self):
-        """Ticks from multiple heavyweights should be ready for dispersion calculation."""
-        ticks = [
-            {"symbol": "RELIANCE", "price": 2500.0},
-            {"symbol": "HDFCBANK", "price": 1450.0},
-            {"symbol": "ICICIBANK", "price": 1000.0}
-        ]
+        """Verify all 13 assets are handled correctly in dispersion snapshots."""
+        from daemons.market_sensor import TOP_10_HEAVYWEIGHTS
+        indices = ["NIFTY50", "BANKNIFTY", "SENSEX"]
+        all_assets = indices + TOP_10_HEAVYWEIGHTS
         
-        for t in ticks:
-            self.sensor.hw_prices[t["symbol"]].append(t["price"])
+        for symbol in all_assets:
+            self.sensor.hw_prices[symbol].append(100.0)
             
-        # Verify buffers are populated
-        self.assertEqual(self.sensor.hw_prices["RELIANCE"][0], 2500.0)
-        self.assertEqual(self.sensor.hw_prices["HDFCBANK"][0], 1450.0)
-        self.assertEqual(self.sensor.hw_prices["ICICIBANK"][0], 1000.0)
-        
-        # Check that they aren't empty for snapshot creation
         hw_snapshot = {k: list(v) for k, v in self.sensor.hw_prices.items() if len(v) > 0}
-        self.assertIn("RELIANCE", hw_snapshot)
-        self.assertIn("HDFCBANK", hw_snapshot)
-        self.assertEqual(len(hw_snapshot), 3)
+        for symbol in all_assets:
+            self.assertIn(symbol, hw_snapshot, f"Symbol {symbol} missing from snapshot")
+        
+        self.assertEqual(len(hw_snapshot), 13)
 
     async def test_state_vector_includes_cvd(self):
         """The state vector published by sensor must now include the 'cvd' field."""
@@ -125,6 +118,5 @@ class TestPower13Integration(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state["cvd"], 500.0)
             self.assertEqual(state["symbol"], "NIFTY50")
 
-from unittest.mock import AsyncMock
 if __name__ == "__main__":
     unittest.main()

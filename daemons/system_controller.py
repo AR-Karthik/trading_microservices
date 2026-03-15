@@ -22,12 +22,18 @@ from zoneinfo import ZoneInfo
 
 import redis.asyncio as redis
 from core.alerts import send_cloud_alert
+from core.mq import MQManager, Ports, NumpyEncoder
 
 try:
     import asyncpg
     _HAS_ASYNCPG = True
 except ImportError:
     _HAS_ASYNCPG = False
+
+try:
+    import uvloop
+except ImportError:
+    uvloop = None
 
 # ── Optional HTTP client ────────────────────────────────────────────────────
 try:
@@ -134,14 +140,19 @@ class SystemController:
         
         logger.info(f"💰 CAPITAL BOUNDS: Live Eff={eff_live}, Res={res_live} | Paper Eff={eff_paper}, Res={res_paper}")
         
-        # Set base limit (overwrite safe)
-        await self.redis.set("GLOBAL_CAPITAL_LIMIT_PAPER", paper_limit)
-        await self.redis.set("GLOBAL_CAPITAL_LIMIT_LIVE", live_limit)
+        # No need for redundant GLOBAL_ prefix, standardize on PAPER/LIVE_CAPITAL_LIMIT
+        await self.redis.set("PAPER_CAPITAL_LIMIT", paper_limit)
+        await self.redis.set("LIVE_CAPITAL_LIMIT", live_limit)
         
         # Set available margin ONLY if it doesn't exist (to avoid blowing away mid-day state)
         if not await self.redis.exists("AVAILABLE_MARGIN_PAPER"):
             await self.redis.set("AVAILABLE_MARGIN_PAPER", paper_limit)
             logger.info(f"Initialized AVAILABLE_MARGIN_PAPER pool: ₹{paper_limit:,.2f}")
+            
+        # --- Audit 5.1: Centralize Risk-Free Rate ---
+        if not await self.redis.exists("CONFIG:RISK_FREE_RATE"):
+            await self.redis.set("CONFIG:RISK_FREE_RATE", "0.065")
+            logger.info("Initialized CONFIG:RISK_FREE_RATE to 0.065")
             
         if not await self.redis.exists("AVAILABLE_MARGIN_LIVE"):
             await self.redis.set("AVAILABLE_MARGIN_LIVE", live_limit)
@@ -322,8 +333,8 @@ class SystemController:
 
         try:
             # ── Capital & Margin (from Redis) ──────────────────────────────────
-            paper_limit    = float(await self.redis.get("GLOBAL_CAPITAL_LIMIT_PAPER") or 0)
-            live_limit     = float(await self.redis.get("GLOBAL_CAPITAL_LIMIT_LIVE") or 0)
+            paper_limit    = float(await self.redis.get("PAPER_CAPITAL_LIMIT") or 0)
+            live_limit     = float(await self.redis.get("LIVE_CAPITAL_LIMIT") or 0)
             avail_paper    = float(await self.redis.get("AVAILABLE_MARGIN_PAPER") or 0)
             avail_live     = float(await self.redis.get("AVAILABLE_MARGIN_LIVE") or 0)
             margin_used    = float(await self.redis.get("CURRENT_MARGIN_UTILIZED") or 0)
@@ -738,7 +749,7 @@ class SystemController:
         while not self._shutdown_flag:
             try:
                 health = await self.health_agg.get_system_health()
-                await self.redis.set("SYSTEM_HEALTH_REPORT", json.dumps(health))
+                await self.redis.set("SYSTEM_HEALTH_REPORT", json.dumps(health, cls=NumpyEncoder))
                 # Update high-level flag for metrics API
                 await self.redis.set("SYSTEM_HEALTH_SCORE", f"{health['score']:.2f}")
             except Exception as e:
@@ -774,5 +785,10 @@ class SystemController:
 
 
 if __name__ == "__main__":
+    if uvloop:
+        uvloop.install()
+    elif sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        
     controller = SystemController()
     asyncio.run(controller.start())

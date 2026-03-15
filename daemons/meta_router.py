@@ -26,6 +26,11 @@ import time
 import re
 from datetime import datetime, timezone
 
+try:
+    import uvloop
+except ImportError:
+    uvloop = None
+
 import redis.asyncio as redis
 from core.logger import setup_logger
 from core.mq import MQManager, Ports, Topics
@@ -337,7 +342,10 @@ class MetaRouter:
             active_dec["parent_uuid"] = f"{asset}_{uuid.uuid4().hex[:8]}"
             # Default to KINETIC if strategy_id not found or missing
             strat_id = str(active_dec.get("strategy_id", "KINETIC"))
-            active_dec["lifecycle_class"] = str(LIFECYCLE_MAP.get(strat_id, "KINETIC"))
+            # [Audit 13.1] Dynamic Lifecycle Mapping from Redis
+            raw_map = await self._redis.get("CONFIG:LIFECYCLE_MAP") if self._redis else None
+            effective_map = json.loads(raw_map) if raw_map else LIFECYCLE_MAP
+            active_dec["lifecycle_class"] = str(effective_map.get(strat_id, "KINETIC"))
             
             # Use separate keys to avoid dict-indexing-on-str errors
             audit = {
@@ -461,7 +469,9 @@ class MetaRouter:
                 await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    if sys.platform == "win32":
+    if uvloop:
+        uvloop.install()
+    elif sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     
     # Core Pinning happens via taskset wrapper in shell or python PSUtil

@@ -61,7 +61,7 @@ services:
     env_file: .env
     cpuset: "1"
     volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
 
   # 4. HMM Engines (Depends on market_sensor state)
   hmm_engine_nifty:
@@ -75,7 +75,7 @@ services:
     env_file: .env
     cpuset: "1"
     volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
 
   hmm_engine_banknifty:
     image: trading-app:latest
@@ -88,7 +88,7 @@ services:
     env_file: .env
     cpuset: "1"
     volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
 
   hmm_engine_sensex:
     image: trading-app:latest
@@ -101,7 +101,7 @@ services:
     env_file: .env
     cpuset: "1"
     volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
 
   # 5. Meta Router (Depends on HMM regime)
   meta_router:
@@ -119,7 +119,7 @@ services:
     env_file: .env
     cpuset: "1"
     volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
 
   # 6. Trading Bridges: Paper (Schema Creation First)
   paper_bridge:
@@ -132,7 +132,7 @@ services:
     restart: always
     env_file: .env
     volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
 
   # 7. Trading Bridges: Live (Depends on paper_bridge for schema)
   live_bridge:
@@ -145,7 +145,7 @@ services:
     restart: always
     env_file: .env
     volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
@@ -166,7 +166,7 @@ services:
     env_file: .env
     cpuset: "2"
     volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
 
   # 9. Liquidation Daemon (Depends on position data)
   liquidation_daemon:
@@ -180,7 +180,7 @@ services:
     env_file: .env
     cpuset: "3"
     volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
 
   # 10. Order Reconciler (Depends on order data)
   order_reconciler:
@@ -193,7 +193,7 @@ services:
     restart: always
     env_file: .env
     volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
 
   # 11. System Controller (Lifecycle management)
   system_controller:
@@ -235,7 +235,7 @@ services:
     env_file: .env
     cpuset: "3"
     volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
@@ -255,7 +255,7 @@ services:
     restart: always
     env_file: .env
     volumes:
-      - ${TRADING_RESOURCES_ROOT:-/ram_disk}:/ram_disk:rw
+      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
