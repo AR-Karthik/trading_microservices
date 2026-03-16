@@ -31,6 +31,8 @@ logger = setup_logger("LiveBridge", log_file="logs/live_bridge.log")
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_DSN = f"postgres://trading_user:trading_pass@{DB_HOST}:5432/trading_db"
+SEBI_BATCH_SIZE = 10
+INTER_BATCH_WAIT = 1.01
 
 class TokenBucketRateLimiter:
     def __init__(self, rate=8, per=1.0):
@@ -129,10 +131,21 @@ class LiveExecutionEngine:
         if not record:
             await conn.execute(
                 """
-                INSERT INTO portfolio (symbol, strategy_id, parent_uuid, quantity, avg_price, execution_type, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                INSERT INTO portfolio (
+                    symbol, strategy_id, parent_uuid, underlying, lifecycle_class, 
+                    expiry_date, quantity, avg_price, initial_credit, short_strikes, 
+                    execution_type, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 """,
-                symbol, strategy_id, parent_uuid, qty, price, exec_type, execution['time']
+                symbol, strategy_id, parent_uuid,
+                execution.get('underlying'),
+                execution.get('lifecycle_class', 'KINETIC'),
+                execution.get('expiry_date'),
+                qty, price,
+                float(execution.get('initial_credit', 0.0)),
+                json.dumps(execution.get('short_strikes', {})),
+                exec_type, execution['time']
             )
             return
             
@@ -384,7 +397,10 @@ class LiveExecutionEngine:
             if message['type'] == 'message':
                 try:
                     data = json.loads(message['data'])
-                    if data.get('action') == "SQUARE_OFF" and data.get('execution_type') == "Actual":
+                    # [C3-03] Accept both SQUARE_OFF and SQUARE_OFF_ALL, and execution_type Actual or ALL
+                    action = data.get('action', '')
+                    exec_type = data.get('execution_type', '')
+                    if action in ["SQUARE_OFF", "SQUARE_OFF_ALL"] and exec_type in ["Actual", "ALL"]:
                         logger.critical("🚨 RECEIVED LIVE PANIC SIGNAL: SQUARING OFF REAL POSITIONS WITH BROKER APIs! 🚨")
                         
                         # In production we would poll api.get_positions()
@@ -392,22 +408,32 @@ class LiveExecutionEngine:
                         async with self.pool.acquire() as conn:
                             positions = await conn.fetch("SELECT symbol, quantity FROM portfolio WHERE quantity != 0 AND execution_type = 'Actual'")
                             
-                            for pos in positions:
-                                action = "SELL" if pos['quantity'] > 0 else "BUY"
-                                qty = abs(pos['quantity'])
-                                symbol = pos['symbol']
+                            if not positions:
+                                logger.info("No live positions to liquidate in panic.")
+                                return
+
+                            # SEBI 10-ops rule: Batch by 10, wait 1.01s
+                            for i in range(0, len(positions), SEBI_BATCH_SIZE):
+                                batch = positions[i:i + SEBI_BATCH_SIZE]
+                                for pos in batch:
+                                    action = "SELL" if pos['quantity'] > 0 else "BUY"
+                                    qty = abs(pos['quantity'])
+                                    symbol = pos['symbol']
+                                    
+                                    logger.critical(f"Panic Fire: {action} {qty} {symbol}")
+                                    loop = asyncio.get_running_loop()
+                                    panic_ex = self._get_exchange(symbol)
+                                    
+                                    # Blast market orders rapidly
+                                    await loop.run_in_executor(None, lambda a=action, s=symbol, q=qty, ex=panic_ex: self.api.place_order(
+                                        buy_or_sell=a[0], product_type='I', exchange=ex, tradingsymbol=s, 
+                                        quantity=q, disclosedquantity=0, price_type='MKT', price=0, retention='DAY'
+                                    ))
                                 
-                                logger.critical(f"Panic Fire: {action} {qty} {symbol}")
-                                loop = asyncio.get_running_loop()
-                                # [Audit 9.3] Identify exchange dynamically
-                                panic_ex = self._get_exchange(symbol)
-                                
-                                # Blast market orders rapidly
-                                await loop.run_in_executor(None, lambda a=action, s=symbol, q=qty, ex=panic_ex: self.api.place_order(
-                                    buy_or_sell=a[0], product_type='I', exchange=ex, tradingsymbol=s, 
-                                    quantity=q, disclosedquantity=0, price_type='MKT', price=0, retention='DAY'
-                                ))
-                                
+                                if i + SEBI_BATCH_SIZE < len(positions):
+                                    logger.info(f"SEBI Panic Batch complete. Waiting {INTER_BATCH_WAIT}s...")
+                                    await asyncio.sleep(INTER_BATCH_WAIT)
+                                    
                             await conn.execute("UPDATE portfolio SET quantity = 0, avg_price = 0, realized_pnl=0 WHERE execution_type = 'Actual'")
                             
                         logger.critical("✅ Live Market Wipeout Completed.")

@@ -385,7 +385,7 @@ class MarketSensor:
         self.use_rust = os.getenv("USE_RUST_ENGINE", "0") == "1" and HAS_RUST_ENGINE
         if self.use_rust:
             logger.info("🚀 Rust Tick Engine ACTIVATED (Bypassing GIL / mp.Process)")
-            self.rust_engine = tick_engine.TickEngine(vpin_bucket_size=100)
+            self.rust_engine = tick_engine.TickEngine(vpin_bucket_size=5000)  # [D-01] Spec: 5000, was 100
         else:
             self.rust_engine = None
             logger.info("🐍 Using standard Python ComputeWorker (Multiprocessing mode)")
@@ -407,7 +407,7 @@ class MarketSensor:
         self.spot_15m_series: collections.deque[float] = collections.deque(maxlen=900)  # ~15min @ 1/s
 
         # VPIN State (SRS Phase 2)
-        self.vpin_bucket_size = 100  # v8.0 audit fix: smaller buckets for index ticks
+        self.vpin_bucket_size = 5000  # [D-01] Spec: 5000 volume units per bucket, was 100
         self.current_bucket_vol = 0
         self.current_bucket_buy_vol = 0
         self.current_bucket_sell_vol = 0

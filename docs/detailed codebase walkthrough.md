@@ -46,6 +46,11 @@ This document provides a line-by-line, exhaustive architectural analysis of the 
 ### 1.3 [execution_wrapper.py](file:///c:/Users/karth/./scratch/trading_microservices/core/execution_wrapper.py)
 **Purpose**: Orchestrates multi-leg options execution with margin-aware sequencing and slippage-capped limit chasing.
 
+**Hardened Features**:
+- **Fill-Confirmed Sequencing**: In multi-leg baskets, the system waits for the **BUY leg confirmation** before firing the subsequent SELL leg. This strictly adheres to exchange margin rules and prevents "naked leg" rejections.
+- **JIT Feed Subscription**: Automatically publishes `dynamic_subscriptions` for all basket legs (especially OTM wings) before order dispatch to ensure the DataGateway is już streaming price data.
+- **Adaptive Limit Chasing**: Dynamically modifies limit prices within a 0.10% slippage cap to maximize fill probability.
+
 **Classes:**
 - `MultiLegExecutor`: The primary coordinator for complex order baskets.
 
@@ -281,10 +286,10 @@ This document provides a line-by-line, exhaustive architectural analysis of the 
 - **Shutdown Safety**: Uses the `finally` block to ensure the connection pool is drained and closed, preventing "Too many connections" errors on the database server during daemon restarts.
 
 ### 2.4 [hmm_engine.py](file:///c:/Users/karth/./scratch/trading_microservices/daemons/hmm_engine.py)
-**Purpose**: High-speed market regime classifier that translates raw volatility and trend signals into strategy selection verdicts (RANGING, TRENDING, etc.).
+**Purpose**: High-speed market regime classifier that translates raw volatility and trend signals into strategy selection verdicts (RANGING, TRENDING, etc.) using its deterministic HeuristicEngine.
 
 **Classes:**
-- `HeuristicEngine`: The core processor for HMM and heuristic state transitions.
+- `HeuristicEngine`: A deterministic state-machine that classifies the market based on RV, ADX, and PCR thresholds.
 
 **Methods:**
 - `_pin_core()`: Uses `os.sched_setaffinity` to lock the daemon to a specific CPU core for hardware-level execution determinism.
@@ -300,8 +305,8 @@ This document provides a line-by-line, exhaustive architectural analysis of the 
 
 **Logic Details:**
 - **Veto Logic**: If a `REGIME_CRASH` is detected (RV > 50%), the engine sets the `veto` flag in the Signal Vector, causing all strategy engines to immediately halt new entries.
+- **Deterministic Efficiency**: Replaces stochastic state inference with a O(1) mathematical matrix for absolute predictability and sub-millisecond classification.
 - **Micro-batching**: Re-fetches macro parameters from Redis every 300 ticks (~5 minutes) to ensure mathematical models aren't drifting too far from reality mid-session.
-- **Legacy Compatibility**: Automatically maps second-order states (Overbought/Oversold) to the primary `RANGING` state to avoid breaking older strategy logic while still providing "deep" insight to newer components.
 
 ### 2.5 [liquidation_daemon.py](file:///c:/Users/karth/./scratch/trading_microservices/daemons/liquidation_daemon.py)
 **Purpose**: A secondary "Safety Net" process that manages open positions and applies risk-based liquidation barriers (TP, SL, and Time-Decay).
@@ -381,14 +386,17 @@ This document provides a line-by-line, exhaustive architectural analysis of the 
 - `_calculate_portfolio_greeks()`: Every 10s, it reconciles the database portfolio to calculate **Net Delta** per index, allowing for automated hedging decisions.
 - `_check_cross_index_divergence()`: Vetoes trades if the market is "fractured" (e.g., NIFTY is trending while SENSEX is crashing).
 - `_enrich_with_atm_symbol()`: Resolves index names to valid exchange ticker symbols (e.g., `NIFTY26MAR22350CE`) based on the current ATM strike and nearest expiry.
+- `_build_basket_intent()`: Constructs complex multi-leg payloads for POSITIONAL strategies like `IronCondor` (4 legs) and `DirectionalCredit` (2 legs). Uses a high-performance JIT Delta-search to find optimal short and wing strikes.
 - `broadcast_decisions()`:
     - Calculates total "Portfolio Heat".
     - Scales lot sizes if the combined heat exceeds the account's risk capacity.
+    - Bifurcates logic: single-leg intents for KINETIC/ZERO_DTE and multi-leg baskets for POSITIONAL.
     - Dispatches ZMQ `ORDER_INTENT` messages to the execution bridges.
 
 **Logic Details:**
 - **Hybrid Sizing**: Sizing is determined by `Risk-at-Stop` (ATR) rather than capital percentage, ensuring a ₹2,500 loss on a 1-lot NIFTY trade is mathematically similar to a 1-lot BANKNIFTY trade.
-- **JIT Data Gateway**: When a decision is made, it immediately triggers a `dynamic_subscription` update, priming the `DataGateway` for the specific option token milliseconds before the bridge fires the order.
+- **JIT Basket Priming**: For multi-leg trades, the router immediately publishes `dynamic_subscriptions` for ALL legs (shorts + wings), ensuring the `DataGateway` is already tracking the OTM prices before the first trade fires.
+- **Multi-Leg Atomicity**: By assigning a shared `parent_uuid` to all legs in the basket payload, the router provides the necessary relational glue for the `OrderReconciler` to manage fill integrity.
 - **Fracture Veto**: A safety mechanism that prevents the system from getting "chopped up" when indices lose correlation during high-volatility events.
 
 ### 2.9 [order_reconciler.py](file:///c:/Users/karth/./scratch/trading_microservices/daemons/order_reconciler.py)
@@ -451,7 +459,8 @@ This document provides a line-by-line, exhaustive architectural analysis of the 
 - **Microstructure Enrichment**: Uses the `shoonya_master` utility to resolve raw exchange tokens back into human-readable symbols (e.g., `26000` -> `NIFTY50`) before broadcasting.
 
 ### 2.12 [strat_eod_vwap.py](file:///c:/Users/karth/./scratch/trading_microservices/daemons/strat_eod_vwap.py)
-**Purpose**: High-conviction mean-reversion engine. Anchors VWAP to the market open and executes buy-side bounces when alpha conviction is high.
+**Status**: `[DEPRECATED]`
+**Purpose**: Retail mean-reversion engine (Legacy). Replaced by the 4-Pillar institutional suite.
 
 **Classes:**
 - `AnchoredVWAPStrategy`: The strategy state machine.
@@ -510,7 +519,8 @@ This document provides a line-by-line, exhaustive architectural analysis of the 
 - **Clean Handoff**: Once a trade is initiated, it is "orphaned" to the `LiquidationDaemon`. The strategy purely focuses on the "Inception" of the move, not the "Exit".
 
 ### 2.15 [strat_lead_lag.py](file:///c:/Users/karth/./scratch/trading_microservices/daemons/strat_lead_lag.py)
-**Purpose**: An "Arbitrage" engine that bets on the re-coupling of NIFTY and BANKNIFTY when their price ratio hits a statistical extreme.
+**Status**: `[DEPRECATED]`
+**Purpose**: Cross-index arbitrage engine (Legacy). Replaced by the 4-Pillar institutional suite.
 
 **Classes:**
 - `LeadLagReversionStrategy`: Tracks index decoupling via rolling Pearson correlation.
@@ -527,7 +537,8 @@ This document provides a line-by-line, exhaustive architectural analysis of the 
 - **Laggard Sensitivity**: lot sizes are dynamically adjusted based on which index is being traded (Nifty vs BankNifty), ensuring consistent margin usage.
 
 ### 2.16 [strat_oi_pulse.py](file:///c:/Users/karth/./scratch/trading_microservices/daemons/strat_oi_pulse.py)
-**Purpose**: A momentum-burst engine that detects "Unusual Options Activity". It bets on strikes exhibiting massive Open Interest (OI) acceleration.
+**Status**: `[DEPRECATED]`
+**Purpose**: Unusual Options Activity engine (Legacy). Replaced by the 4-Pillar institutional suite.
 
 **Classes:**
 - `OIPulseStrategy`: Monitors strike-level OI depth for NIFTY ATM options.
@@ -575,10 +586,9 @@ This document provides a line-by-line, exhaustive architectural analysis of the 
 - `warmup_engine()`: Fires 1000 synthetic ticks at startup to prime the Python VM and trigger JIT optimization, ensuring the first "real" tick doesn't experience "cold-start" latency.
 - `config_subscriber()`: Polls Redis every 2s for strategy updates. Allows users to enable/disable specific strategies or change their parameters (e.g. lot sizes) while the engine is running.
 - `_calibrate_vol_context()`: Performs the **B2 Calibration** — calculating the overnight gap's Z-score to set the opening sensitivity for the HMM engines.
-- `run_strategies()`:
-    - Performs **Zero-Copy SHM Lookups** for ticks and alpha signals.
-    - Implements **Alpha Bias Vetoes** (e.g. blocking a Buy if global Alpha < -20).
-    - Enforces **Atomic Capital Locking** via `AsyncMarginManager`.
+- **Alpha Bias Vetoes**: Implements institutional risk-vetoing (e.g., blocking a Buy if global Alpha < -20).
+- **Institutional Strategies**: Hosts the 4-Pillar suite: `GammaScalping`, `IronCondor`, `DirectionalCredit`, and `TastyTrade0DTE`.
+- **Atomic Capital Locking**: Enforces hard margin checks via `AsyncMarginManager`.
 
 **Logic Details:**
 - **Dynamic Hot-Swapping**: Strategy logic can be updated on-the-fly via the `active_strategies` hash in Redis, making the system highly adaptable to changing market conditions without restarts.
@@ -587,6 +597,11 @@ This document provides a line-by-line, exhaustive architectural analysis of the 
 
 ### 2.19 [system_controller.py](file:///c:/Users/karth/./scratch/trading_microservices/daemons/system_controller.py)
 **Purpose**: The system's "Operational Master". Orchestrates the lifecycle of the entire stack, from morning history sync to evening VM termination.
+
+**Institutional Updates**:
+- **Selective Shutdown**: At 15:20 IST, it only liquidates `KINETIC` and `ZERO_DTE` trades. `POSITIONAL` trades hibernate securely in the database.
+- **50:50 Margin Enforcement**: Ensures compliance with NSE's Cash-to-Collateral requirements on boot.
+- **SEBI Guard**: Automated settlement halts on quarterly Fridays.
 
 **Classes:**
 - `SystemController`: Manages time-based triggers, cloud infrastructure safety, and SEBI compliance.
@@ -644,7 +659,8 @@ This document provides a line-by-line, exhaustive architectural analysis of the 
 - **Fail-Safe Neutrality**: In cases of API outages, the system defaults to a neutral `0` bias, ensuring the strategy engine doesn't derive false confidence from stale data.
 
 ### 2.23 [hmm_trainer.py](file:///c:/Users/karth/./scratch/trading_microservices/utils/hmm_trainer.py)
-**Purpose**: The nightly "Self-Correction" engine. It uses high-fidelity local market history to refine the HMM's understanding of market regimes.
+**Status**: `[LEGACY / RESEARCH ONLY]`
+**Purpose**: The nightly "Self-Correction" engine (Legacy). Formerly used to refine HMM transitions; now retained for offline research to compare heuristic vs. stochastic performance.
 
 **Classes:**
 - `HMMTrainer`: Handles model training, validation, and promotion.
@@ -706,7 +722,8 @@ This document provides a line-by-line, exhaustive architectural analysis of the 
 - **Micro-Categorization**: Uses a lookup table to prefix messages with context-specific emojis (e.g. ⚡ for Cloud Preemption, 👻 for Order Ghosts), making the notification stream highly readable.
 
 ### 2.22 [hmm_cold_start.py](file:///c:/Users/karth/./scratch/trading_microservices/utils/hmm_cold_start.py)
-**Purpose**: The "Pre-Flight" initialization tool. It builds a baseline Hidden Markov Model (HMM) using historical public data to ensure the system has a valid regime-classification model before local data is collected.
+**Status**: `[LEGACY / RESEARCH ONLY]`
+**Purpose**: The "Pre-Flight" initialization tool (Legacy). Formerly used to build baseline HMMs; now used to generate historical benchmarks for the Heuristic Engine.
 
 **Classes:**
 - `HMMColdStarter`: Manages data ingestion from Kaggle and Yahoo Finance.

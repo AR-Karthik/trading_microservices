@@ -125,38 +125,44 @@ class SystemController:
         paper_limit = float(await self.redis.get("PAPER_CAPITAL_LIMIT") or 50000.0)
         live_limit = float(await self.redis.get("LIVE_CAPITAL_LIMIT") or 0.0)
         
-        # --- Phase 1.3: Compute Effective Trading Limits ---
-        # Live Pipeline
+        # --- Phase 3.1: Regulatory Capital Split (50:50 Cash-to-Collateral) ---
+        # Capital limits are now split according to regulatory 'Cash Component' rules.
         eff_live = float(live_limit * (1 - HEDGE_RESERVE_PCT))
         res_live = float(live_limit * HEDGE_RESERVE_PCT)
-        await self.redis.set("AVAILABLE_MARGIN_LIVE", f"{eff_live:.2f}")
+        
+        # Enforce 50:50 ratio on available margin
+        cash_live = eff_live * 0.5
+        coll_live = eff_live * 0.5
+        
+        await self.redis.set("CASH_COMPONENT_LIVE", f"{cash_live:.2f}")
+        await self.redis.set("COLLATERAL_COMPONENT_LIVE", f"{coll_live:.2f}")
         await self.redis.set("HEDGE_RESERVE_LIVE", f"{res_live:.2f}")
         
         # Paper Pipeline (Parity for Shadow Graduation)
         eff_paper = float(paper_limit * (1 - HEDGE_RESERVE_PCT))
         res_paper = float(paper_limit * HEDGE_RESERVE_PCT)
-        await self.redis.set("AVAILABLE_MARGIN_PAPER", f"{eff_paper:.2f}")
+        
+        cash_paper = eff_paper * 0.5
+        coll_paper = eff_paper * 0.5
+        
+        await self.redis.set("CASH_COMPONENT_PAPER", f"{cash_paper:.2f}")
+        await self.redis.set("COLLATERAL_COMPONENT_PAPER", f"{coll_paper:.2f}")
         await self.redis.set("HEDGE_RESERVE_PAPER", f"{res_paper:.2f}")
         
-        logger.info(f"💰 CAPITAL BOUNDS: Live Eff={eff_live}, Res={res_live} | Paper Eff={eff_paper}, Res={res_paper}")
+        logger.info(f"⚖️ REGULATORY SPLIT (50:50): Live Cash={cash_live}, Coll={coll_live} | Paper Cash={cash_paper}, Coll={coll_paper}")
         
         # No need for redundant GLOBAL_ prefix, standardize on PAPER/LIVE_CAPITAL_LIMIT
         await self.redis.set("PAPER_CAPITAL_LIMIT", paper_limit)
         await self.redis.set("LIVE_CAPITAL_LIMIT", live_limit)
         
-        # Set available margin ONLY if it doesn't exist (to avoid blowing away mid-day state)
-        if not await self.redis.exists("AVAILABLE_MARGIN_PAPER"):
-            await self.redis.set("AVAILABLE_MARGIN_PAPER", paper_limit)
-            logger.info(f"Initialized AVAILABLE_MARGIN_PAPER pool: ₹{paper_limit:,.2f}")
-            
-        # --- Audit 5.1: Centralize Risk-Free Rate ---
-        if not await self.redis.exists("CONFIG:RISK_FREE_RATE"):
-            await self.redis.set("CONFIG:RISK_FREE_RATE", "0.065")
-            logger.info("Initialized CONFIG:RISK_FREE_RATE to 0.065")
-            
-        if not await self.redis.exists("AVAILABLE_MARGIN_LIVE"):
-            await self.redis.set("AVAILABLE_MARGIN_LIVE", live_limit)
-            logger.info(f"Initialized AVAILABLE_MARGIN_LIVE pool: ₹{live_limit:,.2f}")
+        # Set available margin pools if they don't exist
+        for suffix in ["LIVE", "PAPER"]:
+            if not await self.redis.exists(f"CASH_COMPONENT_{suffix}"):
+                limit = live_limit if suffix == "LIVE" else paper_limit
+                eff = limit * (1 - HEDGE_RESERVE_PCT)
+                await self.redis.set(f"CASH_COMPONENT_{suffix}", f"{eff*0.5:.2f}")
+                await self.redis.set(f"COLLATERAL_COMPONENT_{suffix}", f"{eff*0.5:.2f}")
+                logger.info(f"Initialized {suffix} Cash/Collateral components (50:50 split)")
 
         logger.info("SystemController started. Monitoring lifecycle events.")
         asyncio.create_task(send_cloud_alert(
@@ -174,6 +180,8 @@ class SystemController:
             asyncio.create_task(self._hmm_sync_watcher())
             asyncio.create_task(self._three_stage_eod_scheduler()) 
             asyncio.create_task(self._t1_calendar_sweep_watcher()) # Phase 3
+            asyncio.create_task(self._unsettled_premium_quarantine()) # Phase 3.3
+            asyncio.create_task(self._quarterly_settlement_guard())    # Phase 3.4
             asyncio.create_task(self._hard_state_sync())          # Spec 11.6: Ghost Fill Sync
             asyncio.create_task(self._exchange_health_monitor())   # Spec 12.4: NSE Halt Switch
             asyncio.create_task(self._daily_lookback_scheduler())
@@ -475,24 +483,67 @@ class SystemController:
                     logger.warning("📵 15:00 IST: KINETIC origination halted. Only exits allowed.")
                     await send_cloud_alert("📵 15:00 IST: KINETIC origination halted. Existing trades running to exit.", alert_type="SYSTEM")
                 
-                # 2. 15:20 IST - SQUARE_OFF_KINETIC (Aggressive Intraday Liquidation)
+                # 2. 15:20 IST - SQUARE_OFF_INTRADAY (Aggressive Intraday Liquidation)
                 if now.hour == SQUARE_OFF_KINETIC_HH and now.minute == SQUARE_OFF_KINETIC_MM:
-                    logger.warning("🔴 15:20 IST: KINETIC square-off initiated.")
-                    await self._execute_selective_square_off(lifecycle_class="KINETIC", reason="EOD_HARD_KINETIC")
-                    await send_cloud_alert("🔴 15:20 IST: KINETIC square-off complete. Intraday positions liquidated.", alert_type="RISK")
+                    logger.warning("🔴 15:20 IST: INTRADAY square-off initiated (KINETIC + ZERO_DTE).")
+                    await self._execute_selective_square_off(lifecycle_class="KINETIC", reason="EOD_HARD_INTRADAY")
+                    await self._execute_selective_square_off(lifecycle_class="ZERO_DTE", reason="EOD_HARD_INTRADAY")
+                    await send_cloud_alert("🔴 15:20 IST: Intraday square-off complete. Institutional positional trades hibernating.", alert_type="RISK")
                 
                 # 3. 16:00 IST - HARD_VM_SHUTDOWN
                 if now.hour == SHUTDOWN_HH and now.minute == SHUTDOWN_MM:
                     logger.critical("💀 16:00 IST: HARD SHUTDOWN sequence started.")
                     # ── EOD Summary Report (before square-off) ──
                     await self._eod_summary_report(now)
-                    await self._execute_square_off_all(reason="EOD_TERMINATION")
+                    # POSITIONAL trades hibernate - no square_off_all here
+                    logger.critical("💾 POSITIONAL trades hibernated in DB. Server shutting down.")
                     self._shutdown_flag = True
                 
             except Exception as e:
                 logger.error(f"EOD Scheduler error: {e}")
             
             await asyncio.sleep(60)
+
+    async def _unsettled_premium_quarantine(self):
+        """Phase 3.3: Prevents using option sell premium until T+1 settlement."""
+        logger.info("Unsettled premium quarantine active. Monitoring T+1 credit.")
+        while not self._shutdown_flag:
+            try:
+                # Find credit premium from today's sell orders
+                async with self.pool.acquire() as conn:
+                    row = await conn.fetchrow("""
+                        SELECT SUM(realized_pnl) as today_credit 
+                        FROM portfolio 
+                        WHERE realized_pnl > 0 AND updated_at >= CURRENT_DATE
+                    """)
+                    if row and row['today_credit']:
+                        credit = float(row['today_credit'])
+                        # Move credit into a 'quarantine' bucket so it's not available in margin
+                        # This effectively locks the premium until the next BOOT
+                        await self.redis.set("QUARANTINE_PREMIUM", f"{credit:.2f}")
+                        logger.debug(f"Quarantined ₹{credit:.2f} in unsettled premium.")
+            except Exception as e:
+                logger.error(f"Quarantine error: {e}")
+            await asyncio.sleep(300)
+
+    async def _quarterly_settlement_guard(self):
+        """Phase 3.4: SEBI Quarterly Settlement logic - halts trading if credit is due."""
+        logger.info("Quarterly settlement guard active.")
+        while not self._shutdown_flag:
+            try:
+                now = datetime.now(IST)
+                # Check if it's the first Friday of the quarter (common settlement day)
+                # This is a heuristic approximation for the demo
+                is_settlement_day = (now.month in [1, 4, 7, 10] and now.weekday() == 4 and now.day <= 7)
+                
+                if is_settlement_day and now.hour == 9 and now.minute == 0:
+                    logger.warning("🏛️ SEBI QUARTERLY SETTLEMENT: Halting all new entries for credit transfer.")
+                    await self.redis.set("SYSTEM_HALT", "True")
+                    await send_cloud_alert("🏛️ SEBI Quarterly Settlement detected. Trading halted for manual fund reconciliation.", alert_type="SYSTEM")
+                    await asyncio.sleep(60) # Avoid repeat
+            except Exception as e:
+                logger.error(f"Settlement guard error: {e}")
+            await asyncio.sleep(3600)
 
     async def _t1_calendar_sweep_watcher(self):
         """Phase 3: Liquidates T-1 expiries for calendar spreads."""
@@ -526,7 +577,7 @@ class SystemController:
             await asyncio.sleep(30)
 
     async def _execute_selective_square_off(self, lifecycle_class: str, reason: str):
-        """Phase 2.4: Targets specific positions in TimescaleDB for liquidation."""
+        """Phase 2.4: Targets specific positions in TimescaleDB with SEBI-compliant batching."""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT symbol, parent_uuid, quantity, execution_type 
@@ -540,15 +591,21 @@ class SystemController:
 
             logger.warning(f"Liquidating {len(rows)} {lifecycle_class} positions. Reason: {reason}")
             
-            for row in rows:
-                await self.redis.publish("panic_channel", json.dumps({
-                    "action": "FORCE_LIQUIDATE",
-                    "symbol": row['symbol'],
-                    "parent_uuid": row['parent_uuid'],
-                    "qty": row['quantity'],
-                    "execution_type": row['execution_type'],
-                    "reason": reason
-                }))
+            # SEBI 10-ops rule: Batch by 10, wait 1.01s
+            for i in range(0, len(rows), SEBI_BATCH_SIZE):
+                batch = rows[i:i + SEBI_BATCH_SIZE]
+                for row in batch:
+                    await self.redis.publish("panic_channel", json.dumps({
+                        "action": "FORCE_LIQUIDATE",
+                        "symbol": row['symbol'],
+                        "parent_uuid": row['parent_uuid'],
+                        "qty": row['quantity'],
+                        "execution_type": row['execution_type'],
+                        "reason": reason
+                    }))
+                if i + SEBI_BATCH_SIZE < len(rows):
+                    logger.info(f"SEBI Batch complete ({len(batch)} orders). Waiting {INTER_BATCH_WAIT}s...")
+                    await asyncio.sleep(INTER_BATCH_WAIT)
 
     async def _daily_lookback_scheduler(self):
         """Schedules and executes the 14-day daily close fetch at 09:00 IST."""

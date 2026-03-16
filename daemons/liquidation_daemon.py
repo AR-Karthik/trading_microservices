@@ -197,6 +197,9 @@ class LiquidationDaemon:
                 "entry_time": row['entry_time'].timestamp() if row['entry_time'] else time.time(),
                 "lifecycle_class": row['lifecycle_class'],
                 "parent_uuid": row['parent_uuid'],
+                "expiry_date": row['expiry_date'],
+                "initial_credit": float(row['initial_credit'] or 0.0),
+                "short_strikes": row['short_strikes'] or {},
                 "execution_type": row['execution_type'] or "Paper"
             }
 
@@ -218,6 +221,9 @@ class LiquidationDaemon:
                 "entry_time": row['entry_time'].timestamp() if row['entry_time'] else time.time(),
                 "lifecycle_class": row['lifecycle_class'],
                 "parent_uuid": row['parent_uuid'],
+                "expiry_date": row['expiry_date'],
+                "initial_credit": float(row['initial_credit'] or 0.0),
+                "short_strikes": row['short_strikes'] or {},
                 "execution_type": row['execution_type'] or "Paper"
             }
             logger.info(f"🎯 POSITION ARMED: {symbol} [{row['lifecycle_class']}]")
@@ -353,38 +359,46 @@ class LiquidationDaemon:
         if not pos:
             return
 
-        lifecycle = str(pos.get("lifecycle_class") or "KINETIC")
-        if lifecycle == "POSITIONAL":
-            await self._evaluate_positional_barriers(symbol, tick, state, pos)
-        else:
-            await self._evaluate_kinetic_barriers(symbol, tick, state, pos)
-
-    async def _evaluate_kinetic_barriers(self, symbol: str, tick: dict, state: dict, pos: dict):
-        price = tick.get("price", 0.0)
-        entry = pos.get("price", price)
-        elapsed = time.time() - pos.get("entry_time", time.time())
-        action = pos.get("action", "BUY")
-
-        # ── Barrier 0: Dynamic Slippage (RV-based Panic) ──────────────────────
-        try:
-            rv_raw = await self._redis.get("rv")
-            rv = float(rv_raw) if rv_raw else 0.0
-            if rv > 0.002:
-                aggressive_price = float(price * 0.99)
-                exit_reason = f"PANIC_VOL_EXIT: RV {rv:.5f} > 3σ"
-                await self._record_barrier_exit(symbol, "PANIC", exit_reason, aggressive_price, float(entry))
-                await self._attempt_exit(pos, symbol, price=aggressive_price, reason=exit_reason)
-                return
-        except Exception: pass
-
-        rv_raw = await self._redis.get("rv")
-        rv = float(rv_raw) if rv_raw else 0.0
         vix_raw = await self._redis.get("vix")
         vix = float(vix_raw) if vix_raw else 15.0
         atr_raw = await self._redis.get("atr")
         atr = float(atr_raw) if atr_raw else 20.0
         hmm_raw = await self._redis.get("hmm_regime")
         current_hmm = str(hmm_raw) if hmm_raw else "RANGING"
+
+        # ── Barrier 0: Systemic Vol Panic (RV-based) ──────────────────────────
+        # [Audit 14.2] Applied to ALL lifecycle classes for 3-sigma safety
+        try:
+            rv_raw = await self._redis.get("rv")
+            rv = float(rv_raw or 0.0)
+            if rv > 0.002:
+                price = tick.get("price", 0.0)
+                action = pos.get("action", "BUY")
+                entry = pos.get("price", price)
+                aggressive_price = float(price * 0.99 if action == "BUY" else price * 1.01)
+                exit_reason = f"PANIC_VOL_EXIT: RV {rv:.5f} > 3σ"
+                await self._record_barrier_exit(symbol, "PANIC", exit_reason, aggressive_price, float(entry))
+                await self._attempt_exit(pos, symbol, price=aggressive_price, reason=exit_reason)
+                return
+        except Exception: 
+            rv = 0.0
+
+        lifecycle = str(pos.get("lifecycle_class") or "KINETIC")
+        if lifecycle == "POSITIONAL":
+            await self._evaluate_positional_barriers(symbol, tick, state, pos, rv, vix, atr, current_hmm)
+        elif lifecycle == "ZERO_DTE":
+            # [S-03] ZERO_DTE-specific exit logic
+            await self._evaluate_zero_dte_barriers(symbol, tick, state, pos, rv, vix, atr, current_hmm)
+        else:
+            await self._evaluate_kinetic_barriers(symbol, tick, state, pos, rv, vix, atr, current_hmm)
+
+    async def _evaluate_kinetic_barriers(self, symbol: str, tick: dict, state: dict, pos: dict, rv: float, vix: float, atr: float, current_hmm: str):
+        price = tick.get("price", 0.0)
+        entry = pos.get("price", price)
+        elapsed = time.time() - pos.get("entry_time", time.time())
+        action = pos.get("action", "BUY")
+
+
 
         sl_mult = float(1.5 if (rv > 0.001 or vix > 18.0) else ATR_SL_MULTIPLIER)
         tp1_mult = float(ATR_TP1_MULTIPLIER)
@@ -414,6 +428,19 @@ class LiquidationDaemon:
 
         exit_reason = None
         is_partial = False
+
+        # Phase 13.3: Microstructure CVD Flip Exit
+        try:
+            cvd_raw = await self._redis.get("cvd_score")
+            cvd = float(cvd_raw or 0.0)
+            if (action == "BUY" and cvd < -CVD_FLIP_EXIT_THRESHOLD) or \
+               (action == "SELL" and cvd > CVD_FLIP_EXIT_THRESHOLD):
+                exit_reason = f"CVD_FLIP_EXIT: Score {cvd:.2f}"
+                await self._record_barrier_exit(symbol, "CVD_FLIP", exit_reason, price, entry)
+                await self._attempt_exit(pos, symbol, price, exit_reason)
+                return
+        except Exception: pass
+
         
         if action == "BUY":
             if not runner_active and price >= tp1:
@@ -424,9 +451,39 @@ class LiquidationDaemon:
                 elif current_hmm != entry_hmm and current_hmm in ["RANGING", "CRASH"]:
                     exit_reason = f"HMM_SHIFT: {entry_hmm} -> {current_hmm}"
             elif price <= sl: exit_reason = f"SL_HIT: {price:.2f} <= {sl:.2f}"
+        
+        elif action == "SELL":
+            # SELL logic (Short side)
+            sl_short = entry + sl_mult * atr
+            tp1_short = entry - tp1_mult * atr
+            tp2_short = entry - tp2_mult * atr
+            
+            if not runner_active and price <= tp1_short:
+                exit_reason = f"TP1_HIT_SHORT: {price:.2f} <= {tp1_short:.2f}"; is_partial = True
+            elif runner_active:
+                if price <= tp2_short: exit_reason = f"TP2_HIT_SHORT: {price:.2f} <= {tp2_short:.2f}"
+                elif price >= sl_short: exit_reason = f"INV_HUNT_SL_SHORT: {price:.2f} >= {sl_short:.2f}"
+                elif current_hmm != entry_hmm and current_hmm in ["RANGING", "BOOM"]:
+                    exit_reason = f"HMM_SHIFT_SHORT: {entry_hmm} -> {current_hmm}"
+            elif price >= sl_short: exit_reason = f"SL_HIT_SHORT: {price:.2f} >= {sl_short:.2f}"
 
+        # [C4-04] Stagnation exit: must check 0.1 ATR price band + time elapsed
         if not exit_reason and elapsed >= stall_timer:
-            exit_reason = f"THETA_STALL: {elapsed:.0f}s >= {stall_timer:.0f}s"
+            # Check price range within the stall window
+            tick_store_key = f"ticks:{symbol}"
+            try:
+                recent_prices_raw = await self._redis.lrange(tick_store_key, -50, -1)
+                if recent_prices_raw and len(recent_prices_raw) >= 2:
+                    recent_prices = [float(p) for p in recent_prices_raw]
+                    price_range = max(recent_prices) - min(recent_prices)
+                    if price_range < 0.1 * atr:
+                        exit_reason = f"THETA_STALL: Range {price_range:.2f} < 0.1*ATR({atr:.2f}) within {elapsed:.0f}s"
+                    # else: price moved enough, don't stall-exit
+                else:
+                    # Fallback: if we can't check range, use time-only
+                    exit_reason = f"THETA_STALL: {elapsed:.0f}s >= {stall_timer:.0f}s (no range data)"
+            except Exception:
+                exit_reason = f"THETA_STALL: {elapsed:.0f}s >= {stall_timer:.0f}s"
 
         if exit_reason:
             await self._record_barrier_exit(symbol, "KINETIC", exit_reason, float(price), float(entry))
@@ -435,7 +492,7 @@ class LiquidationDaemon:
             else:
                 await self._attempt_exit(pos, symbol, float(price), exit_reason)
 
-    async def _evaluate_positional_barriers(self, symbol: str, tick: dict, state: dict, pos: dict):
+    async def _evaluate_positional_barriers(self, symbol: str, tick: dict, state: dict, pos: dict, rv: float, vix: float, atr: float, current_hmm: str):
         """Hardened Positional Barriers (Spec 11.3)"""
         price = float(tick.get("price", 0.0))
         entry = float(pos.get("price", 0.0))
@@ -456,26 +513,158 @@ class LiquidationDaemon:
             await self._attempt_exit(pos, symbol, price, exit_reason)
             return
 
-        # 2. Spread Decay (Take Profit): Value <= 40% of initial credit
-        initial_credit = float(pos.get("initial_credit", 0.0))
-        if initial_credit > 0:
-            current_value = price 
-            if current_value / initial_credit <= 0.40:
-                exit_reason = f"SPREAD_DECAY_TP: {current_value:.2f} <= 40% of {initial_credit:.2f}"
-                await self._record_barrier_exit(symbol, "PROFIT_TAKING", exit_reason, price, entry)
+        # 2. DTE Vertical Barrier (Spec 11.3)
+        expiry_date = pos.get("expiry_date")
+        if expiry_date:
+            now = datetime.now(timezone.utc).date()
+            dte = (expiry_date - now).days
+            if dte < 3:
+                exit_reason = f"DTE_VERTICAL: DTE={dte} < 3 days. Clearing positional risk."
+                await self._record_barrier_exit(symbol, "TIME_LIMIT", exit_reason, price, entry)
                 await self._attempt_exit(pos, symbol, price, exit_reason)
                 return
 
-        # 3. Delta Tolerance Waterfall (Spec 11.4)
+        # 3. Spread Decay (Take Profit): Value <= 40% of initial credit (= 60% decayed)
+        initial_credit = float(pos.get("initial_credit", 0.0))
+        strategy_id = str(pos.get("strategy_id", ""))
+        if initial_credit > 0:
+            current_value = price 
+            # [S-04] DirectionalCredit uses 70% profit target (30% remaining)
+            if strategy_id == "DirectionalCredit":
+                tp_threshold = 0.30  # Exit when value <= 30% of credit (70% profit)
+            else:
+                tp_threshold = 0.40  # Iron Condor: 60% profit (40% remaining)
+            
+            if current_value / initial_credit <= tp_threshold:
+                exit_reason = f"SPREAD_DECAY_TP: {current_value:.2f} <= {tp_threshold*100:.0f}% of {initial_credit:.2f}"
+                await self._record_barrier_exit(symbol, "PROFIT_TAKING", exit_reason, price, entry)
+                await self._attempt_exit(pos, symbol, price, exit_reason)
+                return
+            
+            # [S-04] DirectionalCredit 2× credit stop-loss
+            if strategy_id == "DirectionalCredit":
+                max_loss_value = initial_credit * 2.0
+                if current_value >= max_loss_value:
+                    exit_reason = f"CREDIT_STOP: Value {current_value:.2f} >= 2× credit {initial_credit:.2f}"
+                    await self._record_barrier_exit(symbol, "STOP_LOSS", exit_reason, price, entry)
+                    await self._attempt_exit(pos, symbol, price, exit_reason)
+                    return
+
+        # 4. Delta Tolerance Waterfall (Spec 11.4)
         net_delta_raw = state.get("net_delta")
         net_delta = float(net_delta_raw) if net_delta_raw is not None else 0.0
         if abs(net_delta) > 0.15:
-            await self._execute_hedge_waterfall(pos, net_delta)
+            await self._execute_hedge_waterfall(pos, net_delta, rv)
 
-    async def _execute_hedge_waterfall(self, pos: dict, delta: float):
+    async def _evaluate_zero_dte_barriers(self, symbol: str, tick: dict, state: dict, pos: dict, rv: float, vix: float, atr: float, current_hmm: str):
+        """
+        [S-03] ZERO_DTE Exit Logic:
+        - Profit Target: 50% of credit received
+        - Aggressive Stop: Exit if underlying moves > 0.5% from inception
+        """
+        price = float(tick.get("price", 0.0))
+        entry = float(pos.get("price", 0.0))
+
+        # 1. Credit-based Take Profit (50%)
+        initial_credit = float(pos.get("initial_credit", 0.0))
+        if initial_credit > 0:
+            current_value = price
+            if current_value / initial_credit <= 0.50:  # 50% decayed = 50% profit
+                exit_reason = f"ZERO_DTE_TP: Value {current_value:.2f} <= 50% of credit {initial_credit:.2f}"
+                await self._record_barrier_exit(symbol, "ZERO_DTE_TP", exit_reason, price, entry)
+                await self._attempt_exit(pos, symbol, price, exit_reason)
+                return
+
+        # 2. Underlying Move Stop (0.5% from inception)
+        inception_spot = float(pos.get("inception_spot", entry))
+        if inception_spot > 0:
+            move_pct = abs(price - inception_spot) / inception_spot * 100
+            if move_pct > 0.5:
+                exit_reason = f"ZERO_DTE_STOP: Spot moved {move_pct:.2f}% > 0.5% from inception"
+                await self._record_barrier_exit(symbol, "ZERO_DTE_STOP", exit_reason, price, entry)
+                await self._attempt_exit(pos, symbol, price, exit_reason)
+                return
+
+        # 3. Fallback to kinetic barriers for time-based stall
+        elapsed = time.time() - pos.get("entry_time", time.time())
+        if elapsed > 300:  # 5 min stall for 0DTE
+            exit_reason = f"ZERO_DTE_STALL: {elapsed:.0f}s > 300s"
+            await self._record_barrier_exit(symbol, "ZERO_DTE_STALL", exit_reason, price, entry)
+            await self._attempt_exit(pos, symbol, price, exit_reason)
+
+    async def _execute_hedge_waterfall(self, pos: dict, delta: float, rv: float):
         """Hedge Waterfall Protocol (Spec 11.4)"""
-        logger.info(f"🌊 Waterfall Protocol for {pos['symbol']} | Delta={delta:.2f}")
-        pass
+        # Step 1: Rapid assessment
+        symbol = pos['symbol']
+        
+        logger.warning(f"🌊 Waterfall Protocol for {symbol} | Delta={delta:.2f} | RV={rv:.4f}")
+
+        if abs(delta) > 0.30 or rv > 0.003:
+             # Critical breach: liquidate immediately rather than hedging
+             exit_reason = f"WATERFALL_PANIC: Delta {delta:.2f} or RV {rv:.4f} too high."
+             await self._attempt_exit(pos, symbol, 0, exit_reason)
+             return
+
+        # Moderate breach: Dispatch neutralizing Hedge Order (Micro-Futures)
+        # Sizing: Target 0.0 delta. Since we are at ±0.15, we need to buy/sell ~0.15 of underlying notional.
+        # [Audit 11.4] Hedge intent must specify reason to avoid reconciler collisions
+        hedge_action = "BUY" if delta < 0 else "SELL"
+        hedge_qty = max(1, int(abs(delta) * 50)) # Proxy multiplier for micro-lot conversion
+        
+        hedge_order = {
+            "order_id": f"hedge_{uuid.uuid4().hex[:8]}",
+            "symbol": f"{pos.get('underlying', 'NIFTY50')}-FUT",
+            "action": hedge_action,
+            "quantity": hedge_qty,
+            "order_type": "MARKET",
+            "strategy_id": "DELTA_HEDGE",
+            "execution_type": pos.get("execution_type", "Paper"),
+            "parent_uuid": pos.get("parent_uuid"),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "reason": f"WATERFALL_HEDGE: Delta={delta:.2f}"
+        }
+
+        try:
+            await self.mq.send_json(self.order_pub, Topics.ORDER_INTENT, hedge_order)
+            logger.info(f"🛡️ STEP 1 HEDGE DISPATCHED: {hedge_action} {hedge_qty} Micro-FUT for {symbol}")
+            # Mark that we've hedged to prevent spamming
+            pos["last_hedge_ts"] = time.time()
+            pos["net_delta_at_hedge"] = delta
+        except Exception as e:
+            logger.error(f"Step 1 hedge dispatch failure: {e}")
+
+        # [C4-02] Step 2: If margin unavailable, roll untested IC side
+        margin_avail_raw = await self._redis.get("AVAILABLE_MARGIN_LIVE")
+        margin_avail = float(margin_avail_raw or 0)
+        if margin_avail < 10000:  # Not enough margin for futures hedge
+            logger.warning(f"🔄 WATERFALL STEP 2: Margin insufficient ({margin_avail:.0f}). Attempting IC Roll.")
+            # Publish a roll intent for the untested wing
+            roll_side = "PE" if delta > 0 else "CE"  # Roll opposite to breach direction
+            roll_order = {
+                "order_id": f"roll_{uuid.uuid4().hex[:8]}",
+                "symbol": symbol,
+                "action": "ROLL",
+                "side": roll_side,
+                "parent_uuid": pos.get("parent_uuid"),
+                "strategy_id": "DELTA_ROLL",
+                "execution_type": pos.get("execution_type", "Paper"),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "reason": f"WATERFALL_ROLL: Delta={delta:.2f}, margin={margin_avail:.0f}"
+            }
+            try:
+                await self.mq.send_json(self.order_pub, Topics.ORDER_INTENT, roll_order)
+                logger.info(f"🔄 ROLL DISPATCHED: {roll_side} wing for {symbol}")
+            except Exception as e:
+                logger.error(f"Step 2 roll failure: {e}")
+
+        # [C4-03] Step 3: Pro-rata slash if delta still extreme or margin > 90%
+        total_cap_raw = await self._redis.get("LIVE_CAPITAL_LIMIT")
+        total_cap = float(total_cap_raw or 800000)
+        margin_util_raw = await self._redis.get("CURRENT_MARGIN_UTILIZED")
+        margin_util = float(margin_util_raw or 0)
+        if abs(delta) >= 0.25 or (total_cap > 0 and (margin_util / total_cap) > 0.90):
+            logger.warning(f"🔪 WATERFALL STEP 3: Pro-rata 25% slash. Delta={delta:.2f}, Margin%={margin_util/max(total_cap,1)*100:.0f}%")
+            await self._attempt_partial_exit(pos, symbol, 0, f"PRORATA_SLASH: Delta={delta:.2f}", 0.25)
 
     # ── Exit Execution with HTTP 400 Handling ────────────────────────────────
 

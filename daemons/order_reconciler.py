@@ -20,6 +20,8 @@ class OrderReconciler:
         
         # In-flight baskets: {parent_uuid: {start_time, legs: []}}
         self.inflight_baskets = {}
+        # [C5-02] Rollback retry tracking: {parent_uuid: retry_count}
+        self.rollback_retries = {}
         
         # MQ Sockets
         self.cmd_pub = None
@@ -119,8 +121,33 @@ class OrderReconciler:
         """
         Circuit Breaker Rollback (Spec 11.3)
         Close whatever legs did execute to avoid naked tail risk.
+        [C5-02] Includes dead-letter queue after 3 failed attempts.
         """
-        logger.error(f"🚨 Basket {p_uuid} failed (Rejection/Breaker). Triggering Rollback Protocol.")
+        # Track retries
+        retry_count = self.rollback_retries.get(p_uuid, 0) + 1
+        self.rollback_retries[p_uuid] = retry_count
+
+        if retry_count > 3:
+            # [C5-02] Dead-letter escalation
+            logger.critical(f"💀 DEAD-LETTER: Basket {p_uuid} rollback failed {retry_count} times. Moving to CRITICAL_INTERVENTION.")
+            await self.r.rpush("CRITICAL_INTERVENTION", json.dumps({
+                "parent_uuid": p_uuid,
+                "legs": [{k: v for k, v in l.items() if isinstance(v, (str, int, float))} for l in all_legs],
+                "retry_count": retry_count,
+                "timestamp": time.time(),
+                "reason": "ROLLBACK_EXHAUSTED"
+            }))
+            from core.alerts import send_cloud_alert
+            asyncio.create_task(send_cloud_alert(
+                f"💀 DEAD LETTER: Basket {p_uuid} rollback failed {retry_count}x.\n"
+                f"MANUAL INTERVENTION REQUIRED!\n"
+                f"Check CRITICAL_INTERVENTION queue in Redis.",
+                alert_type="CRITICAL"
+            ))
+            self.rollback_retries.pop(p_uuid, None)
+            return
+
+        logger.error(f"🚨 Basket {p_uuid} failed (Rejection/Breaker). Rollback attempt {retry_count}/3.")
         
         # 1. Fire a global rollback command to SYSTEM_CMD (PUB/SUB)
         cmd = {
@@ -160,6 +187,9 @@ class OrderReconciler:
         logger.info("Order Reconciler active. Monitoring Multi-Leg Health.")
         self.cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD)
         self.order_push = self.mq.create_push(Ports.ORDERS, bind=False)
+
+        # [C5-01] Reboot Audit: Triple-Sync on startup
+        await self._reboot_audit()
         
         # Listen for new basket originations from MetaRouter
         # [Audit 2.1] Do NOT bind subscriber to SYSTEM_CMD, as StrategyEngine may own it or vice versa
@@ -188,6 +218,59 @@ class OrderReconciler:
             except Exception as e:
                 logger.error(f"Recv error: {e}")
                 await asyncio.sleep(1)
+
+    async def _reboot_audit(self):
+        """
+        [C5-01] Triple-Sync on Startup: Broker ↔ DB ↔ Redis
+        Scans pending_orders hash for orphans and auto-resolves:
+        - COMPLETE → Update DB, release margin
+        - OPEN → Leave as-is (still inflight)
+        - PHANTOM → Alert for manual intervention
+        """
+        logger.info("🔍 Reboot Audit: Scanning pending orders for orphans...")
+        try:
+            pending = await self.r.hgetall("pending_orders")
+            if not pending:
+                logger.info("✅ Reboot Audit: No pending orders found. Clean state.")
+                return
+
+            resolved = 0
+            phantoms = 0
+            for order_id, data_raw in pending.items():
+                try:
+                    data = json.loads(data_raw)
+                    dispatch_ts = data.get("dispatch_time_epoch", 0)
+                    age_s = time.time() - dispatch_ts
+
+                    # Check if order has a status update from the bridge
+                    status_raw = await self.r.get(f"order_status:{order_id}")
+                    if status_raw:
+                        status = json.loads(status_raw)
+                        st = status.get("status")
+                        if st == "COMPLETE":
+                            # Auto-resolve: remove from pending
+                            await self.r.hdel("pending_orders", order_id)
+                            resolved += 1
+                        elif st in ["REJECTED", "CANCELLED"]:
+                            await self.r.hdel("pending_orders", order_id)
+                            resolved += 1
+                    elif age_s > 300:  # 5 minutes with no status = phantom
+                        phantoms += 1
+                        logger.critical(f"👻 PHANTOM ORDER: {order_id} dispatched {age_s:.0f}s ago with no status.")
+                        from core.alerts import send_cloud_alert
+                        asyncio.create_task(send_cloud_alert(
+                            f"👻 PHANTOM ORDER on reboot: {order_id}\n"
+                            f"Symbol: {data.get('symbol')}\n"
+                            f"Age: {age_s:.0f}s\n"
+                            f"MANUAL VERIFICATION REQUIRED!",
+                            alert_type="CRITICAL"
+                        ))
+                except Exception as e:
+                    logger.error(f"Reboot audit error for {order_id}: {e}")
+
+            logger.info(f"✅ Reboot Audit Complete: {resolved} resolved, {phantoms} phantoms flagged.")
+        except Exception as e:
+            logger.error(f"Reboot audit failed: {e}")
 
 if __name__ == "__main__":
     if sys.platform == "win32":

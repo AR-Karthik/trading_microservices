@@ -75,57 +75,74 @@ class BaseStrategy:
 
 
 
-class OIPulseScalpingStrategy(BaseStrategy):
-    def __init__(self, strategy_id: str, symbols: list[str], oi_threshold: float = 2.0, **kwargs):
+class DirectionalCreditSpreadStrategy(BaseStrategy):
+    """
+    POSITIONAL: Professional Credit Spread strategy (2-leg).
+    Sells OTM options and buys further OTM for margin efficiency and tail protection.
+    """
+    def __init__(self, strategy_id: str, symbols: list[str], spread_width: float = 100, target_delta: float = 0.20, **kwargs):
         super().__init__(strategy_id, symbols)
-        self.oi_threshold = float(oi_threshold)
+        self.spread_width = float(spread_width)
+        self.target_delta = float(target_delta)
+        self.bs = BlackScholes()
 
-    def on_tick(self, symbol: str, data: dict) -> str | None:
-        price = data['price']
-        current_oi = data.get('oi', 0)
-        prev_oi = data.get('prev_oi', current_oi)
+    def on_tick(self, symbol: str, data: dict) -> list | None:
+        # Logistic governed by Meta-Router/Regime. Sensor provides alpha.
+        # This strategy is triggered for 'POSITIONAL' entries.
+        if not data.get('is_ranging', False) and not data.get('is_trending', False):
+            return None
         
-        if prev_oi == 0: return None
-        
-        oi_change_pct = (current_oi - prev_oi) / prev_oi * 100
-        
-        pos = self.positions[symbol]
-        if oi_change_pct > self.oi_threshold and pos <= 0:
-            return "BUY"
-        elif oi_change_pct < -self.oi_threshold and pos >= 0:
-            return "SELL"
+        price = float(data['price'])
+        # Directional logic: alpha balance determines CE vs PE
+        alpha = data.get('s_total', 0)
+        if alpha > 25: # Bullish Bias -> Bull Put Spread
+            otype = "PE"
+            s1 = round((price * 0.98) / 50) * 50
+            s2 = s1 - self.spread_width
+            parent_uuid = f"DCS_{uuid.uuid4().hex[:8]}"
+            return [
+                {"action": "SELL", "otype": "PE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
+                {"action": "BUY",  "otype": "PE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"}
+            ]
+        elif alpha < -25: # Bearish Bias -> Bear Call Spread
+            otype = "CE"
+            s1 = round((price * 1.02) / 50) * 50
+            s2 = s1 + self.spread_width
+            parent_uuid = f"DCS_{uuid.uuid4().hex[:8]}"
+            return [
+                {"action": "SELL", "otype": "CE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
+                {"action": "BUY",  "otype": "CE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"}
+            ]
         return None
 
-class AnchoredVWAPStrategy(BaseStrategy):
-    def __init__(self, strategy_id: str, symbols: list[str], anchor_time: str = "09:15:00", **kwargs):
+class TastyTrade0DTEStrategy(BaseStrategy):
+    """
+    ZERO_DTE: High-frequency theta harvesting for 0-DTE.
+    Enters ATM strangles/straddles to capture rapid decay with strict kinetic stops.
+    """
+    def __init__(self, strategy_id: str, symbols: list[str], **kwargs):
         super().__init__(strategy_id, symbols)
-        self.anchor_time = anchor_time
-        # [Audit 12.1] Bound the VWAP tick storage
-        self.tick_data = collections.defaultdict(lambda: collections.deque(maxlen=10000))
 
-    def on_tick(self, symbol: str, data: dict) -> str | None:
-        price = data['price']
-        volume = data.get('volume', 1) 
+    def on_tick(self, symbol: str, data: dict) -> list | None:
         now = datetime.now()
+        # [S-01] Only active on 0-DTE (Wed/Thu) between 09:30 and 10:30 IST
+        current_time = now.hour * 60 + now.minute  # minutes since midnight
+        if now.strftime("%A") not in ["Wednesday", "Thursday"]:
+            return None
+        if current_time < 570 or current_time > 630:  # 09:30=570, 10:30=630
+            return None
         
-        self.tick_data[symbol].append({
-            'time': now, 'price': price, 'volume': volume
-        })
-        
-        df = pd.DataFrame(list(self.tick_data[symbol]))
-        anchor_dt = datetime.combine(now.date(), datetime.strptime(self.anchor_time, "%H:%M:%S").time())
-        df = df[df['time'] >= anchor_dt]
-        
-        if df.empty: return None
-        
-        vwap = (df['price'] * df['volume']).sum() / df['volume'].sum()
-        
-        pos = self.positions[symbol]
-        if price > vwap and pos <= 0:
-            return "BUY"
-        elif price < vwap and pos >= 0:
-            return "SELL"
-        return None
+        price = float(data['price'])
+        # [S-02] Iron Butterfly (protected straddle) instead of naked straddle
+        atm_strike = round(price / 50) * 50
+        wing_offset = 200  # 200-point protective wings
+        parent_uuid = f"TT0_{uuid.uuid4().hex[:8]}"
+        return [
+            {"action": "SELL", "otype": "CE", "strike": atm_strike, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE"},
+            {"action": "BUY",  "otype": "CE", "strike": atm_strike + wing_offset, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE"},
+            {"action": "SELL", "otype": "PE", "strike": atm_strike, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE"},
+            {"action": "BUY",  "otype": "PE", "strike": atm_strike - wing_offset, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE"}
+        ]
 
 
 class GammaScalpingStrategy(BaseStrategy):
@@ -231,7 +248,7 @@ class CreditSpreadStrategy(BaseStrategy):
     def on_tick(self, symbol: str, data: dict) -> list | None:
         price = float(data['price'])
         T = self.expiry_years
-        r = float(self._redis.get("CONFIG:RISK_FREE_RATE") or 0.065)
+        r = 0.065  # [D-02] Fixed: was self._redis.get() which crashes (BaseStrategy has no _redis)
         iv = self.iv
         parent_uuid = f"CS_{uuid.uuid4().hex[:8]}"
 
@@ -259,11 +276,11 @@ async def config_subscriber(redis_client):
     logger.info("Starting dynamic configuration polling...")
 
     strategy_registry: dict[str, type[BaseStrategy]] = {
-        "OIPulse": OIPulseScalpingStrategy,
         "GammaScalping": GammaScalpingStrategy,
-        "AnchoredVWAP": AnchoredVWAPStrategy,
         "IronCondor": IronCondorStrategy,
-        "CreditSpread": CreditSpreadStrategy
+        "CreditSpread": CreditSpreadStrategy,
+        "DirectionalCredit": DirectionalCreditSpreadStrategy,
+        "TastyTrade0DTE": TastyTrade0DTEStrategy
     }
 
     while True:
@@ -272,7 +289,7 @@ async def config_subscriber(redis_client):
             current_ids = set()
             
             for strat_id_b, config_raw in configs.items():
-                strat_id = strat_id_b.decode('utf-8')
+                strat_id = strat_id_b  # [D-03] Fixed: decode_responses=True already returns str
                 current_ids.add(strat_id)
                 config = json.loads(config_raw)
                 
@@ -446,7 +463,12 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                 
                 # Veto entries if market is toxic OR alpha is severely negative
                 if is_toxic and alpha_total < 0: continue
- 
+
+                # [C6-01] Check HALT_KINETIC: block all new entries after 15:00 IST
+                halt_kinetic = await redis_client.get("HALT_KINETIC")
+                if halt_kinetic == "True":
+                    continue  # Block all new entries
+
                 signal = strategy.on_tick(symbol, tick)
                 if not signal: continue
                 

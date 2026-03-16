@@ -85,6 +85,8 @@ async def init_db(pool):
                 has_calendar_risk BOOLEAN DEFAULT FALSE,
                 quantity INTEGER NOT NULL DEFAULT 0,
                 avg_price NUMERIC(15, 2) DEFAULT 0.0,
+                initial_credit NUMERIC(15, 2) DEFAULT 0.0,
+                short_strikes JSONB DEFAULT '{}',
                 realized_pnl NUMERIC(15, 2) DEFAULT 0.0,
                 execution_type TEXT NOT NULL DEFAULT 'Paper',
                 updated_at TIMESTAMPTZ NOT NULL
@@ -134,13 +136,24 @@ class PaperBridge:
         )
         
         if not record:
-            await conn.execute(
-                """
-                INSERT INTO portfolio (symbol, strategy_id, parent_uuid, quantity, avg_price, execution_type, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                """,
-                symbol, strategy_id, parent_uuid, qty, price, exec_type, execution['time']
-            )
+                await conn.execute(
+                    """
+                    INSERT INTO portfolio (
+                        symbol, strategy_id, parent_uuid, underlying, lifecycle_class, 
+                        expiry_date, quantity, avg_price, initial_credit, short_strikes, 
+                        execution_type, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    """,
+                    symbol, strategy_id, parent_uuid, 
+                    execution.get('underlying'), 
+                    execution.get('lifecycle_class', 'KINETIC'),
+                    execution.get('expiry_date'),
+                    qty, price, 
+                    float(execution.get('initial_credit', 0.0)),
+                    json.dumps(execution.get('short_strikes', {})),
+                    exec_type, execution['time']
+                )
             return
 
         current_qty = float(record['quantity'])

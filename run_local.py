@@ -47,13 +47,8 @@ def start_services():
         ("Dashboard Frontend", f"{sys.executable} -m http.server 8501 --directory dashboard/frontend")
     ]
     
-    # Strategy Daemons
-    strategies = [
-        ("Strat Gamma", f"{sys.executable} -m daemons.strat_gamma"),
-        ("Strat Reversion", f"{sys.executable} -m daemons.strat_reversion"),
-        ("Strat Expiry", f"{sys.executable} -m daemons.strat_expiry"),
-        ("Strat EOD", f"{sys.executable} -m daemons.strat_eod_vwap")
-    ]
+    # Strategy Daemons (Handled by Strategy Engine dynamically now)
+    strategies = []
     processes.extend(strategies)
     
     # Data Ingestion

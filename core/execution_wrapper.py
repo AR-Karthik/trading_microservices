@@ -86,10 +86,15 @@ class MultiLegExecutor:
             await self.mq.send_json(cmd_pub, "BASKET_ORIGINATION", ping)
             cmd_pub.close()
 
+        # ── Step 3: JIT Feed Subscription (Spec 11.4) ────────────────────────
+        for order in sorted_orders:
+            exchange = getattr(self.engine, "_get_exchange", lambda x: "NFO")(order["symbol"])
+            await self.engine.redis.publish("dynamic_subscriptions", f"{exchange}|{order['symbol']}")
+        
         logger.info(f"⚡ Executing {len(sorted_orders)} legs {'sequentially' if sequential else 'atomically'}...")
         
         results = []
-        for order in sorted_orders:
+        for i, order in enumerate(sorted_orders):
             try:
                 # Use adaptive chasing for deep OTM wings
                 if order.get("is_otm", False):
@@ -97,10 +102,32 @@ class MultiLegExecutor:
                 else:
                     res = await self.engine.place_order(order)
                 results.append(res)
+                
+                # Wait for Fill Confirmation if it's a BUY leg of a multi-leg basket (Spec 11.4)
+                # This ensures margin is unlocked from the long leg before firing the short leg.
+                action = order.get("side", order.get("action"))
+                if sequential and action == "BUY" and i < len(sorted_orders) - 1:
+                    logger.info(f"⏳ Awaiting fill confirmation for {order['symbol']} before next leg...")
+                    # We listen for 5 seconds max
+                    pubsub = self.engine.redis.pubsub()
+                    await pubsub.subscribe("order_confirmations")
+                    
+                    confirmed = False
+                    start_t = asyncio.get_event_loop().time()
+                    while asyncio.get_event_loop().time() - start_t < 5.0:
+                        msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                        if msg:
+                            conf = json.loads(msg['data'])
+                            if conf.get("symbol") == order["symbol"] and conf.get("status") == "COMPLETE":
+                                confirmed = True
+                                break
+                    await pubsub.unsubscribe("order_confirmations")
+                    if not confirmed:
+                        logger.warning(f"⚠️ Fill confirmation timeout for {order['symbol']}. Proceeding anyway...")
+                        
             except Exception as e:
                 logger.error(f"Leg execution failed: {e}")
                 results.append(e)
-                # Rollback logic is handled by OrderReconciler upon timeout or failure
                 raise e 
 
         return results
