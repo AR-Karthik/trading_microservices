@@ -188,7 +188,7 @@ class GammaScalpingStrategy(BaseStrategy):
 
 class IronCondorStrategy(BaseStrategy):
     """Phase 7: Neutral market strategy using 4 option legs with dynamic strike selection."""
-    def __init__(self, strategy_id: str, symbols: list[str], wing_delta: float = 0.10, spread_delta: float = 0.25, expiry_days: float = 7, iv: float = 0.15, **kwargs):
+    def __init__(self, strategy_id: str, symbols: list[str], wing_delta: float = 0.10, spread_delta: float = 0.15, expiry_days: float = 7, iv: float = 0.15, **kwargs):  # [F9-03] spread_delta 0.25→0.15
         super().__init__(strategy_id, symbols)
         self.wing_delta = float(wing_delta)
         self.spread_delta = float(spread_delta)
@@ -399,6 +399,9 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
     
     shm_slots = {}
     last_shm_sync = 0
+    # [F12-01] Cache HALT_KINETIC to avoid Redis call per tick*strategy
+    halt_kinetic_cache = False
+    halt_kinetic_last_check = 0
     
     # Track real-time lot overrides from Meta-Router
     strategy_states = collections.defaultdict(lambda: {"lots": 1, "active": True})
@@ -437,7 +440,7 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
             # Periodically sync SHM slot mapping from Redis
             if time.time() - last_shm_sync > 10:
                 shm_slots_raw = await redis_client.hgetall("shm_slots")
-                shm_slots = {k.decode(): int(v) for k, v in shm_slots_raw.items()}
+                shm_slots = {k: int(v) for k, v in shm_slots_raw.items()}  # [F1-02] decode_responses=True already returns str
                 last_shm_sync = time.time()
  
             symbol = tick_msg.get("symbol")
@@ -455,6 +458,12 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
             is_toxic = qstate.get("toxic_veto", False) if qstate else False
             alpha_total = qstate.get("s_total", 0.0) if qstate else 0.0
  
+            # [F12-01] Refresh HALT_KINETIC cache every 5 seconds (not per tick)
+            if time.time() - halt_kinetic_last_check > 5:
+                halt_kinetic_val = await redis_client.get("HALT_KINETIC")
+                halt_kinetic_cache = (halt_kinetic_val == "True")
+                halt_kinetic_last_check = time.time()
+
             for strategy in list(active_strategies.values()):
                 s_id = strategy.strategy_id
                 if symbol not in strategy.symbols: continue  
@@ -465,8 +474,7 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                 if is_toxic and alpha_total < 0: continue
 
                 # [C6-01] Check HALT_KINETIC: block all new entries after 15:00 IST
-                halt_kinetic = await redis_client.get("HALT_KINETIC")
-                if halt_kinetic == "True":
+                if halt_kinetic_cache:
                     continue  # Block all new entries
 
                 signal = strategy.on_tick(symbol, tick)
@@ -540,7 +548,8 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "price": price,   
                         "strategy_id": strategy.strategy_id,
-                        "execution_type": strategy.execution_type
+                        "execution_type": strategy.execution_type,
+                        "lifecycle_class": leg.get("lifecycle", "KINETIC") if isinstance(leg, dict) else "KINETIC"  # [F4-02]
                     }
                     
                     # Track dispatch time for phantom detection

@@ -76,7 +76,7 @@ class MQManager:
         else:
             socket.connect(addr)
             self.logger.info(f"Publisher connected to {addr}")
-        # Audit 2.4: PUB sockets do not receive, no RCVTIMEO needed.
+        socket.setsockopt(zmq.LINGER, 1000)  # [F2-02] Prevent shutdown hang
         return socket
 
     def create_subscriber(self, port: int, topics: list | None = None, bind: bool = False):
@@ -99,6 +99,7 @@ class MQManager:
             else:
                 socket.setsockopt(zmq.SUBSCRIBE, topic)
         socket.setsockopt(zmq.RCVTIMEO, 5000)
+        socket.setsockopt(zmq.LINGER, 1000)  # [F2-02]
         return socket
 
     def create_push(self, port: int, bind: bool = True):
@@ -112,7 +113,7 @@ class MQManager:
         else:
             socket.connect(addr)
             self.logger.info(f"Push socket connected to {addr}")
-        socket.setsockopt(zmq.RCVTIMEO, 5000)
+        socket.setsockopt(zmq.LINGER, 1000)  # [F2-02] [F2-03] Removed RCVTIMEO (PUSH never receives)
         return socket
 
     def create_pull(self, port: int, bind: bool = False):
@@ -127,6 +128,7 @@ class MQManager:
             socket.connect(addr)
             self.logger.info(f"Pull socket connected to {addr}")
         socket.setsockopt(zmq.RCVTIMEO, 5000)
+        socket.setsockopt(zmq.LINGER, 1000)  # [F2-02]
         return socket
 
     def create_dealer(self, port: int, identity: bytes | None = None, bind: bool = False):
@@ -143,6 +145,7 @@ class MQManager:
             socket.connect(addr)
             self.logger.info(f"Dealer socket connected to {addr}")
         socket.setsockopt(zmq.RCVTIMEO, 5000)
+        socket.setsockopt(zmq.LINGER, 1000)  # [F2-02]
         return socket
 
     def create_router(self, port: int, bind: bool = True):
@@ -157,6 +160,7 @@ class MQManager:
             socket.connect(addr)
             self.logger.info(f"Router socket connected to {addr}")
         socket.setsockopt(zmq.RCVTIMEO, 5000)
+        socket.setsockopt(zmq.LINGER, 1000)  # [F2-02]
         return socket
 
     async def send_dealer(self, socket, data: dict, topic: str = None):

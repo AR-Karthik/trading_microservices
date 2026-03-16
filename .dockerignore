@@ -1,0 +1,18 @@
+# [F15-01] Prevent secrets, build artifacts, and unnecessary files from Docker images
+.git
+.gitignore
+.env
+.env.*
+__pycache__
+*.pyc
+*.pyo
+data/
+logs/
+*.log
+*.txt
+*.md
+*.zip
+.vscode/
+.idea/
+.agents/
+node_modules/

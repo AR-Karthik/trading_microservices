@@ -58,6 +58,7 @@ class HealthAggregator:
     """Used by SystemController to compute aggregate health scores."""
     def __init__(self, redis_client):
         self.redis = redis_client
+        # [F7-01] [F11-01] Only include daemons that actually send heartbeats
         self.required_daemons = [
             Daemons.DATA_GATEWAY, 
             Daemons.MARKET_SENSOR, 
@@ -71,9 +72,7 @@ class HealthAggregator:
             Daemons.LIQUIDATION_DAEMON, 
             Daemons.ORDER_RECONCILER,
             Daemons.SYSTEM_CONTROLLER,
-            Daemons.DATA_LOGGER,
             Daemons.CLOUD_PUBLISHER,
-            Daemons.TELEGRAM_ALERTER
         ]
 
     async def get_system_health(self) -> Dict:

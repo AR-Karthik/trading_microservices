@@ -117,7 +117,16 @@ class SystemController:
 
     async def start(self):
         self.redis = redis.from_url(self.redis_url, decode_responses=True)
-        self.pool = await asyncpg.create_pool(os.getenv("DB_DSN", "postgresql://user:pass@localhost/trading"), min_size=1, max_size=5)
+        # [F10-01] Add DB connection retry loop
+        retry_count = 0
+        while True:
+            try:
+                self.pool = await asyncpg.create_pool(os.getenv("DB_DSN", "postgresql://user:pass@localhost/trading"), min_size=1, max_size=5, timeout=5.0)
+                break
+            except Exception as e:
+                retry_count += 1
+                logger.error(f"SystemController DB connect failed (Attempt {retry_count}): {e}")
+                await asyncio.sleep(min(5 * retry_count, 60))
         self._macro_events = self._load_macro_calendar()
 
         # ── Setup Hard Global Budget Constraint ──

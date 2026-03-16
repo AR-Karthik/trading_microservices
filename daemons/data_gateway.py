@@ -24,7 +24,7 @@ import pyotp
 from dotenv import load_dotenv
 
 import redis.asyncio as redis
-from core.mq import MQManager, Ports, Topics
+from core.mq import MQManager, Ports, Topics, NumpyEncoder  # [F1-04] Added NumpyEncoder
 from core.greeks import BlackScholes
 from core.alerts import send_cloud_alert
 from core.network_utils import exponential_backoff
@@ -81,7 +81,8 @@ SHOONYA_SUBSCRIPTIONS = [
 ]
 
 # Default dynamic lot sizes (updated from broker at 09:01 IST)
-DEFAULT_LOT_SIZES = {"NIFTY50": 25, "BANKNIFTY": 15, "SENSEX": 10, "RELIANCE": 250, "HDFCBANK": 550, "ICICIBANK": 700, "INFY": 400, "TCS": 175, "ITC": 1600, "SBIN": 1500, "AXISBANK": 625, "KOTAKBANK": 400, "LT": 300}
+# [F5-01] Updated defaults to match spec (Nifty=65, BankNifty=30)
+DEFAULT_LOT_SIZES = {"NIFTY50": 65, "BANKNIFTY": 30, "SENSEX": 10, "RELIANCE": 250, "HDFCBANK": 550, "ICICIBANK": 700, "INFY": 400, "TCS": 175, "ITC": 1600, "SBIN": 1500, "AXISBANK": 625, "KOTAKBANK": 400, "LT": 300}
 
 # Asset-specific tick sizes and ratios
 TICK_SIZES = {
@@ -423,7 +424,11 @@ class DataGateway:
                             
                     raw_tick = {'t': 'tk', 'tk': token, 'lp': str(price), 'v': str(random.randint(1, 100))}
                 else:
-                    raw_tick = await self.tick_queue.get()
+                    # [F14-01] Added timeout to prevent indefinite blocking on dead WebSocket
+                    try:
+                        raw_tick = await asyncio.wait_for(self.tick_queue.get(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
 
                 if raw_tick.get('t') not in ('tk', 'tf'):
                     continue
@@ -482,7 +487,7 @@ class DataGateway:
                     pipe.set(f"latest_tick:{symbol}", json.dumps(tick, cls=NumpyEncoder))
                     history_key = f"tick_history:{symbol}"
                     pipe.rpush(history_key, json.dumps(tick, cls=NumpyEncoder))
-                    pipe.ltrim(history_key, -10000, -1)
+                    pipe.ltrim(history_key, -2000, -1)  # [F12-02] Reduced from 10000 to save Redis memory
                     await pipe.execute()
                 
                 self._last_tick_ts[symbol] = now_ts.timestamp()
@@ -534,8 +539,8 @@ class DataGateway:
                         self.last_expiry_sync = now_ts
                     
                     # Select ideal strikes
-                    ce_strike = self.get_optimal_strike(spot, "call")
-                    pe_strike = self.get_optimal_strike(spot, "put")
+                    ce_strike = await self.get_optimal_strike(spot, "call")  # [F9-01] Added missing await
+                    pe_strike = await self.get_optimal_strike(spot, "put")   # [F9-01] Added missing await
                     
                     # Construct and Subscribe
                     shoonya_symbol = "NIFTY" if idx == "NIFTY50" else idx
@@ -783,6 +788,9 @@ class DataGateway:
         Broadcasts SYSTEM_HALT with time-of-day appropriate sleep duration.
         """
         logger.info("Circuit breaker monitor active.")
+        # [F1-03] Wait for first prices to populate before monitoring
+        while "NIFTY50" not in self._prices or "BANKNIFTY" not in self._prices:
+            await asyncio.sleep(2)
         base_nifty = self._prices["NIFTY50"]
         base_banknifty = self._prices["BANKNIFTY"]
 

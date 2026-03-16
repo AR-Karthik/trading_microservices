@@ -89,7 +89,8 @@ async def init_db(pool):
                 short_strikes JSONB DEFAULT '{}',
                 realized_pnl NUMERIC(15, 2) DEFAULT 0.0,
                 execution_type TEXT NOT NULL DEFAULT 'Paper',
-                updated_at TIMESTAMPTZ NOT NULL
+                updated_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (symbol, strategy_id, parent_uuid, execution_type)  -- [F6-01]
             );
         """)
         
@@ -136,24 +137,24 @@ class PaperBridge:
         )
         
         if not record:
-                await conn.execute(
-                    """
-                    INSERT INTO portfolio (
-                        symbol, strategy_id, parent_uuid, underlying, lifecycle_class, 
-                        expiry_date, quantity, avg_price, initial_credit, short_strikes, 
-                        execution_type, updated_at
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                    """,
-                    symbol, strategy_id, parent_uuid, 
-                    execution.get('underlying'), 
-                    execution.get('lifecycle_class', 'KINETIC'),
-                    execution.get('expiry_date'),
-                    qty, price, 
-                    float(execution.get('initial_credit', 0.0)),
-                    json.dumps(execution.get('short_strikes', {})),
-                    exec_type, execution['time']
+            await conn.execute(
+                """
+                INSERT INTO portfolio (
+                    symbol, strategy_id, parent_uuid, underlying, lifecycle_class, 
+                    expiry_date, quantity, avg_price, initial_credit, short_strikes, 
+                    execution_type, updated_at
                 )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                """,
+                symbol, strategy_id, parent_uuid, 
+                execution.get('underlying'), 
+                execution.get('lifecycle_class', 'KINETIC'),
+                execution.get('expiry_date'),
+                qty, price, 
+                float(execution.get('initial_credit', 0.0)),
+                json.dumps(execution.get('short_strikes', {})),
+                exec_type, execution['time']
+            )
             return
 
         current_qty = float(record['quantity'])
@@ -209,7 +210,7 @@ class PaperBridge:
                 now = time.time()
                 while self.order_timestamps and self.order_timestamps[0] <= now - 1.0:
                     self.order_timestamps.popleft()
-                if len(self.order_timestamps) >= 10:
+                if len(self.order_timestamps) >= 8:  # [F5-02] 10→8 to match spec (8 req/sec)
                     await asyncio.sleep(0.1)
                     continue
                 self.order_timestamps.append(now)
@@ -230,10 +231,13 @@ class PaperBridge:
                 
                 async with self.pool.acquire() as conn:
                     async with conn.transaction():
+                        # [F4-01] Include audit_tags with heuristic state at time of trade
+                        regime_raw = await self.redis.get("hmm_regime") or "UNKNOWN"
+                        audit_tags = json.dumps({"regime": regime_raw, "execution_type": execution.get('execution_type', 'Paper')})
                         await conn.execute(
-                            "INSERT INTO trades (id, time, symbol, action, quantity, price, fees, strategy_id, execution_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                            "INSERT INTO trades (id, time, symbol, action, quantity, price, fees, strategy_id, execution_type, audit_tags) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                             execution['id'], execution['time'], execution['symbol'], execution['action'],
-                            execution['quantity'], execution['price'], execution['fees'], execution['strategy_id'], execution['execution_type']
+                            execution['quantity'], execution['price'], execution['fees'], execution['strategy_id'], execution['execution_type'], audit_tags
                         )
                         await self.update_portfolio(conn, execution, fees)
                 
@@ -245,7 +249,8 @@ class PaperBridge:
                 }))
                 
                 # ZMQ broadcast
-                await self.mq.send_json(self.trade_pub_socket, {"type": "EXECUTION", "symbol": execution['symbol'], "price": execution['price']}, topic=f"EXEC.{execution['symbol']}")
+                # [F2-01] Fixed: send_json signature is (socket, topic, data) — topic must be 2nd arg
+                await self.mq.send_json(self.trade_pub_socket, f"EXEC.{execution['symbol']}", {"type": "EXECUTION", "symbol": execution['symbol'], "price": execution['price']})
                 logger.info(f"Executed {execution['action']} {execution['symbol']} @ {execution['price']}")
 
             except Exception as e:

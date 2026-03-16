@@ -70,7 +70,7 @@ Let's establish the institutional-grade requirements for **Component 1: The Heur
 * **Lifecycle Classification**: The router must append a `lifecycle_class` tag (`KINETIC`, `POSITIONAL`, or `ZERO_DTE`) to every order payload to dictate the downstream exit physics.
 * **JIT Strike Resolution**: For option strategies, the router must resolve the current **ATM (At-The-Money) strike** and select the appropriate OTM (Out-Of-The-Money) strikes based on Delta targets (e.g., 15 Delta for Iron Condors) before dispatching.
 
-### **2. Capital Allocation & Sizing Guards (₹8,00,000 Portfolio)**
+### **2. Capital Allocation & Sizing Guards **
 
 | Constraint | Specification | Institutional "Why" |
 | --- | --- | --- |
@@ -95,7 +95,7 @@ Let's establish the institutional-grade requirements for **Component 1: The Heur
 
 ### **5. Production Validation (The "Certify" Test Case)**
 
-* **Setup**: Set the global `AVAILABLE_MARGIN_LIVE` to ₹8,00,000 and trigger a mock `IronCondor` signal.
+* **Setup**: Set the global `AVAILABLE_MARGIN_LIVE` to ₹1,00,000 and trigger a mock `IronCondor` signal.
 * **Action**: Observe the generated JSON payload in the ZMQ `ORDERS_LIVE` stream.
 * **Success Criteria**:
 1. The payload contains exactly **4 legs** with unique `symbol` tokens.
@@ -300,7 +300,7 @@ In the event of an execution anomaly, the reconciler must enforce the following 
 
 
 
-We are now establishing the institutional-grade requirements for **Component 7: Observability & Citadel-Style Dashboard (`cloud_publisher.py` / UI)**. This component is the system's "Vision," providing real-time transparency into the mathematical health, risk exposure, and execution performance of the ₹8,00,000 portfolio.
+We are now establishing the institutional-grade requirements for **Component 7: Observability & Citadel-Style Dashboard (`cloud_publisher.py` / UI)**. This component is the system's "Vision," providing real-time transparency into the mathematical health, risk exposure, and execution performance of the portfolio.
 
 ### **1. Functional Requirements**
 

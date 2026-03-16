@@ -314,17 +314,21 @@ class LiquidationDaemon:
         Should be called once per market_monitor tick cycle.
         """
         try:
-            # Fetch the user-configured limit (default ₹5000)
-            stop_limit = float(await self._redis.get("STOP_DAY_LOSS") or 5000.0)
+            # Fetch the user-configured limit (default ₹16,000 = 2% of ₹8,00,000 per spec §4.3)
+            stop_limit = float(await self._redis.get("STOP_DAY_LOSS") or 16000.0)  # [F9-02]
 
-            # Check both paper and live daily realized P&L
+            # Check both paper and live daily realized P&L + unrealized MTM
             for mode_suffix in ["PAPER", "LIVE"]:
                 day_pnl_raw = await self._redis.get(f"DAILY_REALIZED_PNL_{mode_suffix}")
                 day_pnl = float(day_pnl_raw or 0.0)
+                # [F9-02] Include unrealized MTM as spec requires realized + unrealized
+                unrealized_raw = await self._redis.get(f"DAILY_UNREALIZED_PNL_{mode_suffix}")
+                unrealized = float(unrealized_raw or 0.0)
+                total_pnl = day_pnl + unrealized
                 breach_key = f"STOP_DAY_LOSS_BREACHED_{mode_suffix}"
 
                 limit_val = float(stop_limit)
-                if day_pnl <= -limit_val:
+                if total_pnl <= -limit_val:
                     already_breached = await self._redis.get(breach_key) == "True"
                     if not already_breached:
                         # Set the breach flag — execution bridges check this before accepting new orders
@@ -470,7 +474,7 @@ class LiquidationDaemon:
         # [C4-04] Stagnation exit: must check 0.1 ATR price band + time elapsed
         if not exit_reason and elapsed >= stall_timer:
             # Check price range within the stall window
-            tick_store_key = f"ticks:{symbol}"
+            tick_store_key = f"tick_history:{symbol}"  # [F3-04] Fixed: was 'ticks:', actual key is 'tick_history:'
             try:
                 recent_prices_raw = await self._redis.lrange(tick_store_key, -50, -1)
                 if recent_prices_raw and len(recent_prices_raw) >= 2:
@@ -634,8 +638,10 @@ class LiquidationDaemon:
             logger.error(f"Step 1 hedge dispatch failure: {e}")
 
         # [C4-02] Step 2: If margin unavailable, roll untested IC side
-        margin_avail_raw = await self._redis.get("AVAILABLE_MARGIN_LIVE")
-        margin_avail = float(margin_avail_raw or 0)
+        # [F3-01] Fixed: use actual Redis keys (CASH_COMPONENT_LIVE + COLLATERAL_COMPONENT_LIVE)
+        cash_raw = await self._redis.get("CASH_COMPONENT_LIVE")
+        coll_raw = await self._redis.get("COLLATERAL_COMPONENT_LIVE")
+        margin_avail = float(cash_raw or 0) + float(coll_raw or 0)
         if margin_avail < 10000:  # Not enough margin for futures hedge
             logger.warning(f"🔄 WATERFALL STEP 2: Margin insufficient ({margin_avail:.0f}). Attempting IC Roll.")
             # Publish a roll intent for the untested wing
@@ -660,8 +666,11 @@ class LiquidationDaemon:
         # [C4-03] Step 3: Pro-rata slash if delta still extreme or margin > 90%
         total_cap_raw = await self._redis.get("LIVE_CAPITAL_LIMIT")
         total_cap = float(total_cap_raw or 800000)
-        margin_util_raw = await self._redis.get("CURRENT_MARGIN_UTILIZED")
-        margin_util = float(margin_util_raw or 0)
+        # [F3-02] Compute margin utilization from (total capital - available margin)
+        cash_avail_raw = await self._redis.get("CASH_COMPONENT_LIVE")
+        coll_avail_raw = await self._redis.get("COLLATERAL_COMPONENT_LIVE")
+        margin_available = float(cash_avail_raw or 0) + float(coll_avail_raw or 0)
+        margin_util = max(0, total_cap - margin_available)
         if abs(delta) >= 0.25 or (total_cap > 0 and (margin_util / total_cap) > 0.90):
             logger.warning(f"🔪 WATERFALL STEP 3: Pro-rata 25% slash. Delta={delta:.2f}, Margin%={margin_util/max(total_cap,1)*100:.0f}%")
             await self._attempt_partial_exit(pos, symbol, 0, f"PRORATA_SLASH: Delta={delta:.2f}", 0.25)
