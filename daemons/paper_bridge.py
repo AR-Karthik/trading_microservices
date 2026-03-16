@@ -142,9 +142,9 @@ class PaperBridge:
                 INSERT INTO portfolio (
                     symbol, strategy_id, parent_uuid, underlying, lifecycle_class, 
                     expiry_date, quantity, avg_price, initial_credit, short_strikes, 
-                    execution_type, updated_at
+                    execution_type, updated_at, has_calendar_risk
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 """,
                 symbol, strategy_id, parent_uuid, 
                 execution.get('underlying'), 
@@ -153,7 +153,8 @@ class PaperBridge:
                 qty, price, 
                 float(execution.get('initial_credit', 0.0)),
                 json.dumps(execution.get('short_strikes', {})),
-                exec_type, execution['time']
+                exec_type, execution['time'],
+                execution.get('has_calendar_risk', False)
             )
             return
 
@@ -312,6 +313,37 @@ class PaperBridge:
         
         logger.info(f"✅ Rollback complete for {parent_uuid}. Portfolio flushed.")
 
+    async def panic_listener(self):
+        """Phase 13.3: Listens for Global Square Off commands via Redis PubSub."""
+        pubsub = self.redis.pubsub()
+        await pubsub.subscribe("panic_channel")
+        logger.info("Paper Panic listener active on 'panic_channel'. Listening for Paper mode blasts...")
+        
+        async for message in pubsub.listen():
+            if message['type'] == 'message':
+                try:
+                    data = json.loads(message['data'])
+                    action = data.get('action', '')
+                    exec_type = data.get('execution_type', '')
+                    if action in ["SQUARE_OFF", "SQUARE_OFF_ALL"] and exec_type in ["Paper", "ALL"]:
+                        logger.critical("🚨 RECEIVED PAPER PANIC SIGNAL: SQUARING OFF PAPER POSITIONS! 🚨")
+                        
+                        async with self.pool.acquire() as conn:
+                            rows = await conn.fetch("SELECT parent_uuid FROM portfolio WHERE quantity != 0 AND execution_type = 'Paper'")
+                            parent_uuids = set(row["parent_uuid"] for row in rows)
+                            
+                            for puuid in parent_uuids:
+                                await self._handle_basket_rollback(puuid)
+                                
+                        logger.critical("✅ Paper Panic Square-off Completed.")
+                        asyncio.create_task(send_cloud_alert(
+                            "🚨 PAPER PANIC LIQUIDATION COMPLETED\n"
+                            "All paper positions have been closed with simulated market orders.",
+                            alert_type="CRITICAL"
+                        ))
+                except Exception as e:
+                    logger.error(f"Paper Panic exception: {e}")
+
 async def calculate_slippage_and_fees(order: dict) -> tuple[float, float]:
     price = float(order['price'])
     slip = random.uniform(0.3, 0.5)
@@ -344,7 +376,11 @@ async def main():
     if pool:
         await init_db(pool)
         bridge = PaperBridge(mq, pool, r)
-        await asyncio.gather(bridge.execute_orders(pull_socket), _run_heartbeat(r))
+        await asyncio.gather(
+            bridge.execute_orders(pull_socket),
+            bridge.panic_listener(),
+            _run_heartbeat(r)
+        )
     else:
         logger.critical("Failed to connect to the database after retries. Exiting.")
 

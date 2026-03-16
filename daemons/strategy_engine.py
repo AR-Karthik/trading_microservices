@@ -11,7 +11,7 @@ import os
 from redis import asyncio as redis
 from datetime import datetime, timezone
 from core.logger import setup_logger
-from core.mq import MQManager, Ports, RedisLogger, Topics
+from core.mq import MQManager, Ports, RedisLogger, Topics, NumpyEncoder  # [R2-01] Added NumpyEncoder
 from core.greeks import BlackScholes
 import re
 from core.shared_memory import TickSharedMemory
@@ -80,7 +80,7 @@ class DirectionalCreditSpreadStrategy(BaseStrategy):
     POSITIONAL: Professional Credit Spread strategy (2-leg).
     Sells OTM options and buys further OTM for margin efficiency and tail protection.
     """
-    def __init__(self, strategy_id: str, symbols: list[str], spread_width: float = 100, target_delta: float = 0.20, **kwargs):
+    def __init__(self, strategy_id: str, symbols: list[str], spread_width: float = 100, target_delta: float = 0.25, **kwargs):  # [R2-12] 0.20→0.25 per spec
         super().__init__(strategy_id, symbols)
         self.spread_width = float(spread_width)
         self.target_delta = float(target_delta)
@@ -163,7 +163,10 @@ class GammaScalpingStrategy(BaseStrategy):
         self.expiry_years -= dt
         self.last_calc_time = now
         
-        if self.expiry_years <= 0: return None
+        if self.expiry_years <= 0:
+            # [R2-16] Reset from Redis or default to prevent permanent disable
+            self.expiry_years = 30.0 / 365.0
+            return None
         
         # [Audit 1.3] Check if symbol is an option (e.g. contains CE or PE) to adjust strike
         dynamic_strike = self.strike
@@ -213,7 +216,8 @@ class IronCondorStrategy(BaseStrategy):
     def on_tick(self, symbol: str, data: dict) -> list | None:
         # Only enter in 'High Volatility Chop' regime or similar
         price = float(data['price'])
-        if not data.get('is_ranging', False): return None
+        # [R2-15] IC authorized in RANGING and HIGH_VOL_CHOP per spec §Strategy 2
+        if not data.get('is_ranging', False) and not data.get('is_high_vol_chop', False): return None
         
         T = self.expiry_years
         r = 0.065 # Standardized Risk-free rate (Audit 5.1)
@@ -228,10 +232,10 @@ class IronCondorStrategy(BaseStrategy):
         parent_uuid = f"IC_{uuid.uuid4().hex[:8]}"
         
         return [
-            {"action": "BUY",  "otype": "PE", "strike": s_put_wing,  "parent_uuid": parent_uuid},
-            {"action": "SELL", "otype": "PE", "strike": s_put_main,  "parent_uuid": parent_uuid},
-            {"action": "SELL", "otype": "CE", "strike": s_call_main, "parent_uuid": parent_uuid},
-            {"action": "BUY",  "otype": "CE", "strike": s_call_wing, "parent_uuid": parent_uuid}
+            {"action": "BUY",  "otype": "PE", "strike": s_put_wing,  "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
+            {"action": "SELL", "otype": "PE", "strike": s_put_main,  "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
+            {"action": "SELL", "otype": "CE", "strike": s_call_main, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
+            {"action": "BUY",  "otype": "CE", "strike": s_call_wing, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"}
         ]
 
 class CreditSpreadStrategy(BaseStrategy):
@@ -257,15 +261,15 @@ class CreditSpreadStrategy(BaseStrategy):
             s1 = round((price * 0.98) / 50) * 50 # Approximation for speed or use find_strike
             s2 = s1 - self.spread_width
             return [
-                {"action": "SELL", "otype": "PE", "strike": s1, "parent_uuid": parent_uuid},
-                {"action": "BUY",  "otype": "PE", "strike": s2, "parent_uuid": parent_uuid}
+                {"action": "SELL", "otype": "PE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
+                {"action": "BUY",  "otype": "PE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"}
             ]
         else: # Bear Call Spread
             s1 = round((price * 1.02) / 50) * 50
             s2 = s1 + self.spread_width
             return [
-                {"action": "SELL", "otype": "CE", "strike": s1, "parent_uuid": parent_uuid},
-                {"action": "BUY",  "otype": "CE", "strike": s2, "parent_uuid": parent_uuid}
+                {"action": "SELL", "otype": "CE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
+                {"action": "BUY",  "otype": "CE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"}
             ]
 
 # Global state for dynamic strategies

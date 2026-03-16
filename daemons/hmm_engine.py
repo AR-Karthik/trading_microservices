@@ -79,8 +79,10 @@ class HeuristicEngine:
             history_raw = await self.r.get(f"history_14d:{self.asset_id}")
             if history_raw:
                 self.history_14d = json.loads(history_raw)
-                self.rv_val = self._calculate_realized_vol(self.history_14d)
-                self.adx_val = self._calculate_adx_approximation(self.history_14d)
+                # [R2-13] Spec says 10-day RV; use last 11 closes for 10 returns
+                rv_closes = self.history_14d[-11:] if len(self.history_14d) >= 11 else self.history_14d
+                self.rv_val = self._calculate_realized_vol(rv_closes)
+                self.adx_val = self._calculate_adx_approximation(self.history_14d)  # ADX uses full 14-period
             
             # Load live PCR from DataGateway
             pcr_raw = await self.r.get(f"live_pcr:{self.asset_id}")
@@ -92,8 +94,8 @@ class HeuristicEngine:
             if iv_raw:
                 self.iv_val = float(iv_raw)
 
-            # [C1-03] Load live VPIN (Flow Toxicity)
-            vpin_raw = await self.r.get("vpin")
+            # [R2-07] Use per-asset VPIN key with global fallback
+            vpin_raw = await self.r.get(f"vpin:{self.asset_id}") or await self.r.get("vpin")
             if vpin_raw:
                 self.vpin_val = float(vpin_raw)
 
@@ -243,10 +245,11 @@ class HeuristicEngine:
                     "timestamp": datetime.now().isoformat()
                 }, cls=NumpyEncoder))
                 
-                # Link legacy key for primary index monitoring
+                # [R2-06] Set per-asset regime key for all assets (not just NIFTY50)
+                await self.r.set(f"hmm_regime:{self.asset_id}", legacy_regime)
+                # Keep legacy singleton for NIFTY50 backward compat
                 if self.asset_id == "NIFTY50":
                     await self.r.set("hmm_regime", legacy_regime)
-                    await self.r.set("hmm_regime:NIFTY50", legacy_regime)
                 
             except Exception as e:
                 logger.error(f"Heuristic Engine [{self.asset_id}] loop error: {e}")

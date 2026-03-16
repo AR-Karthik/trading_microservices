@@ -64,7 +64,7 @@ class LiveExecutionEngine:
         self.vc = os.getenv("SHOONYA_VC")
         self.app_key = os.getenv("SHOONYA_APP_KEY")
         self.imei = os.getenv("SHOONYA_IMEI", "abc1234")
-        self.daily_loss_limit = float(os.getenv("DAILY_LOSS_LIMIT", "-5000.0"))
+        self.daily_loss_limit = float(os.getenv("DAILY_LOSS_LIMIT", "-16000.0"))  # [R2-11] -5000→-16000 per spec §4.3
         
         self.is_kill_switch_triggered = False
         self.total_realized_pnl = 0.0
@@ -134,18 +134,19 @@ class LiveExecutionEngine:
                 INSERT INTO portfolio (
                     symbol, strategy_id, parent_uuid, underlying, lifecycle_class, 
                     expiry_date, quantity, avg_price, initial_credit, short_strikes, 
-                    execution_type, updated_at
+                    execution_type, updated_at, has_calendar_risk
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 """,
                 symbol, strategy_id, parent_uuid,
                 execution.get('underlying'),
                 execution.get('lifecycle_class', 'KINETIC'),
                 execution.get('expiry_date'),
-                qty, price,
+                qty, price, 
                 float(execution.get('initial_credit', 0.0)),
                 json.dumps(execution.get('short_strikes', {})),
-                exec_type, execution['time']
+                exec_type, execution['time'],
+                execution.get('has_calendar_risk', False)
             )
             return
             
@@ -295,15 +296,18 @@ class LiveExecutionEngine:
         if execution:
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
+                    # [R2-10] Include audit_tags matching paper_bridge fix
+                    regime_raw = await self.redis.get("hmm_regime") or "UNKNOWN"
+                    audit_tags = json.dumps({"regime": regime_raw, "execution_type": "Actual"})
                     await conn.execute(
                         """
-                        INSERT INTO trades (id, time, symbol, action, quantity, price, fees, strategy_id, execution_type)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        INSERT INTO trades (id, time, symbol, action, quantity, price, fees, strategy_id, execution_type, audit_tags)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                         """,
-                        str(uuid.uuid4()), # Use unique ID for trade table
+                        str(uuid.uuid4()),
                         execution['time'], execution['symbol'], execution['action'],
                         execution['quantity'], execution['price'], execution['fees'], 
-                        execution['strategy_id'], execution['execution_type']
+                        execution['strategy_id'], execution['execution_type'], audit_tags
                     )
                     await self.update_portfolio(conn, execution, execution['fees'])
 
@@ -321,12 +325,13 @@ class LiveExecutionEngine:
             await self.redis.delete(f"Pending_Journal:{order['order_id']}")
             
             # 4. Broadcast execution confirmation via ZMQ
-            await trade_pub_socket.send_json({
+            # [R2-02] Fixed: use MQManager.send_json for proper 3-part envelope
+            await self.mq.send_json(trade_pub_socket, f"EXEC.{execution['symbol']}", {
                 "id": execution["id"],
                 "symbol": execution["symbol"],
                 "price": float(execution["price"]),
                 "type": "EXECUTION"
-            }, topic=f"EXEC.{execution['symbol']}")
+            })
             
             # --- Pub/Sub Alert: Transaction Confirmation ---
             emoji = "🟢" # Live
@@ -434,7 +439,8 @@ class LiveExecutionEngine:
                                     logger.info(f"SEBI Panic Batch complete. Waiting {INTER_BATCH_WAIT}s...")
                                     await asyncio.sleep(INTER_BATCH_WAIT)
                                     
-                            await conn.execute("UPDATE portfolio SET quantity = 0, avg_price = 0, realized_pnl=0 WHERE execution_type = 'Actual'")
+                            # [R2-17] Preserve realized_pnl — only zero out quantity and avg_price
+                            await conn.execute("UPDATE portfolio SET quantity = 0, avg_price = 0 WHERE execution_type = 'Actual'")
                             
                         logger.critical("✅ Live Market Wipeout Completed.")
                         asyncio.create_task(send_cloud_alert(
@@ -506,7 +512,18 @@ async def main():
     # [Audit 14.1] Better async Redis config
     redis_client = redis.from_url(f"redis://{REDIS_HOST}:6379", decode_responses=True, socket_timeout=5.0)
     
-    pool = await asyncpg.create_pool(DB_DSN, command_timeout=10.0)
+    # [R2-14] DB pool with retry
+    pool = None
+    for attempt in range(10):
+        try:
+            pool = await asyncpg.create_pool(DB_DSN, command_timeout=10.0)
+            break
+        except Exception as e:
+            logger.error(f"Live Bridge DB connect failed (Attempt {attempt+1}): {e}")
+            await asyncio.sleep(min(3 * (attempt + 1), 30))
+    if not pool:
+        logger.critical("Failed to connect to DB after 10 attempts. Exiting.")
+        return
     
     engine = LiveExecutionEngine(mq, pool, redis_client)
     auth_success = await engine.authenticate()

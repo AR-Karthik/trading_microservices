@@ -648,7 +648,16 @@
             const [confidence, setConfidence] = useState(0.70);
             const [vpin, setVpin] = useState(0.82);
 
-            const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? 'http://127.0.0.1:8000' : '';
+            // [R3-06] Smart API_BASE detection for all deployment modes:
+            // 1. localhost/127.0.0.1 → local dev (dashboard_api runs on port 8000)
+            // 2. Cloud Run (*.run.app) → relative paths (same origin serves both SPA + API)
+            // 3. VM direct IP → dashboard_api on same host, port 8000
+            const API_BASE = (() => {
+                const h = window.location.hostname;
+                if (h === 'localhost' || h === '127.0.0.1') return 'http://127.0.0.1:8000';
+                if (h.endsWith('.run.app')) return '';  // Cloud Run: API routes live on same origin
+                return `${window.location.protocol}//${h}:8000`;  // VM direct access
+            })();
 
             const fetchData = async () => {
                 try {

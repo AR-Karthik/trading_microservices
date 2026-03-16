@@ -152,8 +152,8 @@ class HeuristicRegimeReader:
             return {"regime": "WAITING", "prob": 0.5, "heuristics": {"verdict": "YELLOW"}}
         try:
             return json.loads(raw)
-        except:
-            return {"regime": "WAITING", "prob": 0.5, "heuristics": {"verdict": "YELLOW"}}
+        except Exception:
+            return {"regime": "WAITING", "prob": 0.5, "heuristics": {"verdict": "YELLOW"}}  # [R2-22]
 
 # ── The Regime Orchestrator ───────────────────────────────────────────────────
 
@@ -229,10 +229,10 @@ class MetaRouter:
                 self.hybrid_confidence = float(await self._redis.get("CONFIG:HYBRID_CONFIDENCE") or DEFAULT_HYBRID_CONFIDENCE)
                 self.vpin_toxicity = float(await self._redis.get("CONFIG:VPIN_TOXICITY") or DEFAULT_VPIN_TOXICITY)
                 
-                # [Audit 8.3] Premium and Cash/Collateral Sync
-                self.cash_component = float(await self._redis.get("ACCOUNT:CASH_COMPONENT") or 1000000.0)
-                self.collateral_component = float(await self._redis.get("ACCOUNT:COLLATERAL_COMPONENT") or 1000000.0)
-                self.quarantine_premium = float(await self._redis.get("ACCOUNT:QUARANTINE_PREMIUM") or 0.0)
+                # [R2-05] Fixed: use same key names as system_controller writes
+                self.cash_component = float(await self._redis.get("CASH_COMPONENT_LIVE") or 1000000.0)
+                self.collateral_component = float(await self._redis.get("COLLATERAL_COMPONENT_LIVE") or 1000000.0)
+                self.quarantine_premium = float(await self._redis.get("QUARANTINE_PREMIUM_LIVE") or 0.0)
             except:
                 self.heat_limit = DEFAULT_MAX_PORTFOLIO_HEAT
                 self.hurst_threshold = DEFAULT_HURST_THRESHOLD
@@ -284,50 +284,53 @@ class MetaRouter:
             dsn = os.getenv("DB_DSN")
             if not dsn: return
             
-            conn = await asyncpg.connect(dsn)
-            rows = await conn.fetch("SELECT * FROM portfolio WHERE quantity != 0")
-            
-            n_delta: float = 0.0
-            b_delta: float = 0.0
-            s_delta: float = 0.0
-            
-            # Institutional Greek calculation logic
-            for row in rows:
-                qty = float(row['quantity'] or 0.0)
-                und = str(row['underlying'] or "UNKNOWN")
-                tsym = str(row['symbol'] or "UNKNOWN")
+            # [R2-03] Use async with to prevent connection leaks
+            async with await asyncpg.connect(dsn) as conn:
+                rows = await conn.fetch("SELECT * FROM portfolio WHERE quantity != 0")
                 
-                # Regex to extract Strike/Type: e.g. NIFTY26MAR22350CE
-                match = re.search(r"(\d+)(CE|PE)$", tsym)
-                if match:
-                    strike = float(match.group(1))
-                    opt_type = match.group(2)
+                n_delta: float = 0.0
+                b_delta: float = 0.0
+                s_delta: float = 0.0
+                
+                # Institutional Greek calculation logic
+                for row in rows:
+                    qty = float(row['quantity'] or 0.0)
+                    und = str(row['underlying'] or "UNKNOWN")
+                    tsym = str(row['symbol'] or "UNKNOWN")
                     
-                    # Fetch real-time market inputs from Redis
-                    spot_raw = await self._redis.get(f"latest_market_state:{und}")
-                    spot = 0.0
-                    if spot_raw:
-                        spot = json.loads(spot_raw).get("price", 0.0)
+                    # Regex to extract Strike/Type: e.g. NIFTY26MAR22350CE
+                    match = re.search(r"(\d+)(CE|PE)$", tsym)
+                    if match:
+                        strike = float(match.group(1))
+                        opt_type = match.group(2)
                         
-                    iv = float(await self._redis.get(f"iv:{tsym}") or await self._redis.get(f"iv:{und}") or 0.15)
-                    dt_exp = await self._redis.get(f"EXPIRY_DT:{und}") or datetime.now().strftime("%Y-%m-%d")
-                    t_days = (datetime.strptime(dt_exp, "%Y-%m-%d") - datetime.now()).days
-                    t_years = max(t_days, 1) / 365.0
+                        # Fetch real-time market inputs from Redis
+                        spot_raw = await self._redis.get(f"latest_market_state:{und}")
+                        spot = 0.0
+                        if spot_raw:
+                            try:
+                                spot = json.loads(spot_raw).get("price", 0.0)
+                            except Exception:
+                                spot = 0.0
+                            
+                        iv = float(await self._redis.get(f"iv:{tsym}") or await self._redis.get(f"iv:{und}") or 0.15)
+                        dt_exp = await self._redis.get(f"EXPIRY_DT:{und}") or datetime.now().strftime("%Y-%m-%d")
+                        t_days = (datetime.strptime(dt_exp, "%Y-%m-%d") - datetime.now()).days
+                        t_years = max(t_days, 1) / 365.0
+                        
+                        leg_delta = BlackScholes.delta(spot, strike, t_years, 0.07, iv, option_type=opt_type.lower())
+                    else:
+                        # Futures or Equity Delta
+                        leg_delta = 1.0 if qty > 0 else -1.0
                     
-                    leg_delta = BlackScholes.delta(spot, strike, t_years, 0.07, iv, option_type=opt_type.lower())
-                else:
-                    # Futures or Equity Delta
-                    leg_delta = 1.0 if qty > 0 else -1.0
+                    if und == "NIFTY50": n_delta += (leg_delta * qty)
+                    elif und == "BANKNIFTY": b_delta += (leg_delta * qty)
+                    elif und == "SENSEX": s_delta += (leg_delta * qty)
                 
-                if und == "NIFTY50": n_delta += (leg_delta * qty)
-                elif und == "BANKNIFTY": b_delta += (leg_delta * qty)
-                elif und == "SENSEX": s_delta += (leg_delta * qty)
+                self.net_delta_nifty50 = n_delta
+                self.net_delta_banknifty = b_delta
+                self.net_delta_sensex = s_delta
             
-            self.net_delta_nifty50 = n_delta
-            self.net_delta_banknifty = b_delta
-            self.net_delta_sensex = s_delta
-            
-            await conn.close()
             # Export to Redis for UI/Liquidation accessibility
             await self._redis.set("NET_DELTA_NIFTY50", f"{n_delta:.2f}")
             await self._redis.set("NET_DELTA_BANKNIFTY", f"{b_delta:.2f}")
@@ -464,7 +467,8 @@ class MetaRouter:
                 await self._redis.set("PORTFOLIO_HEAT_CAPPED", "False", ex=60)
 
             for cmd in all_commands:
-                await self.mq.send_json(self.cmd_pub, cmd, topic=cmd["asset"])
+                # [R2-04] Fixed: send_json signature is (socket, topic, data)
+                await self.mq.send_json(self.cmd_pub, cmd["asset"], cmd)
             
             # Log attributions for Sidecar to push to Firestore
             await self._redis.set("latest_attributions", json.dumps(attribution_payloads))
@@ -476,7 +480,11 @@ class MetaRouter:
         if spot == 0:
              # Try to fetch spot from state if not in audit_tags
              spot_raw = await self._redis.get(f"latest_market_state:{asset}")
-             spot = json.loads(spot_raw).get("price", 0.0) if spot_raw else 20000.0
+             # [R2-18] Guard against corrupted JSON
+             try:
+                 spot = json.loads(spot_raw).get("price", 0.0) if spot_raw else 20000.0
+             except (json.JSONDecodeError, TypeError):
+                 spot = 20000.0
 
         expiry = await self._redis.get(f"EXPIRY:{asset}") or "26MAR"
         exch = "BFO" if asset == "SENSEX" else "NFO"
@@ -603,7 +611,7 @@ class MetaRouter:
                 if any(multi_market_state.values()) or self.test_mode:
                     await self.broadcast_decisions(multi_market_state, regimes)
                 
-                await asyncio.sleep(0.1) 
+                await asyncio.sleep(0.5)  # [R2-19] 100ms→500ms to reduce Redis pressure
 
             except Exception as e:
                 logger.error(f"Router Exception: {e}")

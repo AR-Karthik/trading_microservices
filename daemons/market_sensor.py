@@ -30,8 +30,7 @@ import time
 import queue
 import re
 from datetime import datetime, timezone
-import sys
-from typing import Any
+from typing import Any  # [R2-20] Removed duplicate 'import sys'
 
 import numpy as np # type: ignore
 import polars as pl # type: ignore
@@ -758,6 +757,18 @@ class MarketSensor:
             "sentiment_score": sentiment_score,
             "time_of_day": datetime.now().strftime("%H:%M:%S")
         }
+
+        # ── [R3-04] Publish India VIX to Redis ─────────────────────────
+        # India VIX approximated from ATM IV when direct feed unavailable.
+        if symbol == "NIFTY50":
+            try:
+                atm_iv_raw = await self._redis.get("atm_iv")
+                if atm_iv_raw:
+                    # ATM IV stored as decimal (0.18 = 18%), VIX as percentage (18.0)
+                    vix_estimate = float(atm_iv_raw) * 100.0
+                    await self._redis.set("vix", f"{vix_estimate:.2f}")
+            except Exception as e:
+                logger.warning(f"Failed to publish VIX estimate to Redis: {e}")
 
         # ── Multi-Index Signal Publication ──────────────────────────
         if symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
