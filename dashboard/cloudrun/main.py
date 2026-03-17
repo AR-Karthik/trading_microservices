@@ -194,13 +194,13 @@ async def get_state():
             "available_margin_live":  float(c.get("live_capital_limit",  0.0)),
             "paper_capital_limit":    float(c.get("paper_capital_limit", 0.0)),
             "live_capital_limit":     float(c.get("live_capital_limit",  0.0)),
-            "power_five":             {},
-            "exit_path_70_30":        {"tp1": 0, "tp2": 0, "progress": 0},
-            "signals":                {},
-            "gex_sign":               "UNKNOWN",
+            "power_five":             m.get("power_five", {}),
+            "exit_path_70_30":        m.get("exit_path_70_30", {"tp1": 0, "tp2": 0, "progress": 0}),
+            "signals":                m.get("signals", {"adx": 20.0, "rv": 0.15, "atm_iv": 0.18}),
+            "gex_sign":               m.get("gex_sign", "UNKNOWN"),
             "system_halted":          c.get("SYSTEM_HALTED", False),
             "macro_lockdown":         False,
-            "index_states":           {},
+            "index_states":           m.get("index_states", {}),
         }
     except Exception as e:
         return {"source": "OFFLINE", "is_vm_running": False, "alpha_score": 0.0,

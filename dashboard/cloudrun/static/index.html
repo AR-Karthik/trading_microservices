@@ -120,9 +120,66 @@
 
         // --- SUB-COMPONENTS (Lifted Outside) ---
 
-        const WarRoom = memo(({ state, positions, mode, handlePanic }) => {
+        const VolatilitySurface = memo(({ rv, iv }) => {
+            const canvasRef = useRef(null);
+            const chartRef = useRef(null);
+            useEffect(() => {
+                if (canvasRef.current) {
+                    if (chartRef.current) chartRef.current.destroy();
+                    const ctx = canvasRef.current.getContext('2d');
+                    chartRef.current = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: ['', '', '', '', ''],
+                            datasets: [
+                                { label: 'RV', data: [rv*0.9, rv*0.95, rv, rv*1.05, rv*1.1], borderColor: '#f85149', borderWidth: 1, pointRadius: 0, tension: 0.4 },
+                                { label: 'IV', data: [iv*0.8, iv*0.9, iv, iv*1.1, iv*1.2], borderColor: '#00D2FF', borderWidth: 2, pointRadius: 0, tension: 0.4 }
+                            ]
+                        },
+                        options: {
+                            responsive: true, maintainAspectRatio: false,
+                            plugins: { legend: { display: false } },
+                            scales: { x: { display: false }, y: { display: false } }
+                        }
+                    });
+                }
+            }, [rv, iv]);
+            return <div className="h-12 w-full mt-2 opacity-50"><canvas ref={canvasRef}></canvas></div>;
+        });
+
+        const ADXSpeedometer = memo(({ adx }) => {
+            const pct = Math.min(100, Math.max(0, adx));
+            return (
+                <div className="relative w-20 h-10 overflow-hidden">
+                    <svg viewBox="0 0 100 50" className="w-full h-full">
+                        <path d="M10 50 A 40 40 0 0 1 90 50" fill="none" stroke="#222" strokeWidth="8" />
+                        <path d="M10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--theme-accent)" strokeWidth="8" strokeDasharray={`${(pct/100)*126} 126`} />
+                    </svg>
+                    <div className="absolute inset-0 flex items-end justify-center pb-0 text-[9px] font-black mono text-white">{adx.toFixed(0)}</div>
+                </div>
+            );
+        });
+
+        const DeltaThermometer = memo(({ delta, threshold }) => {
+            const percentage = Math.min(100, Math.max(0, ((delta + threshold) / (threshold * 2)) * 100));
+            return (
+                <div className="w-full mt-4">
+                    <div className="flex justify-between text-[8px] font-black text-gray-600 mb-1 uppercase">
+                        <span>Net Delta</span>
+                        <span className={Math.abs(delta) > threshold ? 'text-danger' : 'text-accent'}>{delta.toFixed(3)}</span>
+                    </div>
+                    <div className="h-1.5 bg-white/5 rounded-full relative overflow-hidden">
+                        <div className="absolute left-[50%] h-full w-[1px] bg-white/20 z-10"></div>
+                        <div className={`h-full transition-all duration-500 rounded-full ${Math.abs(delta) > threshold ? 'bg-danger' : 'bg-accent'}`} style={{ width: `${percentage}%` }}></div>
+                    </div>
+                </div>
+            );
+        });
+
+        const WarRoom = memo(({ state, positions, mode, handlePanic, handleHalt, portfolioDelta }) => {
             const [selectedIdx, setSelectedIdx] = useState('NIFTY50');
             const powerData = state.power_five?.[selectedIdx] || {};
+            const signals = state.signals || {};
 
             return (
                 <div className="space-y-6 animate-in fade-in duration-500">
@@ -146,12 +203,18 @@
                                     </div>
                                 ))}
                             </div>
+                            <VolatilitySurface rv={signals.rv || 0} iv={signals.atm_iv || 0.18} />
                         </div>
 
-                        <div className="oled-card p-5 rounded-2xl flex flex-col items-center justify-center h-48 border-l-4 border-accent">
-                            <span className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-2">Regime Orchestrator</span>
-                            <div className="text-3xl font-black uppercase text-white">{state.hmm_regime}</div>
+                        {/* D-14: Citadel Indicator */}
+                        <div className={`oled-card p-5 rounded-2xl flex flex-col items-center justify-center h-48 border-l-4 transition-all duration-500 ${state.hmm_regime === 'TRENDING' ? 'border-success bg-success/5 shadow-[inset_0_0_40px_rgba(63,185,80,0.05)]' : (state.hmm_regime === 'CRASH' ? 'border-danger bg-danger/5 animate-panic' : 'border-accent bg-accent/5')}`}>
+                            <span className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-2">Citadel Indicator</span>
+                            <div className="text-3xl font-black uppercase text-white tracking-tighter">{state.hmm_regime}</div>
                             <div className={`mt-2 px-3 py-1 rounded text-[10px] font-bold ${state.alpha_score > 0 ? 'bg-success/20 text-success' : 'bg-danger/20 text-danger'}`}>Alpha: {state.alpha_score.toFixed(1)}</div>
+                            <div className="mt-4 flex gap-4 items-center">
+                                <ADXSpeedometer adx={signals.adx || 20} />
+                                <span className="text-[8px] font-black text-gray-600 uppercase">Trend<br/>Strength</span>
+                            </div>
                         </div>
 
                         <div className="oled-card p-5 rounded-2xl h-48">
@@ -159,7 +222,7 @@
                                 <h3 className="text-[10px] font-black uppercase text-gray-500">70:30 Exit Path</h3>
                                 <span className="text-[9px] font-bold text-accent">LTP: Tracking...</span>
                             </div>
-                            <div className="relative w-full h-4 bg-white/5 rounded-full overflow-hidden mb-6">
+                            <div className="relative w-full h-3 bg-white/5 rounded-full overflow-hidden mb-6 mt-4">
                                 <div className="absolute left-0 h-full bg-accent transition-all duration-1000" style={{ width: `${state.exit_path_70_30?.progress || 0}%` }}></div>
                                 <div className="absolute left-[70%] top-0 h-full w-[2px] bg-white border-none shadow-[0_0_10px_white]"></div>
                             </div>
@@ -168,6 +231,7 @@
                                 <div className="text-gray-400">TP1: <span className="text-success">{(state.exit_path_70_30?.tp1 || 0).toFixed(1)}</span></div>
                                 <div className="text-gray-400">TP2: <span className="text-accent">{(state.exit_path_70_30?.tp2 || 0).toFixed(1)}</span></div>
                             </div>
+                            <DeltaThermometer delta={portfolioDelta.NIFTY50 || 0} threshold={portfolioDelta.threshold || 0.15} />
                         </div>
                     </div>
 
@@ -179,10 +243,17 @@
                             </h3>
                             <div className="space-y-4 max-h-96 overflow-y-auto scroll-hide">
                                 {positions.map((p, i) => (
-                                    <div key={i} className="flex justify-between items-center border-b border-white/5 pb-4">
+                                    <div key={i} className="flex justify-between items-center border-b border-white/5 pb-4 last:border-0">
                                         <div>
-                                            <div className="font-bold text-sm tracking-tight">{p.symbol}</div>
+                                            <div className="flex items-center gap-2">
+                                                <div className="font-bold text-sm tracking-tight">{p.symbol}</div>
+                                                {p.stall_timer > 300 && <span className="bg-warning/20 text-warning text-[8px] px-1 rounded font-black animate-pulse">STALL</span>}
+                                            </div>
                                             <div className="text-[10px] text-gray-500 uppercase font-black">{p.strategy_id}</div>
+                                        </div>
+                                        <div className="text-center">
+                                            <div className="text-[9px] text-gray-600 font-bold uppercase">Stop (ATR)</div>
+                                            <div className="mono text-[10px] text-danger font-bold">{p.atr_stop}</div>
                                         </div>
                                         <div className="text-right">
                                             <div className="mono font-bold text-sm">{formatCurrency(p.unrealized_pnl)}</div>
@@ -198,8 +269,8 @@
                             <div className="oled-card p-6 rounded-2xl border-l-4 border-danger animate-panic">
                                 <h3 className="text-xs font-black text-danger uppercase mb-4">Tactical Emergency</h3>
                                 <div className="grid grid-cols-2 gap-4">
-                                    <button onClick={handlePanic} className="bg-danger text-white py-4 rounded-xl font-black text-xs uppercase hover:brightness-125 transition-all focus:ring-4 ring-danger/20">Liquidate All</button>
-                                    <button className="bg-white/5 border border-white/10 text-gray-400 py-4 rounded-xl font-black text-xs uppercase cursor-not-allowed">Halt VM</button>
+                                    <button onClick={handlePanic} className="bg-danger text-white py-4 rounded-xl font-black text-xs uppercase hover:brightness-125 transition-all focus:ring-4 ring-danger/20 shadow-lg shadow-danger/20">Liquidate All</button>
+                                    <button onClick={handleHalt} className="bg-white/5 border border-white/10 text-white py-4 rounded-xl font-black text-xs uppercase hover:bg-white/10 transition-all">Halt VM</button>
                                 </div>
                             </div>
                             <div className="oled-card p-6 rounded-2xl">
@@ -631,39 +702,36 @@
                 signals: {}, power_five: {}, exit_path_70_30: { tp1: 0, tp2: 0, progress: 0 }
             });
             const [positions, setPositions] = useState([]);
+            const [portfolioDelta, setPortfolioDelta] = useState({ NIFTY50: 0, BANKNIFTY: 0, threshold: 0.15 });
             const [evolution, setEvolution] = useState({ leaderboard: [], transition_matrix: [], data_mix: { seed: 50, live: 50 } });
             const [telemetry, setTelemetry] = useState({ nse_latency_ms: 0, bse_latency_ms: 0, slippage_leakage_inr: 0, cpu_cores: [0, 0, 0] });
             const [attribution, setAttribution] = useState({ pnl_stack: [], efficiency: [] });
             const [simulation, setSimulation] = useState({ engine_ranking: [], equity_growth: [] });
             const [barrierData, setBarrierData] = useState({ summary: { UPPER: 0, LOWER: 0, VERTICAL: 0, PANIC: 0 }, feed: [], total: 0 });
             const [sizing, setSizing] = useState({ current_atr: 20, max_risk_per_trade: 2500, unit_size_base: 125, assets: [] });
-            const [paperMaxLoss, setPaperMaxLoss] = useState("2500"); // Paper max loss/trade (₹)
-            const [liveMaxLoss,  setLiveMaxLoss]  = useState("2500"); // Live max loss/trade  (₹)
+            const [paperMaxLoss, setPaperMaxLoss] = useState("2500");
+            const [liveMaxLoss,  setLiveMaxLoss]  = useState("2500");
 
-            // Interactive Orchestrator State (Local Only)
             const [localEngine, setLocalEngine] = useState('Hybrid');
-            const [paperCapital, setPaperCapital] = useState("1000000"); // Default 1M Paper
-            const [liveCapital, setLiveCapital] = useState("0");        // Default 0 Live (Safe)
+            const [paperCapital, setPaperCapital] = useState("1000000");
+            const [liveCapital, setLiveCapital] = useState("0");
             const [hurst, setHurst] = useState(0.55);
             const [confidence, setConfidence] = useState(0.70);
             const [vpin, setVpin] = useState(0.82);
 
-            // [R3-06] Smart API_BASE detection for all deployment modes:
-            // 1. localhost/127.0.0.1 → local dev (dashboard_api runs on port 8000)
-            // 2. Cloud Run (*.run.app) → relative paths (same origin serves both SPA + API)
-            // 3. VM direct IP → dashboard_api on same host, port 8000
             const API_BASE = (() => {
                 const h = window.location.hostname;
                 if (h === 'localhost' || h === '127.0.0.1') return 'http://127.0.0.1:8000';
-                if (h.endsWith('.run.app')) return '';  // Cloud Run: API routes live on same origin
-                return `${window.location.protocol}//${h}:8000`;  // VM direct access
+                if (h.endsWith('.run.app')) return '';
+                return `${window.location.protocol}//${h}:8000`;
             })();
 
             const fetchData = async () => {
                 try {
-                    const [s, p, e, t, a, sim, ba, sz] = await Promise.all([
+                    const [s, p, pd, e, t, a, sim, ba, sz] = await Promise.all([
                         fetch(`${API_BASE}/state`).then(r => r.json()),
                         fetch(`${API_BASE}/portfolio?mode=${mode}`).then(r => r.json()),
+                        fetch(`${API_BASE}/portfolio/delta`).then(r => r.json()),
                         fetch(`${API_BASE}/models/evolution`).then(r => r.json()),
                         fetch(`${API_BASE}/health/telemetry`).then(r => r.json()),
                         fetch(`${API_BASE}/attribution/strategy`).then(r => r.json()),
@@ -672,16 +740,8 @@
                         fetch(`${API_BASE}/sizing/inspector`).then(r => r.json()),
                     ]);
                     setState(s);
-                    // Update capitals from backend only on initial load or if they match the default
-                    // In a production system, we'd use a 'lastSync' timestamp to avoid overwriting user edits
-                    if (state.paper_capital_limit === 0 && paperCapital === "1000000") {
-                         setPaperCapital(s.paper_capital_limit.toString());
-                    }
-                    if (state.live_capital_limit === 0 && liveCapital === "0") {
-                         setLiveCapital(s.live_capital_limit.toString());
-                    }
-                    
                     setPositions(p);
+                    setPortfolioDelta(pd);
                     setEvolution(e);
                     setTelemetry(t);
                     setAttribution(a);
@@ -706,6 +766,12 @@
             const handlePanic = async () => {
                 if (confirm(`🚨 KILL SWITCH: Liquidate all ${mode} positions?`)) {
                     await fetch(`${API_BASE}/panic?mode=${mode}`, { method: 'POST' });
+                }
+            };
+
+            const handleHalt = async () => {
+                if (confirm(`🛑 SYSTEM HALT: Stop all daemon processes on the VM?`)) {
+                    await fetch(`${API_BASE}/system/halt`, { method: 'POST' });
                 }
             };
 
