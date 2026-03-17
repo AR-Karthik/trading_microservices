@@ -93,6 +93,43 @@ class CloudPublisher:
                 alpha = await self.redis.get("COMPOSITE_ALPHA") or "0.0"
                 regime = await self.redis.get("HMM_REGIME") or "UNKNOWN"
                 
+                # --- D-36: Fetch Enriched Metrics for Command Center ---
+                indices = ["NIFTY50", "BANKNIFTY", "SENSEX"]
+                index_states = {}
+                for asset in indices:
+                    st_raw = await self.redis.get(f"latest_market_state:{asset}")
+                    st = json.loads(st_raw) if st_raw else {}
+                    reg = await self.redis.get(f"HMM_REGIME:{asset}") or regime
+                    index_states[asset] = {"score": st.get("s_total", 0.0), "regime": reg, "price": st.get("price", 0.0)}
+
+                ms_raw = await self.redis.get("latest_market_state:NIFTY50")
+                ms = json.loads(ms_raw) if ms_raw else {}
+                
+                deep_signals = {
+                    "log_ofi_z": ms.get("log_ofi_zscore", 0.0),
+                    "rv":         ms.get("rv", 0.0),
+                    "adx":        ms.get("adx", 20.0),
+                    "atm_iv":     float(await self.redis.get("atm_iv") or ms.get("atm_iv", 0.18)),
+                }
+
+                power_five = {}
+                for idx in indices:
+                    power_five[idx] = {}
+                    components = {
+                        "NIFTY50":   ["HDFCBANK", "RELIANCE", "ICICIBANK", "INFY", "ITC"],
+                        "BANKNIFTY": ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"],
+                        "SENSEX":    ["HDFCBANK", "RELIANCE", "ICICIBANK", "ITC", "LT"]
+                    }[idx]
+                    for sym in components:
+                        z = await self.redis.hget("power_five_matrix", sym) or await self.redis.get(f"zscore:{sym}") or "0.0"
+                        try: power_five[idx][sym] = float(z)
+                        except: power_five[idx][sym] = 0.0
+
+                portfolio_delta = {}
+                for idx in indices:
+                    d = await self.redis.get(f"NET_DELTA_{idx}") or "0.0"
+                    portfolio_delta[idx] = float(d)
+
                 # Minimal state for discovery
                 state = {
                     "vm_public_ip": self.external_ip,
@@ -101,7 +138,13 @@ class CloudPublisher:
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     "system_health": "HEALTHY",
                     "live_alpha": float(alpha),
-                    "live_regime": regime
+                    "live_regime": regime,
+                    # Added for D-36
+                    "signals": deep_signals,
+                    "power_five": power_five,
+                    "portfolio_delta": portfolio_delta,
+                    "index_states": index_states,
+                    "exit_path_70_30": ms.get("exit_path_70_30", {"tp1": 0.0, "tp2": 0.0, "progress": 0.0})
                 }
 
                 # Push to Firestore Metadata (Discovery)
@@ -239,9 +282,9 @@ class CloudPublisher:
             )
 
             today_str = snapshot_time.strftime("%Y-%m-%d")
-            # Enforce fixed column selection and order for BigQuery compatibility
+            # D-37: Enriched market history export
             rows = await conn.fetch("""
-                SELECT time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, vol_term_ratio 
+                SELECT time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, vol_term_ratio, exit_path_70_progress
                 FROM market_history 
                 WHERE time >= $1::date AND time < ($1::date + interval '1 day')
             """, snapshot_time)
@@ -294,8 +337,9 @@ class CloudPublisher:
             )
 
             today_str = snapshot_time.strftime("%Y-%m-%d")
+            # D-37: Expanded columns for trade history consistency
             rows = await conn.fetch("""
-                SELECT id::text, time, symbol, action, quantity, price, fees, strategy_id, execution_type 
+                SELECT id::text, time, symbol, action, quantity, price, fees, strategy_id, execution_type, audit_tags 
                 FROM trades 
                 WHERE time >= $1::date AND time < ($1::date + interval '1 day')
             """, snapshot_time)

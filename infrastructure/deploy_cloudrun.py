@@ -88,7 +88,15 @@ def setup_bigquery():
     print(f"\n=== Setting up BigQuery Dataset: {dataset} ===")
     run_cmd(f"bq mk --if_exists --dataset {PROJECT_ID}:{dataset}")
 
-    # 1. Tick History External Table
+    # 1. Market History External Table (D-37)
+    market_table = f"{dataset}.market_history_external"
+    print(f"Creating External Table: {market_table}")
+    run_cmd(
+        f"bq mk --if_exists --external_table_definition=PARQUET=gs://{bucket}/market_history/*.parquet "
+        f"{market_table}"
+    )
+
+    # 1b. Tick History External Table (Legacy alignment)
     tick_table = f"{dataset}.tick_history_external"
     print(f"Creating External Table: {tick_table}")
     run_cmd(

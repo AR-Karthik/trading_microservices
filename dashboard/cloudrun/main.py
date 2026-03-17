@@ -189,14 +189,15 @@ async def get_state():
             "is_vm_running":          vm_running,
             "last_heartbeat":         last_hb_str,
             "source":                 "FIRESTORE_SYNC",
-            # D-13: capital limits are written under paper_capital_limit / live_capital_limit
-            "available_margin_paper": float(c.get("paper_capital_limit", 0.0)),
-            "available_margin_live":  float(c.get("live_capital_limit",  0.0)),
+            # D-38: Sync enriched signals from Firestore
+            "available_margin_paper": float(c.get("paper_capital_limit", m.get("available_margin_paper", 0.0))),
+            "available_margin_live":  float(c.get("live_capital_limit",  m.get("available_margin_live",  0.0))),
             "paper_capital_limit":    float(c.get("paper_capital_limit", 0.0)),
             "live_capital_limit":     float(c.get("live_capital_limit",  0.0)),
             "power_five":             m.get("power_five", {}),
             "exit_path_70_30":        m.get("exit_path_70_30", {"tp1": 0, "tp2": 0, "progress": 0}),
             "signals":                m.get("signals", {"adx": 20.0, "rv": 0.15, "atm_iv": 0.18}),
+            "portfolio_delta":        m.get("portfolio_delta", {"NIFTY50": 0.0, "BANKNIFTY": 0.0, "SENSEX": 0.0}),
             "gex_sign":               m.get("gex_sign", "UNKNOWN"),
             "system_halted":          c.get("SYSTEM_HALTED", False),
             "macro_lockdown":         False,
@@ -212,9 +213,9 @@ async def get_portfolio(mode: str = "Paper"):
     if vm_data is not None:
         return vm_data
 
-    # D-06: GCS Parquet fallback
+    # D-38: Improved Parquet columns for consistency
     df = _gcs_read_parquet("trade_history", columns=["symbol", "strategy_id", "quantity",
-                                                       "avg_price", "realized_pnl", "execution_type"])
+                                                       "avg_price", "realized_pnl", "execution_type", "audit_tags"])
     if df is not None:
         filtered = df[df["execution_type"] == mode] if "execution_type" in df.columns else df
         return filtered.head(50).to_dict("records")

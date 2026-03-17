@@ -53,8 +53,11 @@ class DataLogger:
         logger.info("Initializing DataLogger...")
         try:
             self.pool = await asyncpg.create_pool(DB_DSN)
+            # D-37: Ensure schema is up to date (Additive)
+            async with self.pool.acquire() as conn:
+                await conn.execute("ALTER TABLE market_history ADD COLUMN IF NOT EXISTS exit_path_70_progress NUMERIC(10, 2);")
         except Exception as e:
-            logger.error(f"Failed to connect to TimescaleDB: {e}")
+            logger.error(f"Failed to connect to TimescaleDB or update schema: {e}")
             return
 
         sub = self.mq.create_subscriber(Ports.MARKET_STATE, topics=[Topics.MARKET_STATE])
@@ -62,6 +65,9 @@ class DataLogger:
         # Phase 11: Heartbeat
         self.hb = HeartbeatProvider("DataLogger", self._redis)
         asyncio.create_task(self.hb.run_heartbeat())
+        
+        # Periodically flush the batch to TimescaleDB
+        writer_task = asyncio.create_task(self._batch_writer())
         
         logger.info("DataLogger active. Listening for market state updates...")
         
@@ -83,7 +89,7 @@ class DataLogger:
             pass
         finally:
             writer_task.cancel()
-            await self.pool.close()
+            if self.pool: await self.pool.close()
             await self._redis.aclose()
             logger.info("DataLogger shut down.")
 
@@ -112,13 +118,16 @@ class DataLogger:
             try:
                 async with self.pool.acquire() as conn:
                     # Prepare the data for bulk insert
-                    # Columns: time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, vol_term_ratio
+                    # Columns: time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, vol_term_ratio, exit_path_progress
                     data_to_insert = []
                     for s in current_batch:
                         # Log all indices and heavyweight signals
                         symbol = s.get("symbol")
                         if not symbol:
                             continue
+                        
+                        exit_path = s.get("exit_path_70_30") or {}
+                        exit_progress = float(exit_path.get("progress", 0.0))
                             
                         data_to_insert.append((
                             datetime.fromisoformat(s["timestamp"]),
@@ -128,13 +137,14 @@ class DataLogger:
                             float(s.get("cvd", 0.0)),
                             float(s.get("vpin", 0.0)),
                             float(s.get("basis_zscore", 0.0)),
-                            float(s.get("vol_term_ratio", 1.0))
+                            float(s.get("vol_term_ratio", 1.0)),
+                            exit_progress
                         ))
                     
                     if data_to_insert:
                         await conn.executemany("""
-                            INSERT INTO market_history (time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, vol_term_ratio)
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                            INSERT INTO market_history (time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, vol_term_ratio, exit_path_70_progress)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                             ON CONFLICT (time, symbol) DO NOTHING
                         """, data_to_insert)
                         logger.info(f"FLUSHED {len(data_to_insert)} records to market_history.")
