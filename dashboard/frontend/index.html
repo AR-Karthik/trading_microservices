@@ -177,6 +177,32 @@
             );
         });
 
+        const ASTODualGauge = memo(({ asto, regime, multiplier }) => {
+            const astoPct = Math.min(100, Math.max(0, (asto + 100) / 2));
+            // Multiplier typically range from 1.5 to 5.0. Normalize for gauge.
+            const multPct = Math.min(100, Math.max(0, ((multiplier - 1.5) / 3.5) * 100));
+            return (
+                <div className="w-full space-y-2">
+                    <div className="flex justify-between text-[7px] font-black text-gray-500 uppercase tracking-tighter">
+                        <span>ASTO {regime === 1 ? '• TREND' : '• CHOP'}</span>
+                        <span className="text-accent">{asto.toFixed(1)}</span>
+                    </div>
+                    <div className="h-1 bg-white/5 rounded-full relative overflow-hidden">
+                        <div className="absolute left-[50%] h-full w-[0.5px] bg-white/20 z-10"></div>
+                        <div className={`h-full transition-all duration-700 rounded-full ${regime === 1 ? 'bg-success shadow-[0_0_5px_#3fb950]' : 'bg-accent'}`} style={{ width: `${astoPct}%` }}></div>
+                    </div>
+                    <div className="flex justify-between text-[7px] font-black text-gray-500 uppercase tracking-tighter">
+                        <span>Dynamic Multiplier</span>
+                        <span className="text-warning">M: {multiplier.toFixed(2)}</span>
+                    </div>
+                    <div className="h-1 bg-white/5 rounded-full relative overflow-hidden">
+                        <div className={`h-full transition-all duration-1000 rounded-full bg-warning shadow-[0_0_5px_#d2990d]`} style={{ width: `${multPct}%` }}></div>
+                    </div>
+                </div>
+            );
+        });
+
+
         const WarRoom = memo(({ state, positions, mode, handlePanic, handleHalt, portfolioDelta }) => {
             const [selectedIdx, setSelectedIdx] = useState('NIFTY50');
             const powerData = state.power_five?.[selectedIdx] || {};
@@ -212,9 +238,15 @@
                             <span className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-2">Citadel Indicator</span>
                             <div className="text-3xl font-black uppercase text-white tracking-tighter">{state.hmm_regime}</div>
                             <div className={`mt-2 px-3 py-1 rounded text-[10px] font-bold ${state.alpha_score > 0 ? 'bg-success/20 text-success' : 'bg-danger/20 text-danger'}`}>Alpha: {state.alpha_score.toFixed(1)}</div>
-                            <div className="mt-4 flex gap-4 items-center">
+                            <div className="mt-4 flex gap-4 items-center w-full px-2">
                                 <ADXSpeedometer adx={signals.adx || 20} />
-                                <span className="text-[8px] font-black text-gray-600 uppercase">Trend<br/>Strength</span>
+                                <div className="flex-1">
+                                    <ASTODualGauge 
+                                        asto={signals.asto || 0} 
+                                        regime={signals.asto_regime || 0} 
+                                        multiplier={signals.asto_multiplier || 3.0} 
+                                    />
+                                </div>
                             </div>
                         </div>
 
@@ -546,7 +578,8 @@
             );
         });
 
-        const SignalAttribution = memo(({ attribution }) => (
+        const AuditAttribution = memo(({ attribution }) => (
+
             <div className="space-y-8 animate-in fade-in duration-500 pb-20">
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                     <div className="oled-card p-8 rounded-3xl">
@@ -690,7 +723,8 @@
             PANIC:    { bg: 'rgba(200,50,255,0.7)',  text: 'text-purple-400', label: '⚡ Panic (RV Spike)' },
         };
 
-        const SignalAttribution = memo(({ barrierData, sizing }) => {
+        const BarrierAttribution = memo(({ barrierData, sizing }) => {
+
             const summary = barrierData.summary || { UPPER: 0, LOWER: 0, VERTICAL: 0, PANIC: 0 };
             const feed    = barrierData.feed    || [];
             const total   = barrierData.total   || 0;
@@ -1021,7 +1055,8 @@
                         {activeTab === 'sim' && <SimulationTab simulation={simulation} />}
                         {activeTab === 'evolution' && <Evolution evolution={evolution} />}
                         {activeTab === 'vault' && <PerformanceVault analytics={vaultAnalytics} summary={vaultSummary} regimes={regimeAttribution} mode={mode} />}
-                        {activeTab === 'attribution' && <SignalAttribution attribution={attribution} />}
+                        {activeTab === 'attribution' && <AuditAttribution attribution={attribution} />}
+
                         {activeTab === 'health' && <Health telemetry={telemetry} />}
                     </main>
 

@@ -22,6 +22,14 @@ import redis.asyncio as redis
 from core.mq import MQManager, Ports, Topics, NumpyEncoder
 from core.shm import ShmManager, SignalVector
 
+# [Audit-Fix] Add Shoonya API for fallback lookback
+try:
+    from NorenRestApiPy.NorenApi import NorenApi
+    import pyotp
+    _HAS_SHOONYA = True
+except ImportError:
+    _HAS_SHOONYA = False
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("HeuristicEngine")
 
@@ -61,6 +69,12 @@ class HeuristicEngine:
         # Tick buffer for intraday vol
         self.tick_buffer = deque(maxlen=300)
 
+        # [Audit-Fix] Shoonya API instantiation for fallback
+        self.api = None
+        if _HAS_SHOONYA:
+            host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
+            self.api = NorenApi(host=host)
+
     def _pin_core(self):
         if sys.platform != "win32":
             try:
@@ -77,6 +91,16 @@ class HeuristicEngine:
 
             # Load 14D history fetched by SystemController
             history_raw = await self.r.get(f"history_14d:{self.asset_id}")
+            
+            # [Audit-Fix] If Redis is empty, attempt direct API fallback
+            if not history_raw and self.api:
+                now = datetime.now()
+                # Trigger fallback if between 09:15 and 09:30 or if strictly needed on first boot
+                if (now.hour == 9 and 15 <= now.minute <= 30) or not self.history_14d:
+                    await self._load_lookback_shoonya()
+                    # Re-check Redis after fallback
+                    history_raw = await self.r.get(f"history_14d:{self.asset_id}")
+
             if history_raw:
                 self.history_14d = json.loads(history_raw)
                 # [R2-13] Spec says 10-day RV; use last 11 closes for 10 returns
@@ -110,6 +134,57 @@ class HeuristicEngine:
 
         except Exception as e:
             logger.error(f"[{self.asset_id}] Parameter fetch error: {e}")
+
+    async def _load_lookback_shoonya(self):
+        """[Audit-Fix] Additive Fallback: Directly fetches 14D history from Shoonya if Redis is empty."""
+        if not self.api: return
+        
+        logger.info(f"[{self.asset_id}] Triggering Fallback Lookback Fetch from Shoonya API...")
+        try:
+            # Credentials from env
+            user = os.getenv("SHOONYA_USER")
+            pwd = os.getenv("SHOONYA_PWD")
+            factor2 = os.getenv("SHOONYA_FACTOR2")
+            vc = os.getenv("SHOONYA_VC")
+            app_key = os.getenv("SHOONYA_APP_KEY")
+            imei = os.getenv("SHOONYA_IMEI")
+            
+            if not all([user, pwd, factor2, vc, app_key, imei]):
+                logger.error(f"[{self.asset_id}] Missing Shoonya credentials for fallback.")
+                return
+
+            totp = pyotp.TOTP(factor2).now()
+            login_ret = self.api.login(userid=user, password=pwd, twoFA=totp, vendor_code=vc, api_secret=app_key, imei=imei)
+            
+            if not login_ret:
+                logger.error(f"[{self.asset_id}] Shoonya login failed during fallback.")
+                return
+
+            # Map asset to Shoonya token
+            token_map = {
+                "NIFTY50": ("NSE", "26000"),
+                "BANKNIFTY": ("NSE", "26001"),
+                "SENSEX": ("BSE", "1")
+            }
+            if self.asset_id not in token_map: return
+            exchange, token = token_map[self.asset_id]
+            
+            end_time = datetime.now().timestamp()
+            start_time = end_time - (20 * 86400) # 20 days
+            
+            # Fetch daily candles
+            ret = self.api.get_time_price_series(exchange=exchange, token=token, starttime=start_time, endtime=end_time, interval=None)
+            
+            if ret and isinstance(ret, list):
+                # 'ss0' is the field for close price in daily series
+                closes = [float(day['ss0']) for day in ret if 'ss0' in day]
+                if closes:
+                    self.history_14d = closes[-14:]
+                    # Update Redis for other components
+                    await self.r.set(f"history_14d:{self.asset_id}", json.dumps(self.history_14d))
+                    logger.info(f"[{self.asset_id}] Successfully hydrated 14D history via API Fallback ({len(self.history_14d)} days).")
+        except Exception as e:
+            logger.error(f"[{self.asset_id}] Shoonya fallback fetch failed: {e}")
 
     def _calculate_realized_vol(self, closes: list[float]) -> float:
         """Calculates 14-day Annualized Realized Volatility."""

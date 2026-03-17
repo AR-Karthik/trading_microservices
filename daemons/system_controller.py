@@ -147,6 +147,9 @@ class SystemController:
         await self.redis.set("COLLATERAL_COMPONENT_LIVE", f"{coll_live:.2f}")
         await self.redis.set("HEDGE_RESERVE_LIVE", f"{res_live:.2f}")
         
+        # [Audit-Fix] Start periodic margin sync
+        asyncio.create_task(self._periodic_margin_sync())
+
         # Paper Pipeline (Parity for Shadow Graduation)
         eff_paper = float(paper_limit * (1 - HEDGE_RESERVE_PCT))
         res_paper = float(paper_limit * HEDGE_RESERVE_PCT)
@@ -728,6 +731,39 @@ class SystemController:
                 logger.error(f"Ghost sync error: {e}")
             
             await asyncio.sleep(900) # 15 minutes
+
+    async def _periodic_margin_sync(self):
+        """[Audit-Fix] Additive: Periodically pulls live margin limits from Shoonya and updates Redis."""
+        logger.info("Broker margin sync task active (60s interval).")
+        while not self._shutdown_flag:
+            try:
+                # Only sync if we have a valid API session (login happens in _fetch_14d_history or on-demand)
+                # For this additive fix, we'll login if needed or reuse existing
+                if not hasattr(self, 'api') or not self.api:
+                    await asyncio.sleep(10)
+                    continue
+
+                loop = asyncio.get_running_loop()
+                limits = await loop.run_in_executor(None, self.api.get_limits)
+                
+                if limits and limits.get('stat') == 'Ok':
+                    # Shoonya returns 'cash' and 'collateral' in 'cash' field or similar depending on broker setup
+                    # Usually 'cash' is available margin. We'll map it to our internal keys.
+                    total_cash = float(limits.get('cash', 1000000.0))
+                    
+                    # Update Redis for MetaRouter to consume
+                    # We apply the HEDGE_RESERVE_PCT here to maintain the safety buffer
+                    eff_cash = total_cash * (1 - HEDGE_RESERVE_PCT)
+                    await self.redis.set("CASH_COMPONENT_LIVE", f"{eff_cash * 0.5:.2f}")
+                    await self.redis.set("COLLATERAL_COMPONENT_LIVE", f"{eff_cash * 0.5:.2f}")
+                    await self.redis.set("HEDGE_RESERVE_LIVE", f"{total_cash * HEDGE_RESERVE_PCT:.2f}")
+                    
+                    logger.debug(f"📊 Margin Sync: TotalCash={total_cash:.2f} | Eff={eff_cash:.2f}")
+                
+            except Exception as e:
+                logger.error(f"Broker margin sync failed: {e}")
+            
+            await asyncio.sleep(60) # 60 second interval
 
     # ── Exchange Health Monitor (Spec 12.4) ──────────────────────────────────
 

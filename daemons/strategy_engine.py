@@ -198,6 +198,9 @@ class IronCondorStrategy(BaseStrategy):
         self.expiry_years = float(expiry_days) / 365.0
         self.iv = float(iv)
         self.bs = BlackScholes()
+        # [Hedge Hybrid] Track leg metadata for delta calculation
+        self.leg_metadata: dict[str, dict] = {}
+        self.last_parent_uuid = "IC_INITIAL"
 
     def find_strike_for_delta(self, target_delta: float, S: float, T: float, r: float, sigma: float, otype: str) -> float:
         """Binary search to find strike for target delta."""
@@ -213,14 +216,60 @@ class IronCondorStrategy(BaseStrategy):
                 low = mid if otype == 'put' else low
         return round(mid / 50) * 50 # Snap to 50-point strike
 
+    def _calculate_net_delta(self, spot: float, r: float) -> float:
+        """Calculates total delta across all active option legs."""
+        net_delta = 0.0
+        for opt_symbol, qty in self.positions.items():
+            if qty == 0 or "-FUT" in opt_symbol: continue
+            meta = self.leg_metadata.get(opt_symbol)
+            if not meta: continue
+            
+            d = self.bs.delta(spot, meta["strike"], self.expiry_years, r, self.iv, meta["otype"])
+            net_delta += d * qty
+        return net_delta
+
     def on_tick(self, symbol: str, data: dict) -> list | None:
-        # Only enter in 'High Volatility Chop' regime or similar
         price = float(data['price'])
+        asto = float(data.get("asto", 0.0))
+        adx = float(data.get("adx", 0.0))
+        s22 = float(data.get("whale_pivot", 0.0))
+        r = 0.065 
+        
+        # ── [Hedge Hybrid] Extreme Trend Management ──
+        if abs(asto) >= 90:
+            net_delta = self._calculate_net_delta(price, r)
+            
+            # Whale Alignment Check
+            is_aligned = (asto > 0 and s22 > 0) or (asto < 0 and s22 < 0)
+            
+            if is_aligned:
+                # MAX CONFIDENCE: Neutralize Delta using Micro-Futures
+                # Each Future has delta ~1.0. To neutralize net_delta, we need -net_delta futures.
+                hedge_qty = round(-net_delta / 1.0) 
+                if abs(hedge_qty) >= 1:
+                    return [{
+                        "action": "HEDGE_REQUEST", # Special action for Meta-Router
+                        "symbol": f"{symbol}-FUT",
+                        "quantity": abs(hedge_qty),
+                        "side": "BUY" if hedge_qty > 0 else "SELL",
+                        "hedge_label": f"HYBRID_{symbol}_{int(time.time())}",
+                        "parent_uuid": getattr(self, "last_parent_uuid", "IC_GLOBAL"),
+                        "reason": f"WHALE_ALIGNED_HEDGE: ASTO={asto:.1f}, S22={s22:.1f}, Delta={net_delta:.2f}"
+                    }]
+            else:
+                # TRAP ALERT: Signal Liquidation to close the losing side
+                return [{
+                    "action": "TRAP_ALERT", # Handled by Liquidation Daemon
+                    "symbol": symbol,
+                    "side": "CALL" if asto > 0 else "PUT", # Losing side
+                    "reason": f"WHALE_MISALIGNED_TRAP: ASTO={asto:.1f}, S22={s22:.1f}"
+                }]
+        
+        # ── Standard Entry Logic ──
         # [R2-15] IC authorized in RANGING and HIGH_VOL_CHOP per spec §Strategy 2
         if not data.get('is_ranging', False) and not data.get('is_high_vol_chop', False): return None
         
         T = self.expiry_years
-        r = 0.065 # Standardized Risk-free rate (Audit 5.1)
         iv = self.iv
         
         # Dynamic Strike Selection
@@ -228,8 +277,18 @@ class IronCondorStrategy(BaseStrategy):
         s_put_main = self.find_strike_for_delta(-self.spread_delta, price, T, r, iv, 'put')
         s_call_main = self.find_strike_for_delta(self.spread_delta, price, T, r, iv, 'call')
         s_call_wing = self.find_strike_for_delta(self.wing_delta, price, T, r, iv, 'call')
-
+        
         parent_uuid = f"IC_{uuid.uuid4().hex[:8]}"
+        self.last_parent_uuid = parent_uuid
+
+        # Map strikes to symbols for metadata (Approximation for demo, real system uses search)
+        # In a real run, the bridge/router updates leg_metadata upon execution.
+        # Here we seed it to allow delta calculation.
+        expiry = "26MAR" # Placeholder
+        self.leg_metadata[f"{symbol}{expiry}{int(s_put_wing)}PE"] = {"strike": s_put_wing, "otype": "put"}
+        self.leg_metadata[f"{symbol}{expiry}{int(s_put_main)}PE"] = {"strike": s_put_main, "otype": "put"}
+        self.leg_metadata[f"{symbol}{expiry}{int(s_call_main)}CE"] = {"strike": s_call_main, "otype": "call"}
+        self.leg_metadata[f"{symbol}{expiry}{int(s_call_wing)}CE"] = {"strike": s_call_wing, "otype": "call"}
         
         return [
             {"action": "BUY",  "otype": "PE", "strike": s_put_wing,  "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
@@ -264,13 +323,12 @@ class CreditSpreadStrategy(BaseStrategy):
                 {"action": "SELL", "otype": "PE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
                 {"action": "BUY",  "otype": "PE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"}
             ]
-        else: # Bear Call Spread
-            s1 = round((price * 1.02) / 50) * 50
-            s2 = s1 + self.spread_width
             return [
                 {"action": "SELL", "otype": "CE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
                 {"action": "BUY",  "otype": "CE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"}
             ]
+
+        return None
 
 # Global state for dynamic strategies
 active_strategies: dict[str, BaseStrategy] = {}
@@ -397,7 +455,7 @@ async def _calibrate_vol_context(redis_client):
         logger.warning("⚠️ B2 Vol Context: No symbols calibrated (prev_close data missing). Proceeding with defaults.")
  
  
-async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_client, shm_ticks, shm_alpha):
+async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_client, shm_ticks, shm_alpha, hedge_socket):
     """Subscribes to market data and runs strategies using SHM for zero-copy lookups."""
     logger.info("Starting Strategy Engine loop... (v5.5 Quantitative Risk Active)")
     
@@ -406,6 +464,12 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
     # [F12-01] Cache HALT_KINETIC to avoid Redis call per tick*strategy
     halt_kinetic_cache = False
     halt_kinetic_last_check = 0
+    # Wave 2: Cache MACRO_EVENT_LOCKDOWN
+    macro_lockdown_cache = False
+    macro_lockdown_last_check = 0
+    # Wave 2: Cache IV for Low Vol Trap
+    iv_cache = 15.0
+    iv_last_check = 0
     
     # Track real-time lot overrides from Meta-Router
     strategy_states = collections.defaultdict(lambda: {"lots": 1, "active": True})
@@ -440,6 +504,19 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
         try:
             topic, tick_msg = await mq_manager.recv_json(sub_socket)
             if not tick_msg: continue
+
+            # [Audit-Fix] Handle execution reports to update strategy position state
+            if topic.startswith("EXEC."):
+                qty = int(tick_msg.get("quantity", 0))
+                action = tick_msg.get("action", "BUY")
+                strat_id = tick_msg.get("strategy_id")
+                symbol = tick_msg.get("symbol")
+                change = qty if action == "BUY" else -qty
+                
+                if strat_id in active_strategies:
+                    active_strategies[strat_id].positions[symbol] += change
+                    logger.info(f"Position Updated: {strat_id} | {symbol} -> {active_strategies[strat_id].positions[symbol]}")
+                continue
  
             # Periodically sync SHM slot mapping from Redis
             if time.time() - last_shm_sync > 10:
@@ -461,12 +538,25 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
             qstate = shm_alpha.read() if shm_alpha else None
             is_toxic = qstate.get("toxic_veto", False) if qstate else False
             alpha_total = qstate.get("s_total", 0.0) if qstate else 0.0
+            asto_val = qstate.get("asto", 0.0) if qstate else 0.0
+            adx_val = qstate.get("adx", 0.0) if qstate else 0.0
  
             # [F12-01] Refresh HALT_KINETIC cache every 5 seconds (not per tick)
             if time.time() - halt_kinetic_last_check > 5:
                 halt_kinetic_val = await redis_client.get("HALT_KINETIC")
                 halt_kinetic_cache = (halt_kinetic_val == "True")
                 halt_kinetic_last_check = time.time()
+            
+            # Wave 2: Refresh Risk Caches
+            if time.time() - macro_lockdown_last_check > 5:
+                lockdown_val = await redis_client.get("MACRO_EVENT_LOCKDOWN")
+                macro_lockdown_cache = (lockdown_val == "True")
+                macro_lockdown_last_check = time.time()
+            
+            if time.time() - iv_last_check > 5:
+                iv_raw = await redis_client.get("atm_iv")
+                iv_cache = float(iv_raw or 0.15) * 100.0 # Convert to percentage (e.g. 0.15 -> 15.0)
+                iv_last_check = time.time()
 
             for strategy in list(active_strategies.values()):
                 s_id = strategy.strategy_id
@@ -481,13 +571,38 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                 if halt_kinetic_cache:
                     continue  # Block all new entries
 
+                # Wave 2: Global Macro Event Lockdown enforcement
+                if macro_lockdown_cache:
+                    logger.warning(f"🚫 MACRO LOCKDOWN: {s_id} entry blocked.")
+                    continue
+
+                # Inject ASTO/ADX/S22 for strategy visibility (Phase 5)
+                tick["asto"] = asto_val
+                tick["adx"] = adx_val
+                tick["whale_pivot"] = qstate.get("whale_pivot", 0.0) if qstate else 0.0
+                
                 signal = strategy.on_tick(symbol, tick)
+
                 if not signal: continue
                 
                 # Phase 7: Handle Multi-Leg (List) or Single-Leg (Str/Dict)
                 signals = signal if isinstance(signal, list) else [signal]
                 
                 for leg in signals:
+                    # [Hedge Hybrid] Route special actions to specialized handlers
+                    if isinstance(leg, dict):
+                        if leg.get("action") == "HEDGE_REQUEST":
+                            await mq_manager.send_json(hedge_socket, Topics.HEDGE_REQUEST, leg)
+                            continue
+                        elif leg.get("action") == "TRAP_ALERT":
+                            await redis_client.publish("panic_channel", json.dumps({
+                                "action": "SQUARE_OFF_SIDE",
+                                "symbol": leg["symbol"],
+                                "side": leg["side"],
+                                "reason": leg["reason"]
+                            }))
+                            continue
+
                     action = "WAIT"
                     qty = 1
                     
@@ -505,6 +620,29 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                     if action == "SELL" and alpha_total > 20:
                         logger.warning(f"⚠️ VETO SELL: {s_id} signal rejected by positive Alpha ({alpha_total:.1f})")
                         continue
+                    
+                    # Wave 2: Low Vol Trap (IV < 12%) for POSITIONAL trades
+                    lifecycle = leg.get("lifecycle", "KINETIC") if isinstance(leg, dict) else "KINETIC"
+                    if lifecycle == "POSITIONAL" and iv_cache < 12.0:
+                        logger.warning(f"⚠️ LOW VOL TRAP: {s_id} POSITIONAL entry blocked (IV {iv_cache:.1f} < 12%)")
+                        continue
+
+                    # [C2-09] ASTO/Kinetic Filter: Block entry if |ASTO| <= 70 or ADX <= 25
+                    if lifecycle == "KINETIC":
+                        if abs(asto_val) <= 70 or adx_val <= 25:
+                            logger.info(f"🛡️ ASTO KINETIC VETO: {s_id} entry blocked (ASTO={asto_val:.1f}, ADX={adx_val:.1f})")
+                            continue
+
+                    # [C2-10] ASTO/Kinetic Dynamic Exit: Force exit if |ASTO| < 50
+                    current_pos = strategy.positions[symbol]
+                    if lifecycle == "KINETIC" and current_pos != 0:
+                        if abs(asto_val) < 50:
+                            logger.critical(f"🏹 ASTO KINETIC EXIT: |{asto_val:.1f}| < 50. Closing {s_id} position for {symbol}.")
+                            # Flip action to exit
+                            action = "SELL" if current_pos > 0 else "BUY"
+                            # Override leg to ensure it goes through
+                            if isinstance(leg, dict): leg["action"] = action
+                            else: leg = action
                 
                     # --- Project K.A.R.T.H.I.K. Sizing Logic ---
                     # Prioritize Meta-Router calculated lots, fallback to DTE logic
@@ -591,6 +729,8 @@ async def start_engine():
     # [Audit 2.3] Add missing MQ topics so Engine receives all ticks
     sub_socket = mq.create_subscriber(Ports.MARKET_DATA, topics=["TICK.", "EXEC."])
     push_socket = mq.create_push(Ports.ORDERS) # Pushes to Bridge
+    # [Hedge Hybrid] Dedicated Hedge Request socket
+    hedge_socket = mq.create_push(Ports.HEDGE_REQUEST)
     # [Audit 8.1] Bind CMD socket for controller push
     cmd_socket = mq.create_subscriber(Ports.SYSTEM_CMD, topics=["STRAT_", "ALL"], bind=True)
     
@@ -612,12 +752,13 @@ async def start_engine():
     await warmup_engine(active_strategies)
  
     try:
-        await run_strategies(sub_socket, push_socket, cmd_socket, mq, redis_client, shm_ticks, shm_alpha)
+        await run_strategies(sub_socket, push_socket, cmd_socket, mq, redis_client, shm_ticks, shm_alpha, hedge_socket)
     finally:
         config_task.cancel()
         await redis_client.aclose()
         sub_socket.close()
         push_socket.close()
+        hedge_socket.close()
         cmd_socket.close()
         mq.context.term()
  

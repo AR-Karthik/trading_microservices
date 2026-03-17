@@ -56,6 +56,10 @@ class DataLogger:
             # D-37: Ensure schema is up to date (Additive)
             async with self.pool.acquire() as conn:
                 await conn.execute("ALTER TABLE market_history ADD COLUMN IF NOT EXISTS exit_path_70_progress NUMERIC(10, 2);")
+                await conn.execute("ALTER TABLE market_history ADD COLUMN IF NOT EXISTS asto NUMERIC(10, 2);")
+                await conn.execute("ALTER TABLE market_history ADD COLUMN IF NOT EXISTS asto_regime INTEGER;")
+                await conn.execute("ALTER TABLE market_history ADD COLUMN IF NOT EXISTS asto_multiplier NUMERIC(10, 2);")
+
         except Exception as e:
             logger.error(f"Failed to connect to TimescaleDB or update schema: {e}")
             return
@@ -138,15 +142,22 @@ class DataLogger:
                             float(s.get("vpin", 0.0)),
                             float(s.get("basis_zscore", 0.0)),
                             float(s.get("vol_term_ratio", 1.0)),
-                            exit_progress
+                            exit_progress,
+                            float(s.get("asto", 0.0)),
+                            int(s.get("asto_regime", 0)),
+                            float(s.get("asto_multiplier", 3.0))
                         ))
                     
                     if data_to_insert:
                         await conn.executemany("""
-                            INSERT INTO market_history (time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, vol_term_ratio, exit_path_70_progress)
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            INSERT INTO market_history (
+                                time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, 
+                                vol_term_ratio, exit_path_70_progress, asto, asto_regime, asto_multiplier
+                            )
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                             ON CONFLICT (time, symbol) DO NOTHING
                         """, data_to_insert)
+
                         logger.info(f"FLUSHED {len(data_to_insert)} records to market_history.")
             except Exception as e:
                 logger.error(f"Failed to flush batch: {e}")

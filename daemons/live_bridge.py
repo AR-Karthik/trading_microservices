@@ -96,6 +96,16 @@ class LiveExecutionEngine:
         
         if res and res.get('stat') == 'Ok':
             logger.info("✅ Live Bridge Authentication Successful.")
+            # [Audit-Fix] Load persistent PnL from Redis on boot
+            try:
+                raw_pnl = await self.redis.get("DAILY_REALIZED_PNL_LIVE")
+                if raw_pnl:
+                    self.total_realized_pnl = float(raw_pnl)
+                    logger.info(f"💾 PERSISTENCE: Recovered Daily PnL: ₹{self.total_realized_pnl:.2f}")
+                    # Validate against kill switch immediately
+                    await self.check_kill_switch()
+            except Exception as e:
+                logger.error(f"Failed to recover persistent PnL: {e}")
             return True
         else:
             logger.error(f"❌ Live Bridge Auth Failed: {res}")
@@ -189,6 +199,23 @@ class LiveExecutionEngine:
                 "execution_type": "Actual",
                 "reason": "KILL_SWITCH"
             }))
+
+    async def _publish_liveliness(self):
+        """[Audit-Fix] Periodic Liveliness Indicator for Dashboard UI."""
+        while True:
+            try:
+                status_payload = {
+                    "component": "LiveBridge",
+                    "status": "ALIVE",
+                    "kill_switch": self.is_kill_switch_triggered,
+                    "realized_pnl": self.total_realized_pnl,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+                await self.redis.set("LH:LiveBridge", json.dumps(status_payload), ex=30)
+                await asyncio.sleep(5.0)
+            except Exception as e:
+                logger.error(f"Liveliness error: {e}")
+                await asyncio.sleep(5.0)
             return True
         return False
 
@@ -223,23 +250,51 @@ class LiveExecutionEngine:
         if res and res.get('stat') == 'Ok':
             broker_oid = res['norenordno']
             logger.info(f"✅ Live Order Accepted. Shoonya ID: {broker_oid}")
-            
-            # Reconstruct execution record for DB and confirmation
             return {
                 "id": broker_oid,
                 "time": datetime.now(timezone.utc),
                 "symbol": symbol,
                 "action": order['action'],
                 "quantity": float(order['quantity']),
-                "price": float(order.get('price', 0.0)), # Will be reconciled later
-                "fees": float(order.get('fees', 20.0)),  # [Audit 5.3] Allow dynamic fees
+                "price": float(order.get('price', 0.0)),
+                "fees": float(order.get('fees', 20.0)),
                 "strategy_id": order['strategy_id'],
                 "execution_type": "Actual",
-                "parent_uuid": order.get('parent_uuid', 'NONE') # [Audit 5.1] Pass through parent UUID
+                "parent_uuid": order.get('parent_uuid', 'NONE')
             }
-        else:
-            logger.error(f"❌ Live Order Rejected by Broker: {res}")
-            return None
+        
+        # [Audit-Fix] API 400 Retry Logic with 0.1% nudge
+        error_msg = res.get('emsg', 'Unknown')
+        if "400" in error_msg or "REJECTED" in (res.get('stat') or ''):
+            logger.warning(f"⚠️ API REJECTION ({error_msg}). Retrying with 0.1% nudge...")
+            nudge = 0.001
+            order['price'] = float(order.get('price', 0)) * (1 + nudge if action == 'B' else 1 - nudge)
+            
+            # Second attempt
+            res = await loop.run_in_executor(None, lambda: self.api.place_order(
+                buy_or_sell=action, product_type='I', exchange=exchange, 
+                tradingsymbol=symbol, quantity=order['quantity'], disclosedquantity=0,
+                price_type='LMT', price=order['price'], retention='DAY'
+            ))
+            
+            if res and res.get('stat') == 'Ok':
+                broker_oid = res['norenordno']
+                logger.info(f"✅ Retry Successful. Shoonya ID: {broker_oid}")
+                return {
+                    "id": broker_oid,
+                    "time": datetime.now(timezone.utc),
+                    "symbol": symbol,
+                    "action": order['action'],
+                    "quantity": float(order['quantity']),
+                    "price": float(order['price']),
+                    "fees": float(order.get('fees', 20.0)),
+                    "strategy_id": order['strategy_id'],
+                    "execution_type": "Actual",
+                    "parent_uuid": order.get('parent_uuid', 'NONE')
+                }
+
+        logger.error(f"❌ Live Order Rejected by Broker: {res}")
+        return None
 
 
     def _get_exchange(self, symbol: str) -> str:
@@ -286,6 +341,57 @@ class LiveExecutionEngine:
         # Lock expires in 10s if not cleared by reconciler (safety fallback)
         await self.redis.setex(lock_key, 10, "LOCKED")
 
+        # --- [Audit-Fix] Block Bridge on Stale Feed (> 1000ms) ---
+        tick_raw = await self.redis.get(f"latest_tick:{order['symbol']}")
+        if tick_raw:
+            tick = json.loads(tick_raw)
+            tick_ts = datetime.fromisoformat(tick.get("timestamp")).astimezone(timezone.utc)
+            latency = (datetime.now(timezone.utc) - tick_ts).total_seconds()
+            if latency > 1.0:
+                logger.critical(f"🛑 STALE FEED BLOCK: {order['symbol']} latency {latency:.2f}s > 1s. Aborting.")
+                await self.redis.delete(lock_key)
+                return
+
+        # --- Bridge-level Pre-flight Margin Check (SRS §3.10) ---
+        # Note: Meta-Router performs the first check, but the Bridge provides the "Physical Muscle"
+        # of insolvency protection by checking again right before dispatch.
+        if order.get("action") == "BUY":
+            price = float(order.get("price") or await self.get_last_price(order["symbol"]))
+            qty = float(order["quantity"])
+            required_margin = price * qty
+            
+            exec_suffix = "LIVE" if order.get("execution_type") == "Actual" else "PAPER"
+            cash_key = f"CASH_COMPONENT_{exec_suffix}"
+            coll_key = f"COLLATERAL_COMPONENT_{exec_suffix}"
+            
+            # Use LUA for atomic reservation
+            LUA_RESERVE = """
+            local cash_key = KEYS[1]
+            local coll_key = KEYS[2]
+            local amount = tonumber(ARGV[1])
+
+            local cash = tonumber(redis.call('get', cash_key) or '0')
+            local coll = tonumber(redis.call('get', coll_key) or '0')
+
+            if cash >= amount then
+                redis.call('decrby', cash_key, amount)
+                return 1
+            elseif (cash + coll) >= amount then
+                local from_coll = amount - cash
+                redis.call('set', cash_key, '0')
+                redis.call('decrby', coll_key, from_coll)
+                return 1
+            else
+                return 0
+            end
+            """
+            
+            res = await self.redis.eval(LUA_RESERVE, 2, cash_key, coll_key, int(required_margin))
+            if res != 1:
+                logger.error(f"❌ BRIDGE MARGIN VETO: {order['symbol']} needs ₹{required_margin:,.2f} but budget is exhausted.")
+                await self.redis.delete(lock_key)
+                return
+
         # --- Pending Journal Persistence (SRS §2.7) ---
         # Journal before network dispatch to Shoonya
         pending_key = f"Pending_Journal:{order['order_id']}"
@@ -323,7 +429,15 @@ class LiveExecutionEngine:
             
             # Clear pending journal on fill
             await self.redis.delete(f"Pending_Journal:{order['order_id']}")
-            
+
+            # --- [Audit-Fix] 3s Partial Fill Rollback ---
+            await asyncio.sleep(3.0)
+            status = await self.get_order_status(execution["id"])
+            if status == "PARTIAL":
+                 logger.warning(f"⚠️ PARTIAL FILL TIMEOUT (3s): {execution['symbol']}. Triggering Rollback.")
+                 await self._handle_basket_rollback(execution.get('parent_uuid'))
+                 return
+
             # 4. Broadcast execution confirmation via ZMQ
             # [R2-02] Fixed: use MQManager.send_json for proper 3-part envelope
             await self.mq.send_json(trade_pub_socket, f"EXEC.{execution['symbol']}", {
@@ -407,6 +521,33 @@ class LiveExecutionEngine:
                     exec_type = data.get('execution_type', '')
                     if action in ["SQUARE_OFF", "SQUARE_OFF_ALL"] and exec_type in ["Actual", "ALL"]:
                         logger.critical("🚨 RECEIVED LIVE PANIC SIGNAL: SQUARING OFF REAL POSITIONS WITH BROKER APIs! 🚨")
+                        # ... existing logic ...
+                    elif action == "SQUARE_OFF_SIDE" and exec_type in ["Actual", "ALL", ""]:
+                        symbol = data.get('symbol')
+                        side = data.get('side') # "S" or "B"
+                        logger.critical(f"🚨 TRAP ALERT: Selective Liquidation for {symbol} side {side}")
+                        
+                        async with self.pool.acquire() as conn:
+                            positions = await conn.fetch(
+                                "SELECT symbol, quantity FROM portfolio WHERE symbol = $1 AND quantity != 0 AND execution_type = 'Actual'",
+                                symbol
+                            )
+                            
+                            for pos in positions:
+                                # Sell if long and side='S', or Buy if short and side='B'
+                                if (side == "S" and pos['quantity'] > 0) or (side == "B" and pos['quantity'] < 0):
+                                    la = "SELL" if pos['quantity'] > 0 else "BUY"
+                                    lq = abs(pos['quantity'])
+                                    logger.critical(f"Trap Fire: {la} {lq} {symbol}")
+                                    
+                                    loop = asyncio.get_running_loop()
+                                    ex = self._get_exchange(symbol)
+                                    await loop.run_in_executor(None, lambda a=la, s=symbol, q=lq, e=ex: self.api.place_order(
+                                        buy_or_sell=a[0], product_type='I', exchange=e, tradingsymbol=s, 
+                                        quantity=q, disclosedquantity=0, price_type='MKT', price=0, retention='DAY'
+                                    ))
+                                    # Update DB
+                                    await conn.execute("UPDATE portfolio SET quantity = 0, avg_price = 0 WHERE symbol = $1 AND execution_type = 'Actual'", symbol)
                         
                         # In production we would poll api.get_positions()
                         # For now, rely on our internal Database truth state
@@ -534,6 +675,7 @@ async def main():
                 engine.run(pull_socket),
                 engine.panic_listener(),
                 engine.cmd_listener(),       # Phase 13.3
+                engine._publish_liveliness(), # [Audit-Fix] Component 5
                 _run_heartbeat(redis_client), # Phase 9: UI & Observability
             )
         except KeyboardInterrupt:

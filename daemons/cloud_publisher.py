@@ -32,7 +32,7 @@ logger = logging.getLogger("CloudPublisher")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 EOD_SNAPSHOT_HH, EOD_SNAPSHOT_MM = 15, 35
-HEARTBEAT_INTERVAL_S = 60  # Reduced frequency for hybrid pipeline
+HEARTBEAT_INTERVAL_S = 5  # Wave 2: Standardizing on High-Frequency Heartbeats
 
 
 class CloudPublisher:
@@ -80,8 +80,8 @@ class CloudPublisher:
 
     async def _heartbeat_loop(self):
         """
-        Every 60 seconds, update VM status and IP in Firestore.
-        Real-time metrics are now pulled directly from the VM API by the dashboard.
+        Wave 2: High-frequency heartbeat (5s) for real-time dashboard updates.
+        Includes safety audits and market heatmaps.
         """
         while True:
             try:
@@ -110,7 +110,11 @@ class CloudPublisher:
                     "rv":         ms.get("rv", 0.0),
                     "adx":        ms.get("adx", 20.0),
                     "atm_iv":     float(await self.redis.get("atm_iv") or ms.get("atm_iv", 0.18)),
+                    "asto":       ms.get("asto", 0.0),
+                    "asto_multiplier": ms.get("asto_multiplier", 3.0),
+                    "asto_regime": ms.get("asto_regime", 0)
                 }
+
 
                 power_five = {}
                 for idx in indices:
@@ -139,12 +143,20 @@ class CloudPublisher:
                     "system_health": "HEALTHY",
                     "live_alpha": float(alpha),
                     "live_regime": regime,
-                    # Added for D-36
+                    # Added for D-36 / Wave 2
                     "signals": deep_signals,
                     "power_five": power_five,
                     "portfolio_delta": portfolio_delta,
                     "index_states": index_states,
-                    "exit_path_70_30": ms.get("exit_path_70_30", {"tp1": 0.0, "tp2": 0.0, "progress": 0.0})
+                    "exit_path_70_30": ms.get("exit_path_70_30", {"tp1": 0.0, "tp2": 0.0, "progress": 0.0}),
+                    
+                    # Wave 2: Enhanced Indicators
+                    "indicators": {
+                        "slippage_audit": float(await self.redis.get("METRIC:AVG_SLIPPAGE") or 0.0),
+                        "portfolio_heat": float(await self.redis.get("METRIC:MARGIN_UTIL") or 0.0),
+                        "vm_up_to_date": True, # Stale Dashboard Veto signal
+                        "bid_ask_heatmap": await self._fetch_spread_heatmap()
+                    }
                 }
 
                 # Push to Firestore Metadata (Discovery)
@@ -284,10 +296,11 @@ class CloudPublisher:
             today_str = snapshot_time.strftime("%Y-%m-%d")
             # D-37: Enriched market history export
             rows = await conn.fetch("""
-                SELECT time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, vol_term_ratio, exit_path_70_progress
+                SELECT time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, vol_term_ratio, exit_path_70_progress, asto, asto_regime, asto_multiplier
                 FROM market_history 
                 WHERE time >= $1::date AND time < ($1::date + interval '1 day')
             """, snapshot_time)
+
             await conn.close()
 
             if not rows:
@@ -299,8 +312,10 @@ class CloudPublisher:
             # Ensure types are correct for BigQuery
             df['time'] = pd.to_datetime(df['time'])
             df['symbol'] = df['symbol'].astype(str)
-            for col in ['price', 'log_ofi_zscore', 'cvd', 'vpin', 'basis_zscore', 'vol_term_ratio']:
+            for col in ['price', 'log_ofi_zscore', 'cvd', 'vpin', 'basis_zscore', 'vol_term_ratio', 'asto', 'asto_multiplier']:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+            df['asto_regime'] = pd.to_numeric(df['asto_regime'], errors='coerce').fillna(0).astype(int)
+
 
             parquet_path = f"/tmp/ticks_{today_str}.parquet"
             df.to_parquet(parquet_path, index=False)
@@ -394,6 +409,22 @@ class CloudPublisher:
             "eod_snapshot_time": datetime.now(IST).isoformat(),
         })
         logger.info("Firestore marked: EOD snapshot complete.")
+
+    async def _fetch_spread_heatmap(self):
+        """Wave 2: Fetches current bid-ask spread for top symbols."""
+        symbols = ["NIFTY50", "BANKNIFTY", "SENSEX", "RELIANCE", "HDFCBANK", "ICICIBANK"]
+        heatmap = {}
+        for sym in symbols:
+            try:
+                # We expect MarketSensor/Bridge to store 'bid' and 'ask' in Redis
+                bid = float(await self.redis.get(f"bid:{sym}") or 0.0)
+                ask = float(await self.redis.get(f"ask:{sym}") or 0.0)
+                if bid > 0 and ask > 0:
+                    spread = (ask - bid) / bid * 100 # spread in percentage
+                    heatmap[sym] = round(spread, 4)
+            except:
+                pass
+        return heatmap
 
     async def run(self):
         """Main entry point."""

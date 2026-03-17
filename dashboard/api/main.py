@@ -194,7 +194,14 @@ def get_state():
                 except: regime = "UNKNOWN"
             else:
                 regime = r.get(f"HMM_REGIME:{asset}") or r.get("CURRENT_REGIME") or "UNKNOWN"
-            index_states[asset] = {"score": st.get("s_total", 0.0), "regime": regime, "price": st.get("price", 0.0)}
+            index_states[asset] = {
+                "score": st.get("s_total", 0.0), 
+                "regime": regime, 
+                "price": st.get("price", 0.0),
+                "asto": st.get("asto", 0.0),
+                "asto_regime": st.get("asto_regime", 0),
+                "asto_multiplier": st.get("asto_multiplier", 3.0)
+            }
 
         ms = json.loads(r.get("latest_market_state:NIFTY50") or r.get("latest_market_state") or "{}")
 
@@ -210,6 +217,9 @@ def get_state():
             "basis_z":    ms.get("basis_zscore", 0.0),
             "cvd_flips":  ms.get("cvd_flip_ticks", 0),
             "atm_iv":     float(r.get("atm_iv") or ms.get("atm_iv", 0.18)),
+            "asto":       ms.get("asto", 0.0),
+            "asto_regime": ms.get("asto_regime", 0),
+            "asto_multiplier": ms.get("asto_multiplier", 3.0),
         }
 
         power_five = {}
@@ -246,9 +256,9 @@ def get_state():
             "source": "MOCK_MODE",
             "alpha_score": 0.82, "hmm_regime": "TRENDING_UP",
             "index_states": {
-                "NIFTY50": {"score": 0.82, "regime": "TRENDING_UP", "price": 22450.5},
-                "BANKNIFTY": {"score": -0.15, "regime": "RANGING", "price": 47200.0},
-                "SENSEX": {"score": 0.45, "regime": "TRENDING_UP", "price": 74100.2}
+                "NIFTY50": {"score": 0.82, "regime": "TRENDING_UP", "price": 22450.5, "asto": 75.0, "asto_regime": 1, "asto_multiplier": 3.2},
+                "BANKNIFTY": {"score": -0.15, "regime": "RANGING", "price": 47200.0, "asto": 20.0, "asto_regime": 0, "asto_multiplier": 2.8},
+                "SENSEX": {"score": 0.45, "regime": "TRENDING_UP", "price": 74100.0, "asto": 55.0, "asto_regime": 0, "asto_multiplier": 3.0}
             },
             "signals": {"log_ofi_z": 1.2, "adx": 32.5, "rv": 0.12, "hurst": 0.62, "atr": 185.0, "atm_iv": 0.15},
             "power_five": {"NIFTY50": {"HDFCBANK": 1.2, "RELIANCE": 0.8, "ICICIBANK": 1.5, "INFY": -0.2, "ITC": 0.5}},

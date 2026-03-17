@@ -50,6 +50,13 @@ class MultiLegExecutor:
             if (side == "BUY" and current_limit > max_price) or (side == "SELL" and current_limit < max_price):
                 await self.engine.cancel_order(order_id)
                 logger.error(f"Slippage cap breached for {symbol}")
+                # [Audit-Fix] Additive: Broadcast SLIPPAGE_HALT (60s veto)
+                await self.engine.redis.set("SLIPPAGE_HALT", "True", ex=60)
+                await self.engine.redis.publish("panic_channel", json.dumps({
+                    "action": "SLIPPAGE_HALT",
+                    "symbol": symbol,
+                    "reason": "Slippage cap breached"
+                }))
                 raise Exception(f"SlippageCapBreached: {symbol}")
                 
         raise Exception(f"FillTimeout: {symbol}")

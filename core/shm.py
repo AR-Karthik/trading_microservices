@@ -22,6 +22,9 @@ class SignalVector:
     rv: float = 0.0
     adx: float = 0.0
     pcr: float = 0.0
+    asto: float = 0.0
+    asto_regime: float = 0.0
+    whale_pivot: float = 0.0  # S22
     net_delta_nifty: float = 0.0
     net_delta_banknifty: float = 0.0
     net_delta_sensex: float = 0.0
@@ -31,13 +34,13 @@ class SignalVector:
 class ShmManager:
     """
     Zero-latency Shared Memory IPC for Alpha Scores & Quantitative Signals.
-    Layout: [Timestamp] [Alpha] [VPIN] [OFI] [Vanna] [Charm] [ENV] [STR] [DIV] [RV] [ADX] [PCR] [ND_N] [ND_B] [Veto] [CRC]
+    Layout: [Timestamp] [Alpha] [VPIN] [OFI] [Vanna] [Charm] [ENV] [STR] [DIV] [RV] [ADX] [PCR] [ASTO] [ASTO_REGIME] [S22] [ND_N] [ND_B] [Veto] [CRC]
     """
-    SIZE = 512 # Expanded for 10 heavyweights
+    SIZE = 1024 # Expanded further for ASTO and future scaling
     # Layout: [Timestamp] [Total Alpha] [VPIN] [OFI] [Vanna] [Charm] [ENV] [STR] [DIV] [RV] [ADX] [PCR] 
-    #         [ND_Nifty] [ND_BNifty] [ND_Sensex] [Veto] [10x HW_Alpha] [CRC]
-    # Format: d (ts) + 14d (base signals) + ? (veto) + 10d (hw_alpha) + d (crc)
-    STRUCT_FORMAT = "ddddddddddddddd?ddddddddddd" 
+    #         [ASTO] [ASTO_REGIME] [S22] [ND_Nifty] [ND_BNifty] [ND_Sensex] [Veto] [10x HW_Alpha] [CRC]
+    # Format: d (ts) + 17d (base signals) + ? (veto) + 10d (hw_alpha) + d (crc)
+    STRUCT_FORMAT = "dddddddddddddddddd?ddddddddddd" 
 
     def __init__(self, asset_id: str = "GLOBAL", mode='r'):
         self.mode = mode
@@ -70,7 +73,8 @@ class ShmManager:
             # Cyclic check: sum of all signals
             crc = (signals.s_total + signals.vpin + signals.ofi_z + signals.vanna + 
                    signals.charm + signals.s_env + signals.s_str + signals.s_div + 
-                   signals.rv + signals.adx + signals.pcr + 
+                   signals.rv + signals.adx + signals.pcr + signals.asto + signals.asto_regime +
+                   signals.whale_pivot +
                    signals.net_delta_nifty + signals.net_delta_banknifty + signals.net_delta_sensex +
                    sum(hw_a) + (100.0 if signals.veto else 0.0))
             
@@ -79,6 +83,7 @@ class ShmManager:
                 ts, signals.s_total, signals.vpin, signals.ofi_z, 
                 signals.vanna, signals.charm, signals.s_env, signals.s_str, 
                 signals.s_div, signals.rv, signals.adx, signals.pcr,
+                signals.asto, signals.asto_regime, signals.whale_pivot,
                 signals.net_delta_nifty, signals.net_delta_banknifty, signals.net_delta_sensex,
                 signals.veto, *hw_a, crc
             )
@@ -98,10 +103,10 @@ class ShmManager:
             read_data = struct.unpack(self.STRUCT_FORMAT, data)
             ts = read_data[0]
             s_total, vpin, ofi_z, vanna, charm, s_env, s_str, s_div = read_data[1:9]
-            rv, adx, pcr, nd_nifty, nd_bnifty, nd_sensex = read_data[9:15]
-            veto = read_data[15]
-            hw_alphas = list(read_data[16:26])
-            crc = read_data[26]
+            rv, adx, pcr, asto, asto_regime, whale_p, nd_nifty, nd_bnifty, nd_sensex = read_data[9:18]
+            veto = read_data[18]
+            hw_alphas = list(read_data[19:29])
+            crc = read_data[29]
             
             # Check staleness (if > 1s, data is stale)
             if time.time() - ts > 1.0:
@@ -109,7 +114,7 @@ class ShmManager:
             
             # Integrity check
             check_val = (s_total + vpin + ofi_z + vanna + charm + s_env + s_str + s_div + 
-                         rv + adx + pcr + nd_nifty + nd_bnifty + nd_sensex + sum(hw_alphas) + (100.0 if veto else 0.0))
+                         rv + adx + pcr + asto + asto_regime + whale_p + nd_nifty + nd_bnifty + nd_sensex + sum(hw_alphas) + (100.0 if veto else 0.0))
             if abs(crc - check_val) > 1e-4:
                 return None
                 
@@ -125,6 +130,9 @@ class ShmManager:
                 "rv": rv,
                 "adx": adx,
                 "pcr": pcr,
+                "asto": asto,
+                "asto_regime": asto_regime,
+                "whale_pivot": whale_p,
                 "net_delta_nifty": nd_nifty,
                 "net_delta_banknifty": nd_bnifty,
                 "net_delta_sensex": nd_sensex,

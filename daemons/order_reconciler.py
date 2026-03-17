@@ -10,6 +10,14 @@ from core.mq import MQManager, Ports, Topics
 from core.logger import setup_logger
 from core.health import HeartbeatProvider
 
+# Wave 2: Shoonya API for status polling
+try:
+    from NorenRestApiPy.NorenApi import NorenApi
+    import pyotp
+    _HAS_SHOONYA = True
+except ImportError:
+    _HAS_SHOONYA = False
+
 logger = setup_logger("OrderReconciler", log_file="logs/order_reconciler.log")
 
 class OrderReconciler:
@@ -22,6 +30,20 @@ class OrderReconciler:
         self.inflight_baskets = {}
         # [C5-02] Rollback retry tracking: {parent_uuid: retry_count}
         self.rollback_retries = {}
+        
+        # Wave 2: Memory-Only Fallback for Storage Exhaustion
+        self._memory_pending_orders = {}
+        self._storage_exhausted = False
+
+        # Wave 2: Shoonya API client for direct status polling
+        self.api = None
+        if _HAS_SHOONYA:
+            try:
+                host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
+                self.api = NorenApi(host=host)
+                # Note: Login usually happens in a dedicated method or on first need
+            except Exception as e:
+                logger.error(f"Failed to init Shoonya API: {e}")
         
         # MQ Sockets
         self.cmd_pub = None
@@ -69,7 +91,47 @@ class OrderReconciler:
             order_id = order.get("order_id")
             if not order_id: continue
             
-            status_raw = await self.r.get(f"order_status:{order_id}")
+            status_raw = None
+            try:
+                status_raw = await self.r.get(f"order_status:{order_id}")
+            except Exception as e:
+                logger.error(f"Redis fetch failed for status {order_id}: {e}")
+                self._storage_exhausted = True
+
+            # Wave 2: Poll broker directly if status is missing in Redis
+            if not status_raw and self.api:
+                logger.warning(f"🔍 Status missing for {order_id} in Redis. Polling broker...")
+                try:
+                    # Search broker history for our client order ID (internal order_id)
+                    # Note: This logic assumes we can find the order by our internal ID
+                    # Shoonya's order status might need the broker's auto-generated orderno
+                    # But we can try searching history
+                    loop = asyncio.get_running_loop()
+                    history = await loop.run_in_executor(None, self.api.get_order_history)
+                    if history:
+                        for entry in history:
+                            if entry.get('remarks') == order_id or entry.get('norenordno') == order_id:
+                                # Found it. Map broker statuses to our internal state machine
+                                b_status = entry.get('status', '').upper()
+                                logger.info(f"✅ Found status for {order_id} on broker: {b_status}")
+                                
+                                # Basic mapping
+                                if b_status == "COMPLETE": st = "COMPLETE"
+                                elif b_status in ["REJECTED", "CANCELLED"]: st = "REJECTED"
+                                elif "PARTIAL" in b_status: st = "PARTIAL_FILL"
+                                else: st = "PENDING"
+                                
+                                # Fake a status object
+                                status = {
+                                    "status": st,
+                                    "filled_qty": float(entry.get('fillshares', 0)),
+                                    "remaining_qty": float(entry.get('qty', 0)) - float(entry.get('fillshares', 0))
+                                }
+                                status_raw = json.dumps(status) # So it enters the following logic
+                                break
+                except Exception as ex:
+                    logger.error(f"Broker polling failed for {order_id}: {ex}")
+
             status = json.loads(status_raw) if status_raw else {"status": "PENDING"}
             
             st = status.get("status")
@@ -214,6 +276,12 @@ class OrderReconciler:
                         "legs": msg.get("legs", []),
                         "asset": msg.get("asset")
                     }
+                    # Wave 2: Storage Exhaustion Fallback
+                    if self._storage_exhausted:
+                        for leg in msg.get("legs", []):
+                            oid = leg.get("order_id")
+                            if oid: self._memory_pending_orders[oid] = json.dumps(leg)
+                    
                     logger.info(f"📥 Tracking new basket: {p_uuid}")
             except Exception as e:
                 logger.error(f"Recv error: {e}")
@@ -229,7 +297,13 @@ class OrderReconciler:
         """
         logger.info("🔍 Reboot Audit: Scanning pending orders for orphans...")
         try:
-            pending = await self.r.hgetall("pending_orders")
+            try:
+                pending = await self.r.hgetall("pending_orders")
+            except Exception as e:
+                logger.error(f"Redis hgetall failed on reboot: {e}")
+                self._storage_exhausted = True
+                pending = self._memory_pending_orders
+
             if not pending:
                 logger.info("✅ Reboot Audit: No pending orders found. Clean state.")
                 return
@@ -267,6 +341,10 @@ class OrderReconciler:
                         ))
                 except Exception as e:
                     logger.error(f"Reboot audit error for {order_id}: {e}")
+
+            # Wave 2: Sync memory cache with resolved items
+            if self._storage_exhausted:
+                logger.warning("📉 System running in MEMORY-ONLY MODE due to storage exhaustion.")
 
             logger.info(f"✅ Reboot Audit Complete: {resolved} resolved, {phantoms} phantoms flagged.")
         except Exception as e:

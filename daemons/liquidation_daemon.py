@@ -98,6 +98,7 @@ class LiquidationDaemon:
             self._market_monitor(),
             self._monitor_fill_slippage(),  
             self._run_heartbeat(),          # Phase 9: UI & Observability
+            self._periodic_hydration_loop(), # Wave 2: Continuous Sync
         )
 
     async def _position_alert_listener(self):
@@ -228,6 +229,16 @@ class LiquidationDaemon:
             }
             logger.info(f"🎯 POSITION ARMED: {symbol} [{row['lifecycle_class']}]")
 
+    async def _periodic_hydration_loop(self):
+        """Wave 2: Continuous Portfolio Hydration (every 60s) to reconcile with DB."""
+        while True:
+            try:
+                await asyncio.sleep(60)
+                logger.info("🔄 Periodic Portfolio Hydration triggered...")
+                await self._hydrate_state_from_db()
+            except Exception as e:
+                logger.error(f"Error in periodic hydration: {e}")
+
     # ── Handoff Listener ─────────────────────────────────────────────────────
 
     async def _handoff_listener(self):
@@ -298,6 +309,11 @@ class LiquidationDaemon:
                         # Only evaluate barriers if the tick matches the position's bucket
                         if underlying == tick_symbol:
                             await self._evaluate_barriers(pos_symbol, tick, latest_state)
+                    
+                    # [Hedge Hybrid] Perform periodic hybrid drawdown check
+                    await self._check_hybrid_drawdown()
+                    # Perform daily stop loss check
+                    await self._check_stop_day_loss()
             except Exception as e:
                 logger.error(f"Market monitor error: {e}")
                 await asyncio.sleep(0.5)
@@ -355,6 +371,70 @@ class LiquidationDaemon:
 
         except Exception as e:
             logger.error(f"Stop Day Loss check error: {e}")
+
+    async def _check_hybrid_drawdown(self):
+        """
+        [Hedge Hybrid] 6. Hybrid P&L Drawdown:
+        Aggregates P&L across all legs of the same parent_uuid (Options + Futures).
+        If combined P&L <= threshold, triggers full liquidation for that parent.
+        """
+        try:
+            # 1. Group positions by parent_uuid
+            hybrids: dict[str, list[dict]] = {}
+            for sym, pos in self.orphaned_positions.items():
+                p_uuid = pos.get("parent_uuid")
+                if p_uuid:
+                    if p_uuid not in hybrids: hybrids[p_uuid] = []
+                    hybrids[p_uuid].append(pos)
+            
+            # 2. Calculate P&L for each hybrid group
+            limit = float(await self._redis.get("HYBRID_DRAWDOWN_LIMIT") or 2500.0)
+
+            for p_uuid, legs in hybrids.items():
+                total_pnl = 0.0
+                total_qty = 0
+                for leg in legs:
+                    sym = leg["symbol"]
+                    entry = float(leg.get("price", 0.0))
+                    qty = float(leg.get("quantity", 0))
+                    # Get latest price from Redis (TickHistory or latest_market_state)
+                    # For simplicity, we assume tick prices are available in self.orphaned_positions 
+                    # from the last market_monitor cycle, but that's not exactly how it works.
+                    # We'll fetch from Redis.
+                    p_raw = await self._redis.get(f"latest_price:{sym}")
+                    if not p_raw: continue
+                    price = float(p_raw)
+                    
+                    # Short P&L: (Entry - Price) * Qty
+                    # Long P&L: (Price - Entry) * Qty
+                    # Strategy Engine mostly uses SELL for credit spreads, so legs are short.
+                    # Micro-Futures hedge could be BUY or SELL.
+                    action = leg.get("action", "SELL")
+                    if action == "SELL":
+                        pnl = (entry - price) * abs(qty)
+                    else:
+                        pnl = (price - entry) * abs(qty)
+                    
+                    total_pnl += pnl
+                    if "FUT" not in sym: # Only count option lots
+                        total_qty += abs(qty)
+                
+                # Check breach
+                num_lots = max(1, total_qty // 50) # Assuming NIFTY 50-lot base
+                dynamic_limit = limit * num_lots
+                
+                if total_pnl <= -dynamic_limit:
+                    logger.critical(f"🛑 HYBRID DRAWDOWN: Parent {p_uuid} P&L ₹{total_pnl:.0f} <= -₹{dynamic_limit:.0f}")
+                    asyncio.create_task(send_cloud_alert(
+                        f"🛑 HYBRID DRAWDOWN BREACH\nParent: {p_uuid}\nP&L: ₹{total_pnl:,.0f}\nTriggering full liquidation for all related legs.",
+                        alert_type="CRITICAL"
+                    ))
+                    # Trigger liquidation for all legs in this group
+                    for leg in legs:
+                        await self._attempt_exit(leg, leg["symbol"], 0, f"HYBRID_DRAWDOWN: {total_pnl:.0f}")
+
+        except Exception as e:
+            logger.error(f"Hybrid Drawdown check error: {e}")
 
     # ── Barrier Evaluation ────────────────────────────────────────────────────
 
@@ -444,6 +524,15 @@ class LiquidationDaemon:
                 await self._attempt_exit(pos, symbol, price, exit_reason)
                 return
         except Exception: pass
+
+        # [C2-10] ASTO Dynamic Exit (Phase 5): Force exit if |ASTO| < 50 for KINETIC roles
+        asto_raw = await self._redis.get("asto")
+        asto_val = float(asto_raw or 0.0)
+        if abs(asto_val) < 50:
+            exit_reason = f"ASTO_KINETIC_EXIT: |{asto_val:.1f}| < 50"
+            await self._record_barrier_exit(symbol, "ASTO_EXIT", exit_reason, price, entry)
+            await self._attempt_exit(pos, symbol, price, exit_reason)
+            return
 
         
         if action == "BUY":
@@ -554,11 +643,54 @@ class LiquidationDaemon:
                     await self._attempt_exit(pos, symbol, price, exit_reason)
                     return
 
-        # 4. Delta Tolerance Waterfall (Spec 11.4)
+        # [Hedge Hybrid] 4. Delta Tolerance Waterfall (Spec 11.4)
         net_delta_raw = state.get("net_delta")
         net_delta = float(net_delta_raw) if net_delta_raw is not None else 0.0
         if abs(net_delta) > 0.15:
             await self._execute_hedge_waterfall(pos, net_delta, rv)
+
+        # [Hedge Hybrid] 5. Twitchy Mode: Dynamic ATR Trail for Losing Leg
+        m_state = await self._redis.get("MARKET_STATE")
+        if m_state and "EXTREME_TREND" in m_state:
+            asto_raw = await self._redis.get("asto")
+            asto = float(asto_raw or 0.0)
+            
+            # Losing side: Bullish Trend (ASTO > 90) -> Call side is trapped
+            # Bearish Trend (ASTO < -90) -> Put side is trapped
+            is_call = "CE" in symbol
+            is_put = "PE" in symbol
+            is_losing = (asto >= 90 and is_call) or (asto <= -90 and is_put)
+            
+            if is_losing:
+                # Tighten trail to 0.5x ATR
+                price = float(tick.get("price", 0.0))
+                atr_raw = await self._redis.get(f"atr:{symbol}") or await self._redis.get("atr")
+                atr = float(atr_raw or 20.0)
+                
+                # We need to track the 'best' price for trailing
+                best_price = float(pos.get("best_price", price))
+                if (is_call and price < best_price) or (is_put and price > best_price):
+                    pos["best_price"] = price # Update best price (lowest for short call, highest for short put)
+                
+                best_price = float(pos.get("best_price", price))
+                # For a Short position, SL is above/below best price
+                # But wait, Iron Condor legs are usually SELL.
+                # Short Call: Best price is the lowest price reached. SL = best_price + 0.5*ATR
+                # Short Put: Best price is the highest price reached. SL = best_price - 0.5*ATR
+                
+                if is_call:
+                    sl = best_price + 0.5 * atr
+                    if price >= sl:
+                        exit_reason = f"TWITCHY_STOP_CALL: {price:.2f} >= {sl:.2f} (0.5*ATR trail)"
+                else: # is_put
+                    sl = best_price - 0.5 * atr
+                    if price <= sl:
+                        exit_reason = f"TWITCHY_STOP_PUT: {price:.2f} <= {sl:.2f} (0.5*ATR trail)"
+                
+                if 'exit_reason' in locals() and exit_reason:
+                    await self._record_barrier_exit(symbol, "TWITCHY_MODE", exit_reason, price, entry)
+                    await self._attempt_exit(pos, symbol, price, exit_reason)
+                    return
 
     async def _evaluate_zero_dte_barriers(self, symbol: str, tick: dict, state: dict, pos: dict, rv: float, vix: float, atr: float, current_hmm: str):
         """
@@ -734,12 +866,64 @@ class LiquidationDaemon:
             "reason": reason
         }
 
+        # Wave 2: Strict Exit Sequencing (Shorts first) for multi-leg exits
+        # If this leg has a parent_uuid, we should check if other legs need to be closed too.
+        # For simplicity, we implement the sequencing here if it's a known basket.
+        parent_uuid = pos.get("parent_uuid")
+        if parent_uuid:
+            # Re-collect all legs for this parent_uuid to ensure sequenced closure
+            basket_legs = [p for p in self.orphaned_positions.values() if p.get("parent_uuid") == parent_uuid]
+            if len(basket_legs) > 1:
+                logger.info(f"🔄 Sequenced liquidation for basket {parent_uuid} ({len(basket_legs)} legs)")
+                # Sort: SELL (Shorts) first, then BUY (Longs)
+                # However, our 'action' in 'orphaned_positions' is from the perspective of 'portfolio'.
+                # To CLOSE a SELL (Short), we need to BUY.
+                # To CLOSE a BUY (Long), we need to SELL.
+                # Sequencing requirement: "Shorts first" means close Short legs before Long legs.
+                # So: Legs where current position is negative (Short) should be CLOSED first.
+                
+                # Sort criteria: 
+                # 1. Negative quantity (Shorts) first
+                # 2. Positive quantity (Longs) second
+                basket_legs.sort(key=lambda x: 1 if x.get("quantity", 0) > 0 else 0)
+                
+                for b_pos in basket_legs:
+                    b_symbol = b_pos["symbol"]
+                    b_qty = abs(b_pos.get("quantity", 0))
+                    if b_qty == 0: continue
+                    
+                    # Construct individual closing order
+                    close_order = {
+                        "order_id": str(uuid.uuid4()),
+                        "symbol": b_symbol,
+                        "action": "BUY" if b_pos.get("quantity", 0) < 0 else "SELL",
+                        "quantity": b_qty,
+                        "order_type": "MARKET",
+                        "strategy_id": "LIQUIDATION_SEQUENCED",
+                        "execution_type": b_pos.get("execution_type", "Paper"),
+                        "price": price if b_symbol == symbol else 0, # Only use price if symbol matches
+                        "parent_uuid": parent_uuid,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "reason": f"{reason} | SEQUENCED"
+                    }
+                    
+                    await self._fire_order_with_retries(close_order, b_symbol, reason)
+                    self.orphaned_positions.pop(b_symbol, None)
+                return
+
+        # Single leg or fallback
+        await self._fire_order_with_retries(order, symbol, reason)
+
+    async def _fire_order_with_retries(self, order: dict, symbol: str, reason: str):
+        """Encapsulated retry logic for order firing."""
         max_retries = 3
+        price = order.get("price", 0)
+        qty = order.get("quantity", 0)
+        
         for attempt in range(1, max_retries + 1):
             try:
                 await self.mq.send_json(self.order_pub, Topics.ORDER_INTENT, order)
-                logger.info(f"✅ EXIT ORDER sent: SELL {qty} {symbol} @ {price:.2f} ({reason})")
-                self.orphaned_positions.pop(symbol, None)
+                logger.info(f"✅ EXIT ORDER sent: {order['action']} {qty} {symbol} ({reason})")
                 await self._redis.delete(f"Pending_Journal:{order['order_id']}")
                 return
             except Exception as e:
@@ -757,7 +941,6 @@ class LiquidationDaemon:
                         f"🆘 CRITICAL: EXIT ORDER ABORTED for {symbol}\nError: {err_msg[:200]}\nManual intervention required!",
                         alert_type="CRITICAL"
                     ))
-                    self.orphaned_positions.pop(symbol, None)
                     return
                 else:
                     logger.error(f"Exit order error (attempt {attempt}): {e}")

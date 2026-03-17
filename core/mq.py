@@ -224,6 +224,7 @@ class Ports:
     LOGGING = 5560        # Centralized logging
     RECONCILER = 5561     # Order Reconciler ROUTER (receives DEALER intents)
     SYSTEM_CTRL = 5562    # System Controller broadcasts (lifecycle events)
+    HEDGE_REQUEST = 5563  # Strategy Engine requests hedge validation
 
 class Topics:
     TICK_DATA = "TICK"
@@ -231,6 +232,7 @@ class Topics:
     SYSTEM_CMD = "CMD"
     ORDER_INTENT = "INTENT"
     FILL_RECEIPT = "FILL"
+    HEDGE_REQUEST = "HEDGE"
 
 class RedisLogger:
     """Streams logs to Redis for dashboard visibility."""

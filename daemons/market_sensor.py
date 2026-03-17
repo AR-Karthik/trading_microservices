@@ -99,7 +99,7 @@ def calculate_kaufman_er(series: np.ndarray, window: int = 10) -> float:
     return float(net_change / sum_abs_changes) if sum_abs_changes > 0 else 0.0
 
 def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int = 14) -> float:
-    """Simplified ADX calculation for trend strength."""
+    """Simplified ADX calculation for trend strength. Returns float [0-100]."""
     if len(close) < window * 2:
         return 20.0
     
@@ -115,11 +115,17 @@ def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: 
     
     # Simple moving average for smoothing in this high-speed context
     tr_smooth = np.mean(tr[-window:])
-    plus_di = 100 * (np.mean(plus_dm[-window:]) / tr_smooth) if tr_smooth > 0 else 0
-    minus_di = 100 * (np.mean(minus_dm[-window:]) / tr_smooth) if tr_smooth > 0 else 0
+    if tr_smooth <= 0: return 20.0
     
-    dx = 100 * (np.abs(plus_di - minus_di) / (plus_di + minus_di)) if (plus_di + minus_di) > 0 else 0
+    plus_di = 100 * (np.mean(plus_dm[-window:]) / tr_smooth)
+    minus_di = 100 * (np.mean(minus_dm[-window:]) / tr_smooth)
+    
+    div = plus_di + minus_di
+    dx = 100 * (np.abs(plus_di - minus_di) / div) if div > 0 else 0
     return float(dx)
+
+
+
 
 def calculate_hurst(series: np.ndarray) -> float:
     """Hurst exponent helper."""
@@ -129,6 +135,66 @@ def calculate_hurst(series: np.ndarray) -> float:
     tau = [np.sqrt(np.std(np.subtract(series[lag:], series[:-lag]))) for lag in lags]
     poly = np.polyfit(np.log(lags), np.log(tau), 1)
     return float(poly[0] * 2.0)
+
+class AdaptiveSuperTrendOscillator:
+    """
+    Adaptive SuperTrend Oscillator (ASTO) - S23
+    Calculates dynamic HL2-based bands with adaptive ATR-10 multipliers.
+    Normalizes price position to [-100, +100] for dual-identity logic.
+    """
+    def __init__(self, base_multiplier: float = 3.0, atr_period: int = 10, sensitivity: float = 0.5):
+        self.base_multiplier = base_multiplier
+        self.phi = sensitivity
+        self.atr_buffer = collections.deque(maxlen=atr_period)
+        self.last_upper = 0.0
+        self.last_lower = 0.0
+        self.prev_close = 0.0
+
+    def compute(self, high: float, low: float, close: float, z_vol: float) -> tuple[float, int, float]:
+        """
+        Refined Core Logic:
+        1. Median Pivot: HL2
+        2. Multiplier: Base + (Z_vol * 0.5)
+        3. Normalization: Map price within bands to -100 to +100
+        """
+        # 1. HL2 Median Pivot
+        hl2 = (high + low) / 2.0
+        
+        # 2. Dynamic TR/ATR
+        tr = max(high - low, abs(high - self.prev_close), abs(low - self.prev_close)) if self.prev_close > 0 else (high - low)
+        self.atr_buffer.append(tr)
+        self.prev_close = close
+        atr = np.mean(self.atr_buffer) if self.atr_buffer else 1.0
+        
+        # 3. Adaptive Multiplier (Expansion/Compression)
+        m_adaptive = self.base_multiplier + (z_vol * self.phi)
+        
+        # 4. Dynamic Bands
+        upper_band = hl2 + (m_adaptive * atr)
+        lower_band = hl2 - (m_adaptive * atr)
+        
+        # SuperTrend Persistence
+        if self.last_upper > 0:
+            if close < self.last_upper: upper_band = min(upper_band, self.last_upper)
+            if close > self.last_lower: lower_band = max(lower_band, self.last_lower)
+            
+        self.last_upper = upper_band
+        self.last_lower = lower_band
+        
+        # 5. Normalization [-100, +100]
+        band_range = upper_band - lower_band
+        if band_range > 0:
+            # Normalized map: upper=+100, lower=-100, hl2=0
+            asto = ((close - hl2) / (band_range / 2.0)) * 100.0
+            asto = max(-100.0, min(100.0, asto))
+        else:
+            asto = 0.0
+            
+        # Regime Detection (|ASTO| > 70 = Trend)
+        regime = 1 if abs(asto) > 70 else 0
+        
+        return float(asto), int(regime), float(m_adaptive)
+
 
 def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
     """
@@ -140,6 +206,11 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
     from scipy.optimize import brentq  # type: ignore
     from scipy.stats import norm       # type: ignore
     from core.greeks import BlackScholes
+    import collections
+
+    # Per-symbol state for ASTO
+    asto_engines = collections.defaultdict(lambda: AdaptiveSuperTrendOscillator())
+    atr_histories = collections.defaultdict(lambda: collections.deque(maxlen=100))
 
     def bs_call_price(S, K, T, r, sigma):
         return BlackScholes.call_price(S, K, T, r, sigma)
@@ -292,6 +363,36 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
                     hw_alphas[hw] = 0.0
         result["hw_alphas"] = hw_alphas
 
+        # ── ASTO Implementation (S23) ─────────────────────────────────────
+        # Retrieve or initialize engine for this symbol
+        engine = asto_engines[symbol]
+        hist = atr_histories[symbol]
+        
+        # Calculate Z_vol (Z-score of ATR over 100-period window) for adaptive multiplier
+        # We still use result["atr"] as a proxy for the 'base' activity level
+        atr_val = result.get("atr", 20.0)
+        hist.append(atr_val)
+        
+        if len(hist) >= 20: # Warm up window
+            mu_atr = np.mean(hist)
+            std_atr = np.std(hist)
+            z_vol = float((atr_val - mu_atr) / std_atr) if std_atr > 0 else 0.0
+        else:
+            z_vol = 0.0
+            
+        # Get High/Low from price series in snapshot for precise ASTO
+        prices = np.array(snapshot.get("price_series", [spot]))
+        # We use the most recent 10 ticks (ATR-10 context) to find local H/L
+        window_prices = prices[-10:] if len(prices) >= 10 else prices
+        curr_high = float(np.max(window_prices))
+        curr_low = float(np.min(window_prices))
+
+        asto_raw, asto_regime, m_adaptive = engine.compute(curr_high, curr_low, spot, z_vol)
+        result["asto"] = float(asto_raw)
+        result["asto_regime"] = int(asto_regime)
+        result["asto_multiplier"] = float(m_adaptive)
+
+
         return result
 
     # Worker main loop
@@ -400,6 +501,7 @@ class MarketSensor:
             sym: collections.deque(maxlen=500) for sym in all_assets
         }
         self.ofi_series: collections.deque[float] = collections.deque(maxlen=200)
+        self.vix_series: collections.deque[float] = collections.deque(maxlen=300) # 5m @ 1s pub
         self.cvd: float = 0.0
         self.cvd_series: collections.deque[float] = collections.deque(maxlen=200)
         self.basis_series: collections.deque[float] = collections.deque(maxlen=500)
@@ -412,6 +514,10 @@ class MarketSensor:
         self.current_bucket_sell_vol = 0
         self.vpin_series: collections.deque[float] = collections.deque(maxlen=50)
 
+        # ASTO Indicators (SRS Part 1)
+        self.atr_buffer: collections.deque[float] = collections.deque(maxlen=10)
+        self.asto_engine = AdaptiveSuperTrendOscillator(base_multiplier=3.0, phi=0.5)
+
         # Compute subprocess setup
         self._compute_in: mp.Queue = mp.Queue(maxsize=50)
         self._compute_out: mp.Queue = mp.Queue(maxsize=50)
@@ -420,6 +526,11 @@ class MarketSensor:
 
         # Hurst exponent cache
         self._last_hurst_calc = 0.0
+
+        # [Hedge Hybrid] Holistic state
+        self.market_state = "NEUTRAL"
+        self.vwap_cum_pv: dict[str, float] = {}
+        self.vwap_cum_vol: dict[str, float] = {}
 
     # Removed redundant compute process methods
 
@@ -753,10 +864,62 @@ class MarketSensor:
             "spot_zscore_15m": sig.get("spot_zscore_15m", 0.0),
             "vpin": vpin,
             "cvd": float(self.cvd),
+            "asto": sig.get("asto", 0.0),
+            "asto_regime": sig.get("asto_regime", 0),
+            "asto_multiplier": sig.get("asto_multiplier", 3.0),
             "flow_toxicity_veto": flow_toxicity_veto,
             "sentiment_score": sentiment_score,
             "time_of_day": datetime.now().strftime("%H:%M:%S")
         }
+
+        # ── [Hedge Hybrid] Three-State Deterministic Model (S22 & MARKET_STATE) ──
+        asto = float(state.get("asto", 0.0))
+        abs_asto = abs(asto)
+        
+        # 1. Update Anchored VWAP (resets at sensor start)
+        tick = self.tick_store[symbol][-1] if self.tick_store[symbol] else {}
+        vol = float(tick.get("last_volume", 1))
+        
+        self.vwap_cum_pv[symbol] = self.vwap_cum_pv.get(symbol, 0.0) + (price * vol)
+        self.vwap_cum_vol[symbol] = self.vwap_cum_vol.get(symbol, 0.0) + vol
+        
+        vwap = self.vwap_cum_pv[symbol] / self.vwap_cum_vol[symbol] if self.vwap_cum_vol[symbol] > 0 else price
+        
+        # 2. Calculate 15-min Price Slope
+        slope_15m = 0.0
+        if len(self.spot_15m_series) >= 60: # at least 1 min of data for a slope
+            s15 = list(self.spot_15m_series)
+            slope_15m = float(s15[-1]) - float(s15[-60]) # point-to-point 1m delta as slope proxy
+            
+        # 3. Calculate Whale Pivot (S22)
+        s22 = 0.0
+        if price > vwap and slope_15m > 0:
+            s22 = 1.0
+        elif price < vwap and slope_15m < 0:
+            s22 = -1.0
+        state["whale_pivot"] = s22
+
+        # 4. Update MARKET_STATE with Hysteresis
+        current_state = str(self.market_state)
+        new_state = current_state
+        
+        if abs_asto >= 90:
+            new_state = "EXTREME_TREND:BULLISH" if asto >= 90 else "EXTREME_TREND:BEARISH"
+        elif abs_asto >= 70:
+            # Revert from EXTREME to TRENDING or stay TRENDING
+            if "EXTREME" not in current_state:
+                new_state = "TRENDING"
+        else: # abs_asto < 70
+            new_state = "NEUTRAL"
+            
+        self.market_state = new_state
+        state["market_state"] = new_state
+        await self._redis.set("MARKET_STATE", new_state)
+        
+        if abs_asto >= 90:
+            await self._redis.set("MARKET_STATE:EXTREME_TREND", "TRUE")
+        elif abs_asto <= 50:
+             await self._redis.set("MARKET_STATE:EXTREME_TREND", "FALSE")
 
         # ── [R3-04] Publish India VIX to Redis ─────────────────────────
         # India VIX approximated from ATM IV when direct feed unavailable.
@@ -767,6 +930,21 @@ class MarketSensor:
                     # ATM IV stored as decimal (0.18 = 18%), VIX as percentage (18.0)
                     vix_estimate = float(atm_iv_raw) * 100.0
                     await self._redis.set("vix", f"{vix_estimate:.2f}")
+                    self.vix_series.append(vix_estimate)
+                    
+                    # [Audit-Fix] VIX Spike Veto (> 15% 5m expansion)
+                    if len(self.vix_series) >= 300: # Full 5m window
+                        vix_start = self.vix_series[0]
+                        vix_now = self.vix_series[-1]
+                        if vix_start > 0:
+                            expansion = (vix_now - vix_start) / vix_start
+                            if expansion > 0.15:
+                                logger.critical(f"🚨 VIX SPIKE: {expansion*100:.1f}% expansion in 5m! Setting VIX_SPIKE_DETECTED.")
+                                await self._redis.set("VIX_SPIKE_DETECTED", "True", ex=300) # 5m veto
+                            else:
+                                # Self-healing if spike subsides
+                                await self._redis.set("VIX_SPIKE_DETECTED", "False")
+
             except Exception as e:
                 logger.warning(f"Failed to publish VIX estimate to Redis: {e}")
 
@@ -819,6 +997,9 @@ class MarketSensor:
                     rv=state["rv"],
                     adx=state["adx"],
                     pcr=state.get("pcr", 0.85),
+                    asto=state["asto"],
+                    asto_regime=state["asto_regime"],
+                    whale_pivot=state["whale_pivot"],
                     net_delta_nifty=nd_nifty,
                     net_delta_banknifty=nd_bank,
                     net_delta_sensex=nd_sensex,
@@ -846,6 +1027,8 @@ class MarketSensor:
             await self._redis.set(f"price_dislocation:{symbol}", "1" if state["price_dislocation"] else "0")
             await self._redis.set(f"gex_sign:{symbol}", state["gex_sign"])
             await self._redis.set(f"atr:{symbol}", str(state["atr"]))
+            await self._redis.set(f"asto:{symbol}", str(state["asto"]))
+            await self._redis.set(f"asto_regime:{symbol}", str(state["asto_regime"]))
             await self._redis.set(f"flow_toxicity_veto:{symbol}", "1" if state["flow_toxicity_veto"] else "0")
             await self._redis.set(f"current_dte:{symbol}", str(state.get("dte", 2)))
             

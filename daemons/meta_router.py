@@ -15,6 +15,20 @@ ATR_SL_MULTIPLIER          = 1.0     # Mirrors liquidation_daemon constant for s
 DEFAULT_HURST_THRESHOLD    = 0.55
 DEFAULT_HYBRID_CONFIDENCE  = 0.70
 DEFAULT_VPIN_TOXICITY      = 0.82
+HEDGE_RESERVE_PCT          = 0.15  # [C2-01] 15% of capital reserved for hedging
+
+# [Audit-Fix] LUA Script for atomic margin reservation
+LUA_RESERVE_SCRIPT = """
+local key = KEYS[1]
+local amount = tonumber(ARGV[1])
+local current = tonumber(redis.call('get', key) or '0')
+if current >= amount then
+    redis.call('set', key, tostring(current - amount))
+    return 1
+else
+    return 0
+end
+"""
 
 import asyncio
 import json
@@ -178,6 +192,8 @@ class MetaRouter:
             redis_host = os.getenv("REDIS_HOST", "localhost")
             self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
             self.shm = ShmManager(mode='r')
+            # [Audit-Fix] Register LUA script
+            self._lua_reserve = self._redis.register_script(LUA_RESERVE_SCRIPT)
         else:
             self.shm = None
 
@@ -213,6 +229,7 @@ class MetaRouter:
         self.last_greek_ts: float = 0.0
         self.cash_component: float = 1000000.0  # Default 10L cash
         self.collateral_component: float = 1000000.0 # Default 10L collateral
+        self.hedge_reserve: float = 0.0 # [C2-01] Explicit 15% tranche
         self.quarantine_premium: float = 0.0
     
     async def _sync_settings(self):
@@ -227,11 +244,13 @@ class MetaRouter:
                 self.heat_limit = float(await self._redis.get("CONFIG:MAX_PORTFOLIO_HEAT") or DEFAULT_MAX_PORTFOLIO_HEAT)
                 self.hurst_threshold = float(await self._redis.get("CONFIG:HURST_THRESHOLD") or DEFAULT_HURST_THRESHOLD)
                 self.hybrid_confidence = float(await self._redis.get("CONFIG:HYBRID_CONFIDENCE") or DEFAULT_HYBRID_CONFIDENCE)
-                self.vpin_toxicity = float(await self._redis.get("CONFIG:VPIN_TOXICITY") or DEFAULT_VPIN_TOXICITY)
+                self.vpin_toxicity = float(await self._redis.get("CONFIG:VPIN_TOXICITY_THRESHOLD") or float(os.getenv("VPIN_TOXICITY_THRESHOLD", "0.80")))
                 
                 # [R2-05] Fixed: use same key names as system_controller writes
                 self.cash_component = float(await self._redis.get("CASH_COMPONENT_LIVE") or 1000000.0)
                 self.collateral_component = float(await self._redis.get("COLLATERAL_COMPONENT_LIVE") or 1000000.0)
+                # [Audit-Fix] Explicitly fetch Hedge Reserve from Redis (set by SystemController)
+                self.hedge_reserve = float(await self._redis.get("HEDGE_RESERVE_LIVE") or 0.0)
                 self.quarantine_premium = float(await self._redis.get("QUARANTINE_PREMIUM_LIVE") or 0.0)
             except:
                 self.heat_limit = DEFAULT_MAX_PORTFOLIO_HEAT
@@ -396,6 +415,33 @@ class MetaRouter:
             if iv_val < 0.12 and active_dec.get("lifecycle_class") == "POSITIONAL":
                 logger.warning(f"🛑 LOW_VOL_TRAP: IV {iv_val:.2%} < 12%. Blocking POSITIONAL for {asset}.")
                 active_dec["lots"] = 0
+
+            # [C2-07] ASTO Shield Veto: block Iron Condor entry if |ASTO| > 60
+            asto_val = float(state.get("asto", 0.0))
+            if abs(asto_val) > 60 and active_dec.get("lifecycle_class") == "POSITIONAL":
+                logger.warning(f"🛡️ ASTO SHIELD VETO: |{asto_val:.1f}| > 60. Blocking POSITIONAL entry for {asset}.")
+                active_dec["lots"] = 0
+
+            # [C2-09] ASTO Hunter Veto: block KINETIC if |ASTO| <= 70 or ADX <= 25
+            adx_val = float(state.get("adx", 0.0))
+            if active_dec.get("lifecycle_class") == "KINETIC":
+                if abs(asto_val) <= 70 or adx_val <= 25:
+                    logger.warning(f"🏹 ASTO HUNTER VETO: |{asto_val:.1f}| <= 70 or ADX {adx_val:.1f} <= 25. Blocking KINETIC entry for {asset}.")
+                    active_dec["lots"] = 0
+
+            # [C2-08] ASTO Delta Hedge Trigger: emergency hedge if |ASTO| > 90
+            if abs(asto_val) > 90 and active_dec.get("lifecycle_class") == "POSITIONAL":
+                logger.critical(f"🛡️ ASTO GIGA-VIX TRIGGERED: |{asto_val:.1f}| > 90. Activating Emergency Hedge for {asset}.")
+
+                # Send out-of-band delta-neutralizing intent to Sidecar/Bridge
+                hedge_intent = {
+                    "asset": asset,
+                    "action": "AUTO_HEDGE",
+                    "reason": "ASTO_GIGA_VIX",
+                    "parent_uuid": active_dec.get("parent_uuid"),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+                await self.mq.send_json(self.cmd_pub, "SYSTEM_CMD", hedge_intent)
             
             # Use separate keys to avoid dict-indexing-on-str errors
             audit = {
@@ -442,6 +488,34 @@ class MetaRouter:
                         cmd["lots"] = round(cmd["lots"] * scale, 4)
 
         if not self.test_mode:
+            # --- [Audit-Fix] Component 4: Risk Guards ---
+            
+            # 1. Low Vol Trap (ATR < 0.15)
+            # We check ATR from the signals. If normalized ATR is too low, we veto new positions.
+            for cmd in all_commands:
+                if isinstance(cmd, dict):
+                    # Normalized ATR < 0.15 is considered 'Dead Air'
+                    if cmd.get("atr", 1.0) < 0.15:
+                        logger.warning(f"⚠️ LOW_VOL_TRAP: {cmd['asset']} ATR < 0.15. Vetoing new size.")
+                        cmd["lots"] = 0
+
+            # 2. VIX Spike Veto (> 15% 5m expansion)
+            # Global guard set by MarketSensor/SystemController
+            vix_spike = await self._redis.get("VIX_SPIKE_DETECTED")
+            if vix_spike == "True":
+                logger.critical("🚨 VIX_SPIKE_VETO: Rapid volatility expansion pulse. Freezing all entries.")
+                for cmd in all_commands:
+                    if isinstance(cmd, dict):
+                        cmd["lots"] = 0
+
+            # 3. Macro Event Lockdown (Global Guard)
+            macro_lockdown = await self._redis.get("MACRO_EVENT_LOCKDOWN")
+            if macro_lockdown == "True":
+                logger.warning("🔒 MACRO_EVENT_LOCKDOWN: Global freeze active via SysAdmin.")
+                for cmd in all_commands:
+                    if isinstance(cmd, dict):
+                        cmd["lots"] = 0
+
             # ── A1: Global Portfolio Heat Constraint ───────────────────────────
             total_heat = sum(cmd.get("weight", 0) for cmd in all_commands if isinstance(cmd, dict))
             
@@ -467,6 +541,24 @@ class MetaRouter:
                 await self._redis.set("PORTFOLIO_HEAT_CAPPED", "False", ex=60)
 
             for cmd in all_commands:
+                # [Audit-Fix] Pre-Flight Margin Reservation via LUA
+                if cmd.get("lots", 0) > 0:
+                    asset = cmd["asset"]
+                    # Approximate margin: 1.25L per lot
+                    margin_per_lot = 125000.0
+                    total_req = cmd["lots"] * margin_per_lot
+                    
+                    # Try to reserve from CASH_COMPONENT_LIVE
+                    # Note: LUA script returns 1 for success, 0 for fail
+                    reserved = await self._lua_reserve(keys=["CASH_COMPONENT_LIVE"], args=[str(total_req)])
+                    
+                    if not reserved:
+                        logger.error(f"🛑 ATOMIC MARGIN REJECTION: Insufficient cash for {asset} ({cmd['lots']} lots).")
+                        cmd["lots"] = 0
+                        continue
+                    else:
+                        logger.info(f"✅ MARGIN RESERVED: ₹{total_req:.2f} allocated for {asset}.")
+
                 # [R2-04] Fixed: send_json signature is (socket, topic, data)
                 await self.mq.send_json(self.cmd_pub, cmd["asset"], cmd)
             
@@ -546,6 +638,14 @@ class MetaRouter:
         decision["legs"] = legs
         decision["exchange"] = exch
         
+        # [Audit-Fix] Propagate parent_uuid to all legs for Execution Bridge tracking
+        p_uuid = decision.get("parent_uuid", "NONE")
+        for leg in legs:
+            leg["parent_uuid"] = p_uuid
+            leg["asset"] = asset
+            leg["strategy_id"] = strat
+            leg["execution_type"] = decision.get("execution_type", "Actual")
+        
         # JIT Dynamic Subscription for all legs
         for leg in legs:
             await self._redis.publish("dynamic_subscriptions", f"{exch}|{leg['symbol']}")
@@ -580,12 +680,102 @@ class MetaRouter:
             await self._redis.lpush(key, dec.get("lots", 0))
             await self._redis.ltrim(key, 0, 100) # Keep 100 ticks of history
 
+    async def _reboot_recovery(self):
+        """[Audit-Fix] Recovers partial payloads from Pending_Journal on boot."""
+        if not self._redis: return
+        logger.info("MetaRouter: Scanning Pending_Journal for boot-time recovery...")
+        try:
+            keys = await self._redis.keys("Pending_Journal:*")
+            for k in keys:
+                raw = await self._redis.get(k)
+                if raw:
+                    payload = json.loads(raw)
+                    logger.warning(f"RECOVEY: Found orphaned intent {k}. Re-dispatching to SYSTEM_CMD.")
+                    # Re-dispatch for Reconciler/Bridge to pickup
+                    await self.mq.send_json(self.cmd_pub, payload["asset"], payload)
+        except Exception as e:
+            logger.error(f"Reboot recovery failed: {e}")
+
+    async def _hedge_request_listener(self):
+        """Listens for HEDGE_REQUESTs from Strategy Engine."""
+        sub = self.mq.create_pull(Ports.HEDGE_REQUEST, bind=True) # MetaRouter binds, StrategyEngine connects
+        # Note: In bridge, Ports.ORDERS is PULL. We need MetaRouter to PUSH to Bridge.
+        # But Bridge is already BINDING to Ports.ORDERS? 
+        # Actually, let's check mq.py: PULL usually binds=False by default.
+        # Wait, LiveBridge binds to Ports.ORDERS. So MetaRouter should CONNECT to it.
+        push_orders = self.mq.create_push(Ports.ORDERS, bind=False)
+        push_orders.connect(f"tcp://{self.mq.mq_hosts['orders']}:{Ports.ORDERS}")
+
+        logger.info("MetaRouter: HEDGE_REQUEST listener active.")
+        while True:
+            try:
+                topic, req = await self.mq.recv_json(sub)
+                if not req: continue
+                
+                asset = req.get("symbol", "").split("-")[0]
+                asto = float(req.get("asto", 0.0))
+                
+                # 1. Check MARKET_STATE (Deterministic Model)
+                m_state = await self._redis.get("MARKET_STATE") or "NEUTRAL"
+                if "EXTREME_TREND" not in m_state:
+                    logger.warning(f"🛡️ HEDGE VETO: Market State is {m_state}, not EXTREME_TREND. Ignoring hedge for {asset}.")
+                    continue
+                
+                # 2. 15% Reserve Check
+                total_bp = self.cash_component + self.collateral_component
+                hedge_limit = total_bp * HEDGE_RESERVE_PCT
+                current_hedge_usage = float(await self._redis.get(f"HEDGE_USAGE:{asset}") or 0.0)
+                
+                # Estimate cost for Micro-Future margin (e.g. 5k INR)
+                cost = float(req.get("quantity", 1)) * 5000.0 
+                
+                if (current_hedge_usage + cost) > hedge_limit:
+                    logger.critical(f"🛑 HEDGE MARGIN VETO: Asset {asset} exceeded 15% hedge reserve limit.")
+                    continue
+                
+                # 3. Dispatch Micro-Futures Order
+                # Ensure parent_uuid is linked for "Hybrid" tracking
+                order = {
+                    "order_id": str(uuid.uuid4()),
+                    "symbol": req["symbol"],
+                    "action": req["side"], # BUY/SELL
+                    "quantity": req["quantity"],
+                    "order_type": "MARKET",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "strategy_id": "HEDGE_HYBRID",
+                    "execution_type": "Actual", # Or req.get("execution_type")
+                    "lifecycle_class": "KINETIC", 
+                    "parent_uuid": req.get("parent_uuid"),
+                    "audit_tags": {
+                        "hedge_label": req.get("hedge_label"),
+                        "reason": req.get("reason"),
+                        "m_state": m_state
+                    }
+                }
+                
+                # Atomic Reserve
+                reserved = await self._lua_reserve(keys=["CASH_COMPONENT_LIVE"], args=[str(cost)])
+                if reserved:
+                    await self.mq.send_json(push_orders, Topics.ORDER_INTENT, order)
+                    await self._redis.incrbyfloat(f"HEDGE_USAGE:{asset}", cost)
+                    logger.info(f"🚀 HEDGE DISPATCHED: {req['symbol']} {req['side']} Qty={req['quantity']} | Parent: {order['parent_uuid']}")
+                else:
+                    logger.error(f"🛑 HEDGE RESERVATION FAIL: ₹{cost} rejected by LUA.")
+
+            except Exception as e:
+                logger.error(f"Hedge listener error: {e}")
+                await asyncio.sleep(1)
+
     async def run(self):
         logger.info("Project K.A.R.T.H.I.K. Orchestrator Active. Managing NIFTY, BANKNIFTY, SENSEX parallel weights.")
         asyncio.create_task(send_cloud_alert("🚦 PROJECT K.A.R.T.H.I.K.: Orchestrator online.", alert_type="SYSTEM"))
         
-        # Start config listener in background
+        # [Audit-Fix] Boot-time recovery of pending journals
+        await self._reboot_recovery()
+
+        # Start listeners
         asyncio.create_task(self._config_update_listener())
+        asyncio.create_task(self._hedge_request_listener())
         
         # ── Phase 9: UI & Observability heartbeat ──
         from core.health import HeartbeatProvider

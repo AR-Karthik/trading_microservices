@@ -313,6 +313,43 @@ class PaperBridge:
         
         logger.info(f"✅ Rollback complete for {parent_uuid}. Portfolio flushed.")
 
+    async def _handle_row_liquidation(self, conn, row):
+        """Internal helper to close a single portfolio row."""
+        sym = row["symbol"]
+        qty = float(row["quantity"])
+        action = "SELL" if qty > 0 else "BUY"
+        abs_qty = abs(qty)
+        
+        market_price = 100.0 # fallback
+        try:
+            state_raw = await self.redis.get(f"latest_market_state:{sym}")
+            if state_raw:
+                state = json.loads(state_raw)
+                market_price = state.get("price", 100.0)
+        except Exception: pass
+
+        execution = {
+            "id": str(uuid.uuid4()),
+            "time": datetime.now(timezone.utc),
+            "symbol": sym,
+            "action": action,
+            "quantity": abs_qty,
+            "price": market_price,
+            "fees": 20.0,
+            "strategy_id": row["strategy_id"],
+            "execution_type": row.get("execution_type", "Paper"),
+            "parent_uuid": row["parent_uuid"]
+        }
+        
+        # Insert trade and update portfolio
+        await conn.execute(
+            "INSERT INTO trades (id, time, symbol, action, quantity, price, fees, strategy_id, execution_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            execution['id'], execution['time'], execution['symbol'], execution['action'],
+            execution['quantity'], execution['price'], execution['fees'], execution['strategy_id'], execution['execution_type']
+        )
+        await self.update_portfolio(conn, execution, 20.0)
+        logger.info(f"Targeted Liq: {action} {abs_qty} {sym} @ {market_price}")
+
     async def panic_listener(self):
         """Phase 13.3: Listens for Global Square Off commands via Redis PubSub."""
         pubsub = self.redis.pubsub()
@@ -334,6 +371,20 @@ class PaperBridge:
                             
                             for puuid in parent_uuids:
                                 await self._handle_basket_rollback(puuid)
+                    elif action == "SQUARE_OFF_SIDE" and exec_type in ["Paper", "ALL", ""]:
+                        symbol = data.get('symbol')
+                        side = data.get('side') # "S" or "B"
+                        logger.critical(f"🚨 TRAP ALERT: Selective Paper Liquidation for {symbol} side {side}")
+                        
+                        async with self.pool.acquire() as conn:
+                            rows = await conn.fetch(
+                                "SELECT symbol, quantity, strategy_id, parent_uuid FROM portfolio WHERE symbol = $1 AND quantity != 0 AND execution_type = 'Paper'",
+                                symbol
+                            )
+                            for row in rows:
+                                if (side == "S" and row['quantity'] > 0) or (side == "B" and row['quantity'] < 0):
+                                    # Reuse rollback-style exit logic for this specific row
+                                    await self._handle_row_liquidation(conn, row)
                                 
                         logger.critical("✅ Paper Panic Square-off Completed.")
                         asyncio.create_task(send_cloud_alert(
