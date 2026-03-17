@@ -801,6 +801,19 @@ class MetaRouter:
                 if any(multi_market_state.values()) or self.test_mode:
                     await self.broadcast_decisions(multi_market_state, regimes)
                 
+                # --- [IPC Health Audit] Check SHM Fallback ---
+                if not self.test_mode:
+                    try:
+                        shm_data = self.shm.read()
+                        if shm_data:
+                            await self._redis.set("SHM_FALLBACK:ACTIVE", "False")
+                        else:
+                            await self._redis.set("SHM_FALLBACK:ACTIVE", "True")
+                            logger.warning("⚠️ IPC ALERT: SHM returned empty data. Fallback active.")
+                    except Exception as e:
+                        await self._redis.set("SHM_FALLBACK:ACTIVE", "True")
+                        logger.error(f"🚨 IPC FAILURE: SHM Read Error: {e}")
+                
                 await asyncio.sleep(0.5)  # [R2-19] 100ms→500ms to reduce Redis pressure
 
             except Exception as e:

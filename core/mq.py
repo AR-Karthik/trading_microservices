@@ -38,15 +38,16 @@ class MQManager:
         self.logger = logging.getLogger("MQ")
         # In Docker, bind to 0.0.0.0 to be reachable from other containers
         self.host = "0.0.0.0"
+        self.default_host = os.getenv("MQ_DEFAULT_HOST", "127.0.0.1")
         self.mq_hosts = {
-            "market_data": os.getenv("MQ_MARKET_DATA_HOST", "127.0.0.1"),
-            "orders": os.getenv("MQ_ORDERS_HOST", "127.0.0.1"),
-            "trade_events": os.getenv("MQ_TRADE_EVENTS_HOST", "127.0.0.1"),
-            "market_state": os.getenv("MQ_MARKET_STATE_HOST", "127.0.0.1"),
-            "system_cmd": os.getenv("MQ_SYSTEM_CMD_HOST", "127.0.0.1"),
-            "logging": os.getenv("MQ_LOGGING_HOST", "127.0.0.1"),
-            "reconciler": os.getenv("MQ_RECONCILER_HOST", "127.0.0.1"),
-            "system_ctrl": os.getenv("MQ_SYSTEM_CTRL_HOST", "127.0.0.1"),
+            "market_data": os.getenv("MQ_MARKET_DATA_HOST", self.default_host),
+            "orders": os.getenv("MQ_ORDERS_HOST", self.default_host),
+            "trade_events": os.getenv("MQ_TRADE_EVENTS_HOST", self.default_host),
+            "market_state": os.getenv("MQ_MARKET_STATE_HOST", self.default_host),
+            "system_cmd": os.getenv("MQ_SYSTEM_CMD_HOST", self.default_host),
+            "logging": os.getenv("MQ_LOGGING_HOST", self.default_host),
+            "reconciler": os.getenv("MQ_RECONCILER_HOST", self.default_host),
+            "system_ctrl": os.getenv("MQ_SYSTEM_CTRL_HOST", self.default_host),
         }
 
     def _get_host(self, port, bind):

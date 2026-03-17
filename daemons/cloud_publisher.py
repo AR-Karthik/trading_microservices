@@ -91,16 +91,28 @@ class CloudPublisher:
 
                 # Fetch live metrics from Redis for fallback visibility
                 alpha = await self.redis.get("COMPOSITE_ALPHA") or "0.0"
-                regime = await self.redis.get("HMM_REGIME") or "UNKNOWN"
-                
                 # --- D-36: Fetch Enriched Metrics for Command Center ---
+                # Retrieve global regime from NIFTY50 as default
+                nifty_reg_raw = await self.redis.hget("hmm_regime_state", "NIFTY50")
+                regime = "UNKNOWN"
+                if nifty_reg_raw:
+                    try: regime = json.loads(nifty_reg_raw).get("regime", "UNKNOWN")
+                    except: pass
+
                 indices = ["NIFTY50", "BANKNIFTY", "SENSEX"]
                 index_states = {}
                 for asset in indices:
                     st_raw = await self.redis.get(f"latest_market_state:{asset}")
                     st = json.loads(st_raw) if st_raw else {}
-                    reg = await self.redis.get(f"HMM_REGIME:{asset}") or regime
-                    index_states[asset] = {"score": st.get("s_total", 0.0), "regime": reg, "price": st.get("price", 0.0)}
+                    
+                    # Standardize Regime source to hmm_regime_state hash
+                    asset_reg_raw = await self.redis.hget("hmm_regime_state", asset)
+                    asset_reg = "UNKNOWN"
+                    if asset_reg_raw:
+                        try: asset_reg = json.loads(asset_reg_raw).get("regime", "UNKNOWN")
+                        except: pass
+                    
+                    index_states[asset] = {"score": st.get("s_total", 0.0), "regime": asset_reg, "price": st.get("price", 0.0)}
 
                 ms_raw = await self.redis.get("latest_market_state:NIFTY50")
                 ms = json.loads(ms_raw) if ms_raw else {}
@@ -125,9 +137,18 @@ class CloudPublisher:
                         "SENSEX":    ["HDFCBANK", "RELIANCE", "ICICIBANK", "ITC", "LT"]
                     }[idx]
                     for sym in components:
-                        z = await self.redis.hget("power_five_matrix", sym) or await self.redis.get(f"zscore:{sym}") or "0.0"
-                        try: power_five[idx][sym] = float(z)
-                        except: power_five[idx][sym] = 0.0
+                        raw_z = await self.redis.hget("power_five_matrix", sym)
+                        if raw_z:
+                            try:
+                                # Standardize: power_five_matrix stores JSON with z_score
+                                power_five[idx][sym] = float(json.loads(raw_z).get("z_score", 0.0))
+                            except:
+                                power_five[idx][sym] = 0.0
+                        else:
+                            # Fallback to legacy zscore key
+                            z = await self.redis.get(f"zscore:{sym}") or "0.0"
+                            try: power_five[idx][sym] = float(z)
+                            except: power_five[idx][sym] = 0.0
 
                 portfolio_delta = {}
                 for idx in indices:

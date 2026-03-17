@@ -46,8 +46,8 @@ services:
     restart: always
     env_file: .env
     cpuset: "0"
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
 
   # 3. Market State (Depends on data_gateway ticks)
   market_sensor:
@@ -60,8 +60,8 @@ services:
     restart: always
     env_file: .env
     cpuset: "1"
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
 
   # 4. HMM Engines (Depends on market_sensor state)
   hmm_engine_nifty:
@@ -74,8 +74,8 @@ services:
     restart: always
     env_file: .env
     cpuset: "1"
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
 
   hmm_engine_banknifty:
     image: trading-app:latest
@@ -87,8 +87,8 @@ services:
     restart: always
     env_file: .env
     cpuset: "1"
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
 
   hmm_engine_sensex:
     image: trading-app:latest
@@ -100,8 +100,8 @@ services:
     restart: always
     env_file: .env
     cpuset: "1"
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
 
   # 5. Meta Router (Depends on HMM regime)
   meta_router:
@@ -118,8 +118,8 @@ services:
     restart: always
     env_file: .env
     cpuset: "1"
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
 
   # 6. Trading Bridges: Paper (Schema Creation First)
   paper_bridge:
@@ -131,8 +131,8 @@ services:
         condition: service_healthy
     restart: always
     env_file: .env
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
 
   # 7. Trading Bridges: Live (Depends on paper_bridge for schema)
   live_bridge:
@@ -144,8 +144,8 @@ services:
         condition: service_started
     restart: always
     env_file: .env
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
@@ -165,8 +165,8 @@ services:
     restart: always
     env_file: .env
     cpuset: "2"
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
 
   # 9. Liquidation Daemon (Depends on position data)
   liquidation_daemon:
@@ -179,8 +179,8 @@ services:
     restart: always
     env_file: .env
     cpuset: "3"
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
 
   # 10. Order Reconciler (Depends on order data)
   order_reconciler:
@@ -192,8 +192,8 @@ services:
         condition: service_started
     restart: always
     env_file: .env
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
 
   # 11. System Controller (Lifecycle management)
   system_controller:
@@ -205,8 +205,8 @@ services:
         condition: service_started
     restart: always
     env_file: .env
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
       - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
@@ -234,8 +234,8 @@ services:
     restart: always
     env_file: .env
     cpuset: "3"
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
@@ -254,8 +254,8 @@ services:
       - "8000:8000"
     restart: always
     env_file: .env
-    volumes:
-      - ${RAM_DISK_PATH:-/ram_disk}:/ram_disk:rw
+    tmpfs:
+      - /ram_disk:size=512M,mode=1777
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json

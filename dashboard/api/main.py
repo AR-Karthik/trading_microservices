@@ -189,11 +189,11 @@ def get_state():
             st_raw = r.get(f"latest_market_state:{asset}")
             st = json.loads(st_raw) if st_raw else {}
             reg_raw = r.hget("hmm_regime_state", asset)
+            regime = "UNKNOWN"
             if reg_raw:
                 try: regime = json.loads(reg_raw).get("regime", "UNKNOWN")
-                except: regime = "UNKNOWN"
-            else:
-                regime = r.get(f"HMM_REGIME:{asset}") or r.get("CURRENT_REGIME") or "UNKNOWN"
+                except: pass
+            
             index_states[asset] = {
                 "score": st.get("s_total", 0.0), 
                 "regime": regime, 
@@ -242,8 +242,8 @@ def get_state():
             "gex_sign": r.get("gex_sign:NIFTY50") or "UNKNOWN",
             "system_halted": r.get("SYSTEM_HALTED") == "True",
             "macro_lockdown": r.get("MACRO_EVENT_LOCKDOWN") == "True",
-            "available_margin_paper": float(r.get("AVAILABLE_MARGIN_PAPER") or 0),
-            "available_margin_live": float(r.get("AVAILABLE_MARGIN_LIVE") or 0),
+            "available_margin_paper": float(r.get("CASH_COMPONENT_PAPER") or 0) + float(r.get("COLLATERAL_COMPONENT_PAPER") or 0),
+            "available_margin_live": float(r.get("CASH_COMPONENT_LIVE") or 0) + float(r.get("COLLATERAL_COMPONENT_LIVE") or 0),
             "paper_capital_limit": float(r.get("PAPER_CAPITAL_LIMIT") or 0),
             "live_capital_limit": float(r.get("LIVE_CAPITAL_LIMIT") or 0),
             "signals": deep_signals,
@@ -308,10 +308,14 @@ async def update_regime_config(config: RegimeConfigRequest):
     r.set("CONFIG:MAX_RISK_PER_TRADE_PAPER", config.paper_max_risk)
     r.set("CONFIG:MAX_RISK_PER_TRADE_LIVE",  config.live_max_risk)
     
-    # Also update available margins if needed (simple sync)
-    # Note: In a production system, we'd handle this more carefully with delta checks
-    r.set("AVAILABLE_MARGIN_PAPER", config.paper_capital)
-    r.set("AVAILABLE_MARGIN_LIVE", config.live_capital)
+    # Also update available margins (50:50 Cash-to-Collateral sync)
+    paper_eff = config.paper_capital * 0.85 # HEDGE_RESERVE_PCT adjustment
+    live_eff  = config.live_capital * 0.85
+
+    r.set("CASH_COMPONENT_PAPER", f"{paper_eff * 0.5:.2f}")
+    r.set("COLLATERAL_COMPONENT_PAPER", f"{paper_eff * 0.5:.2f}")
+    r.set("CASH_COMPONENT_LIVE", f"{live_eff * 0.5:.2f}")
+    r.set("COLLATERAL_COMPONENT_LIVE", f"{live_eff * 0.5:.2f}")
 
     # Publish signal to MetaRouter to hot-swap
     r.publish("system_cmd", json.dumps({"cmd": "HOT_SWAP_REGIME", "data": config.dict()}))
