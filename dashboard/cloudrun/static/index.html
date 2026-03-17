@@ -121,7 +121,7 @@
         // --- SUB-COMPONENTS (Lifted Outside) ---
 
         const WarRoom = memo(({ state, positions, mode, handlePanic }) => {
-            const [selectedIdx, setSelectedIdx] = useState('NIFTY');
+            const [selectedIdx, setSelectedIdx] = useState('NIFTY50');
             const powerData = state.power_five?.[selectedIdx] || {};
 
             return (
@@ -131,7 +131,7 @@
                             <div className="flex justify-between items-center mb-2">
                                 <h3 className="text-[10px] font-black uppercase text-gray-500">Power Five Matrix (Z)</h3>
                                 <div className="flex gap-2">
-                                    {['NIFTY', 'BANKNIFTY', 'SENSEX'].map(idx => (
+                                    {['NIFTY50', 'BANKNIFTY', 'SENSEX'].map(idx => (
                                         <button key={idx} onClick={() => setSelectedIdx(idx)} className={`text-[8px] font-black px-1.5 py-0.5 rounded ${selectedIdx === idx ? 'bg-accent text-dark' : 'text-gray-600 hover:text-gray-400'}`}>
                                             {idx === 'BANKNIFTY' ? 'BN' : idx[0]}
                                         </button>
@@ -139,21 +139,19 @@
                                 </div>
                             </div>
                             <div className="z-matrix mt-2">
-                                {Object.keys(powerData).length > 0 ? Object.entries(powerData).map(([sym, z]) => (
+                                {Object.entries(powerData).map(([sym, z]) => (
                                     <div key={sym} className="text-center">
-                                        <div className={`text-md font-black mono ${z > 1.5 ? 'text-success' : (z < -1.5 ? 'text-danger' : 'text-accent')}`}>{z > 0 ? '+' : ''}{(z || 0).toFixed(1)}</div>
-                                        <div className="text-[7px] text-gray-700 font-bold">{sym.slice(0,4)}</div>
+                                        <div className="text-[8px] text-gray-400 font-bold">{sym}</div>
+                                        <div className={`text-md font-black mono ${z > 1.5 ? 'text-success' : (z < -1.5 ? 'text-danger' : 'text-accent')}`}>{z > 0 ? '+' : ''}{z.toFixed(1)}</div>
                                     </div>
-                                )) : (
-                                    <div className="col-span-3 text-[10px] text-gray-700 font-bold uppercase tracking-widest py-4">Synchronizing...</div>
-                                )}
+                                ))}
                             </div>
                         </div>
 
                         <div className="oled-card p-5 rounded-2xl flex flex-col items-center justify-center h-48 border-l-4 border-accent">
                             <span className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-2">Regime Orchestrator</span>
                             <div className="text-3xl font-black uppercase text-white">{state.hmm_regime}</div>
-                            <div className={`mt-2 px-3 py-1 rounded text-[10px] font-bold ${state.alpha_score > 0 ? 'bg-success/20 text-success' : 'bg-danger/20 text-danger'}`}>Alpha: {(state.alpha_score || 0).toFixed(1)}</div>
+                            <div className={`mt-2 px-3 py-1 rounded text-[10px] font-bold ${state.alpha_score > 0 ? 'bg-success/20 text-success' : 'bg-danger/20 text-danger'}`}>Alpha: {state.alpha_score.toFixed(1)}</div>
                         </div>
 
                         <div className="oled-card p-5 rounded-2xl h-48">
@@ -563,9 +561,9 @@
                                     {assets.map((a, i) => (
                                         <tr key={i} className="border-b border-white/5 hover:bg-white/5 transition-colors">
                                             <td className="py-3 font-bold text-accent">{a.asset}</td>
-                                            <td className="py-3">{(a.score || 0).toFixed(3)}</td>
-                                            <td className="py-3">{(a.weight || 0).toFixed(4)}</td>
-                                            <td className={`py-3 font-black ${a.lots > 5 ? 'text-success' : 'text-white'}`}>{(a.lots || 0).toFixed(2)}</td>
+                                            <td className="py-3">{a.score?.toFixed(3)}</td>
+                                            <td className="py-3">{a.weight?.toFixed(4)}</td>
+                                            <td className={`py-3 font-black ${a.lots > 5 ? 'text-success' : 'text-white'}`}>{a.lots?.toFixed(2)}</td>
                                         </tr>
                                     ))}
                                 </tbody>
@@ -607,9 +605,9 @@
                                                     </span>
                                                 </td>
                                                 <td className="py-3 text-gray-400 max-w-[200px] truncate">{ex.reason}</td>
-                                                <td className="py-3">{(ex.exit_price || 0).toFixed(2)}</td>
+                                                <td className="py-3">{ex.exit_price?.toFixed(2)}</td>
                                                 <td className={`py-3 font-black ${ex.pnl_pts >= 0 ? 'text-success' : 'text-danger'}`}>
-                                                    {ex.pnl_pts >= 0 ? '+' : ''}{(ex.pnl_pts || 0).toFixed(1)}
+                                                    {ex.pnl_pts >= 0 ? '+' : ''}{ex.pnl_pts?.toFixed(1)}
                                                 </td>
                                             </tr>
                                         );
@@ -650,7 +648,16 @@
             const [confidence, setConfidence] = useState(0.70);
             const [vpin, setVpin] = useState(0.82);
 
-            const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? 'http://127.0.0.1:8000' : '';
+            // [R3-06] Smart API_BASE detection for all deployment modes:
+            // 1. localhost/127.0.0.1 → local dev (dashboard_api runs on port 8000)
+            // 2. Cloud Run (*.run.app) → relative paths (same origin serves both SPA + API)
+            // 3. VM direct IP → dashboard_api on same host, port 8000
+            const API_BASE = (() => {
+                const h = window.location.hostname;
+                if (h === 'localhost' || h === '127.0.0.1') return 'http://127.0.0.1:8000';
+                if (h.endsWith('.run.app')) return '';  // Cloud Run: API routes live on same origin
+                return `${window.location.protocol}//${h}:8000`;  // VM direct access
+            })();
 
             const fetchData = async () => {
                 try {
@@ -780,10 +787,21 @@
                     </main>
 
                     <footer className="glass border-t border-white/5 p-3 px-10 flex justify-between items-center text-[10px] font-bold text-gray-500 uppercase tracking-widest bg-black/90">
-                        <div className="flex gap-10">
-                            <span className="flex items-center gap-3"><div className={`w-2 h-2 rounded-full ${state.source === 'VM_DIRECT' ? 'bg-success animate-pulse' : 'bg-warning'}`}></div> {state.source === 'VM_DIRECT' ? 'Redis Cluster Operational' : 'Redis Sync (Lagging)'}</span>
-                            <span className="flex items-center gap-3"><div className={`w-2 h-2 rounded-full ${state.source === 'VM_DIRECT' ? 'bg-success animate-pulse' : 'bg-warning'}`}></div> {state.source === 'VM_DIRECT' ? 'Timescale Stream Live' : 'Historical Stream Only'}</span>
-                            <span className="text-[8px] text-accent font-black border border-accent/20 px-2 py-0.5 rounded">{state.source || 'OFFLINE'}</span>
+                        <div className="flex gap-6 items-center">
+                            <span className="flex items-center gap-2">
+                                <div className={`w-2 h-2 rounded-full ${state.source === 'VM_DIRECT' ? 'bg-success animate-pulse' : state.source === 'FIRESTORE_SYNC' ? 'bg-warning' : 'bg-danger'}`}></div>
+                                {state.source === 'VM_DIRECT' ? 'Redis Live' : state.source === 'FIRESTORE_SYNC' ? 'Cloud Sync' : 'Offline'}
+                            </span>
+                            <span className="flex items-center gap-2">
+                                <div className={`w-2 h-2 rounded-full ${state.source === 'VM_DIRECT' ? 'bg-success animate-pulse' : 'bg-warning'}`}></div>
+                                {state.source === 'VM_DIRECT' ? 'Timescale Live' : 'Archive Mode'}
+                            </span>
+                            {(state.source === 'FIRESTORE_SYNC' || state.source === 'GCS_PARQUET') && (
+                                <span className="text-[8px] text-warning font-black border border-warning/30 bg-warning/5 px-2 py-0.5 rounded animate-pulse">📦 GCS ARCHIVE</span>
+                            )}
+                            <span className={`text-[8px] font-black border px-2 py-0.5 rounded ${state.source === 'VM_DIRECT' ? 'text-accent border-accent/20' : 'text-warning border-warning/20'}`}>
+                                {state.source || 'OFFLINE'}
+                            </span>
                         </div>
                         <div className="mono text-gray-600 flex gap-10">
                             <span>UPTIME: 99.9%</span>

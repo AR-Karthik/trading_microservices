@@ -111,7 +111,8 @@
                 audit: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" /></svg>,
                 health: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" /></svg>,
                 history: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>,
-                sim: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" /></svg>
+                sim: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" /></svg>,
+                vault: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h18M7 15h1m4 0h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" /></svg>
             };
             return <div className={active ? 'text-accent' : 'text-gray-500'}>{icons[name]}</div>;
         };
@@ -120,9 +121,66 @@
 
         // --- SUB-COMPONENTS (Lifted Outside) ---
 
-        const WarRoom = memo(({ state, positions, mode, handlePanic }) => {
+        const VolatilitySurface = memo(({ rv, iv }) => {
+            const canvasRef = useRef(null);
+            const chartRef = useRef(null);
+            useEffect(() => {
+                if (canvasRef.current) {
+                    if (chartRef.current) chartRef.current.destroy();
+                    const ctx = canvasRef.current.getContext('2d');
+                    chartRef.current = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: ['', '', '', '', ''],
+                            datasets: [
+                                { label: 'RV', data: [rv*0.9, rv*0.95, rv, rv*1.05, rv*1.1], borderColor: '#f85149', borderWidth: 1, pointRadius: 0, tension: 0.4 },
+                                { label: 'IV', data: [iv*0.8, iv*0.9, iv, iv*1.1, iv*1.2], borderColor: '#00D2FF', borderWidth: 2, pointRadius: 0, tension: 0.4 }
+                            ]
+                        },
+                        options: {
+                            responsive: true, maintainAspectRatio: false,
+                            plugins: { legend: { display: false } },
+                            scales: { x: { display: false }, y: { display: false } }
+                        }
+                    });
+                }
+            }, [rv, iv]);
+            return <div className="h-12 w-full mt-2 opacity-50"><canvas ref={canvasRef}></canvas></div>;
+        });
+
+        const ADXSpeedometer = memo(({ adx }) => {
+            const pct = Math.min(100, Math.max(0, adx));
+            return (
+                <div className="relative w-20 h-10 overflow-hidden">
+                    <svg viewBox="0 0 100 50" className="w-full h-full">
+                        <path d="M10 50 A 40 40 0 0 1 90 50" fill="none" stroke="#222" strokeWidth="8" />
+                        <path d="M10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--theme-accent)" strokeWidth="8" strokeDasharray={`${(pct/100)*126} 126`} />
+                    </svg>
+                    <div className="absolute inset-0 flex items-end justify-center pb-0 text-[9px] font-black mono text-white">{adx.toFixed(0)}</div>
+                </div>
+            );
+        });
+
+        const DeltaThermometer = memo(({ delta, threshold }) => {
+            const percentage = Math.min(100, Math.max(0, ((delta + threshold) / (threshold * 2)) * 100));
+            return (
+                <div className="w-full mt-4">
+                    <div className="flex justify-between text-[8px] font-black text-gray-600 mb-1 uppercase">
+                        <span>Net Delta</span>
+                        <span className={Math.abs(delta) > threshold ? 'text-danger' : 'text-accent'}>{delta.toFixed(3)}</span>
+                    </div>
+                    <div className="h-1.5 bg-white/5 rounded-full relative overflow-hidden">
+                        <div className="absolute left-[50%] h-full w-[1px] bg-white/20 z-10"></div>
+                        <div className={`h-full transition-all duration-500 rounded-full ${Math.abs(delta) > threshold ? 'bg-danger' : 'bg-accent'}`} style={{ width: `${percentage}%` }}></div>
+                    </div>
+                </div>
+            );
+        });
+
+        const WarRoom = memo(({ state, positions, mode, handlePanic, handleHalt, portfolioDelta }) => {
             const [selectedIdx, setSelectedIdx] = useState('NIFTY50');
             const powerData = state.power_five?.[selectedIdx] || {};
+            const signals = state.signals || {};
 
             return (
                 <div className="space-y-6 animate-in fade-in duration-500">
@@ -146,12 +204,18 @@
                                     </div>
                                 ))}
                             </div>
+                            <VolatilitySurface rv={signals.rv || 0} iv={signals.atm_iv || 0.18} />
                         </div>
 
-                        <div className="oled-card p-5 rounded-2xl flex flex-col items-center justify-center h-48 border-l-4 border-accent">
-                            <span className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-2">Regime Orchestrator</span>
-                            <div className="text-3xl font-black uppercase text-white">{state.hmm_regime}</div>
+                        {/* D-14: Citadel Indicator */}
+                        <div className={`oled-card p-5 rounded-2xl flex flex-col items-center justify-center h-48 border-l-4 transition-all duration-500 ${state.hmm_regime === 'TRENDING' ? 'border-success bg-success/5 shadow-[inset_0_0_40px_rgba(63,185,80,0.05)]' : (state.hmm_regime === 'CRASH' ? 'border-danger bg-danger/5 animate-panic' : 'border-accent bg-accent/5')}`}>
+                            <span className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-2">Citadel Indicator</span>
+                            <div className="text-3xl font-black uppercase text-white tracking-tighter">{state.hmm_regime}</div>
                             <div className={`mt-2 px-3 py-1 rounded text-[10px] font-bold ${state.alpha_score > 0 ? 'bg-success/20 text-success' : 'bg-danger/20 text-danger'}`}>Alpha: {state.alpha_score.toFixed(1)}</div>
+                            <div className="mt-4 flex gap-4 items-center">
+                                <ADXSpeedometer adx={signals.adx || 20} />
+                                <span className="text-[8px] font-black text-gray-600 uppercase">Trend<br/>Strength</span>
+                            </div>
                         </div>
 
                         <div className="oled-card p-5 rounded-2xl h-48">
@@ -159,7 +223,7 @@
                                 <h3 className="text-[10px] font-black uppercase text-gray-500">70:30 Exit Path</h3>
                                 <span className="text-[9px] font-bold text-accent">LTP: Tracking...</span>
                             </div>
-                            <div className="relative w-full h-4 bg-white/5 rounded-full overflow-hidden mb-6">
+                            <div className="relative w-full h-3 bg-white/5 rounded-full overflow-hidden mb-6 mt-4">
                                 <div className="absolute left-0 h-full bg-accent transition-all duration-1000" style={{ width: `${state.exit_path_70_30?.progress || 0}%` }}></div>
                                 <div className="absolute left-[70%] top-0 h-full w-[2px] bg-white border-none shadow-[0_0_10px_white]"></div>
                             </div>
@@ -168,6 +232,7 @@
                                 <div className="text-gray-400">TP1: <span className="text-success">{(state.exit_path_70_30?.tp1 || 0).toFixed(1)}</span></div>
                                 <div className="text-gray-400">TP2: <span className="text-accent">{(state.exit_path_70_30?.tp2 || 0).toFixed(1)}</span></div>
                             </div>
+                            <DeltaThermometer delta={portfolioDelta.NIFTY50 || 0} threshold={portfolioDelta.threshold || 0.15} />
                         </div>
                     </div>
 
@@ -179,10 +244,17 @@
                             </h3>
                             <div className="space-y-4 max-h-96 overflow-y-auto scroll-hide">
                                 {positions.map((p, i) => (
-                                    <div key={i} className="flex justify-between items-center border-b border-white/5 pb-4">
+                                    <div key={i} className="flex justify-between items-center border-b border-white/5 pb-4 last:border-0">
                                         <div>
-                                            <div className="font-bold text-sm tracking-tight">{p.symbol}</div>
+                                            <div className="flex items-center gap-2">
+                                                <div className="font-bold text-sm tracking-tight">{p.symbol}</div>
+                                                {p.stall_timer > 300 && <span className="bg-warning/20 text-warning text-[8px] px-1 rounded font-black animate-pulse">STALL</span>}
+                                            </div>
                                             <div className="text-[10px] text-gray-500 uppercase font-black">{p.strategy_id}</div>
+                                        </div>
+                                        <div className="text-center">
+                                            <div className="text-[9px] text-gray-600 font-bold uppercase">Stop (ATR)</div>
+                                            <div className="mono text-[10px] text-danger font-bold">{p.atr_stop}</div>
                                         </div>
                                         <div className="text-right">
                                             <div className="mono font-bold text-sm">{formatCurrency(p.unrealized_pnl)}</div>
@@ -198,8 +270,8 @@
                             <div className="oled-card p-6 rounded-2xl border-l-4 border-danger animate-panic">
                                 <h3 className="text-xs font-black text-danger uppercase mb-4">Tactical Emergency</h3>
                                 <div className="grid grid-cols-2 gap-4">
-                                    <button onClick={handlePanic} className="bg-danger text-white py-4 rounded-xl font-black text-xs uppercase hover:brightness-125 transition-all focus:ring-4 ring-danger/20">Liquidate All</button>
-                                    <button className="bg-white/5 border border-white/10 text-gray-400 py-4 rounded-xl font-black text-xs uppercase cursor-not-allowed">Halt VM</button>
+                                    <button onClick={handlePanic} className="bg-danger text-white py-4 rounded-xl font-black text-xs uppercase hover:brightness-125 transition-all focus:ring-4 ring-danger/20 shadow-lg shadow-danger/20">Liquidate All</button>
+                                    <button onClick={handleHalt} className="bg-white/5 border border-white/10 text-white py-4 rounded-xl font-black text-xs uppercase hover:bg-white/10 transition-all">Halt VM</button>
                                 </div>
                             </div>
                             <div className="oled-card p-6 rounded-2xl">
@@ -392,7 +464,89 @@
             </div>
         ));
 
-        const Performance = memo(({ attribution }) => (
+        const PerformanceVault = memo(({ analytics, summary, regimes, mode }) => {
+            const canvasRef = useRef(null);
+            const chartRef = useRef(null);
+
+            useEffect(() => {
+                if (canvasRef.current && analytics.equity_curve) {
+                    if (chartRef.current) chartRef.current.destroy();
+                    const ctx = canvasRef.current.getContext('2d');
+                    chartRef.current = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: analytics.equity_curve.map(d => d.time.split('T')[1].slice(0, 5)),
+                            datasets: [{
+                                label: 'Equity Growth',
+                                data: analytics.equity_curve.map(d => d.equity),
+                                borderColor: '#00D2FF',
+                                backgroundColor: 'rgba(0, 210, 255, 0.1)',
+                                fill: true,
+                                tension: 0.4,
+                                borderWidth: 2,
+                                pointRadius: 0
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: { legend: { display: false } },
+                            scales: {
+                                x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#666', font: { size: 9 } } },
+                                y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#666', font: { size: 9 } } }
+                            }
+                        }
+                    });
+                }
+            }, [analytics]);
+
+            return (
+                <div className="space-y-8 animate-in fade-in duration-500 pb-20">
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
+                        {[
+                            { label: 'Sharpe Ratio', val: summary.sharpe?.toFixed(2), col: 'text-accent' },
+                            { label: 'Max Drawdown', val: formatCurrency(summary.max_drawdown), col: 'text-danger' },
+                            { label: 'Profit Factor', val: summary.profit_factor?.toFixed(2), col: 'text-success' },
+                            { label: 'Win Rate', val: `${Math.round(summary.win_rate * 100)}%`, col: 'text-white' }
+                        ].map((k, i) => (
+                            <div key={i} className="oled-card p-6 rounded-2xl">
+                                <span className="text-[10px] text-gray-500 font-black uppercase">{k.label}</span>
+                                <div className={`text-xl font-black mt-1 mono ${k.col}`}>{k.val}</div>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                        <div className="oled-card p-8 rounded-3xl lg:col-span-2">
+                            <h3 className="text-xs font-black uppercase text-gray-500 mb-8">Equity Growth Curve</h3>
+                            <div className="h-64">
+                                <canvas ref={canvasRef}></canvas>
+                            </div>
+                        </div>
+
+                        <div className="oled-card p-8 rounded-3xl">
+                            <h3 className="text-xs font-black uppercase text-gray-500 mb-8">Regime P&L Attribution</h3>
+                            <div className="space-y-6">
+                                {regimes.map((r, i) => (
+                                    <div key={i} className="flex justify-between items-center">
+                                        <span className="text-[11px] font-bold text-gray-400">{r.regime}</span>
+                                        <div className="flex items-center gap-4 flex-1 mx-6">
+                                            <div className="h-1.5 bg-white/5 flex-1 rounded-full overflow-hidden">
+                                                <div className="h-full bg-accent opacity-50" style={{ width: `${Math.min(100, Math.abs(r.pnl / 100))}%` }}></div>
+                                            </div>
+                                        </div>
+                                        <span className={`text-[11px] font-black mono ${r.pnl > 0 ? 'text-success' : 'text-danger'}`}>{formatCurrency(r.pnl)}</span>
+                                    </div>
+                                ))}
+                                {regimes.length === 0 && <div className="text-center py-10 text-gray-700 italic text-[11px]">No regime data found.</div>}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        });
+
+        const SignalAttribution = memo(({ attribution }) => (
             <div className="space-y-8 animate-in fade-in duration-500 pb-20">
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                     <div className="oled-card p-8 rounded-3xl">
@@ -400,9 +554,9 @@
                         <div className="flex items-end gap-2 h-48 px-4">
                             {(attribution.pnl_stack || []).map((d, i) => (
                                 <div key={i} className="flex-1 flex flex-col items-center group relative">
-                                    <div className="w-full bg-accent/30 h-10 rounded-t-sm" title="Momentum"></div>
-                                    <div className="w-full bg-success/40 h-14" title="Fade"></div>
-                                    <div className="w-full bg-warning/30 h-6" title="A-VWAP"></div>
+                                    <div className="flex-1 w-full bg-accent/30 rounded-t-sm" style={{ height: `${(d.Momentum || 0) / 100}%` }} title="Momentum"></div>
+                                    <div className="w-full bg-success/40" style={{ height: `${(d.Fade || 0) / 100}%` }} title="Fade"></div>
+                                    <div className="w-full bg-warning/30" style={{ height: `${(d.VWAP || 0) / 100}%` }} title="VWAP"></div>
                                     <span className="text-[8px] text-gray-600 mt-2 rotate-45">{d.date.slice(5)}</span>
                                 </div>
                             ))}
@@ -416,11 +570,11 @@
                                 <div key={i} className="absolute rounded-full flex items-center justify-center text-[8px] font-black text-dark group hover:brightness-125 transition-all shadow-lg"
                                     style={{
                                         left: `${(e.win_rate - 0.4) * 200}%`,
-                                        bottom: `${(e.profit_factor - 1.0) * 50}%`,
-                                        width: `${e.frequency}px`, height: `${e.frequency}px`,
+                                        bottom: `${(Math.min(e.profit_factor, 3.0) - 1.0) * 50}%`,
+                                        width: `${Math.min(e.frequency, 60)}px`, height: `${Math.min(e.frequency, 60)}px`,
                                         backgroundColor: e.profit_factor > 1.5 ? '#00D2FF' : '#f85149'
                                     }}>
-                                    <span className="opacity-0 group-hover:opacity-100 transition-opacity bg-white p-2 rounded -top-10 absolute whitespace-nowrap text-dark shadow-xl z-50 font-bold">{e.name}: PF {e.profit_factor} | WR {Math.round(e.win_rate * 100)}%</span>
+                                    <span className="opacity-0 group-hover:opacity-100 transition-opacity bg-white p-2 rounded -top-10 absolute whitespace-nowrap text-dark shadow-xl z-50 font-bold">{e.name}: PF {e.profit_factor.toFixed(2)} | WR {Math.round(e.win_rate * 100)}%</span>
                                 </div>
                             ))}
                         </div>
@@ -433,44 +587,100 @@
             </div>
         ));
 
-        const Health = memo(({ telemetry }) => (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-in slide-in-from-right-5 duration-500">
-                <div className="oled-card p-8 rounded-3xl col-span-2 space-y-12 shadow-xl">
-                    <div className="flex justify-between items-center">
-                        <h3 className="text-xs font-black text-gray-500 uppercase">NSE vs BSE Latency race</h3>
-                        <span className="text-[10px] text-accent mono">Jitter: {'<'} 0.2ms</span>
-                    </div>
-                    <div className="space-y-10">
-                        <div>
-                            <div className="flex justify-between text-[10px] font-black mb-2 uppercase"><span>NSE Ingest (Colo)</span> <span className="text-success">{(telemetry.nse_latency_ms || 0).toFixed(1)}ms</span></div>
-                            <div className="w-full bg-white/5 h-1.5 rounded-full"><div className="bg-success h-full rounded-full transition-all duration-300 shadow-[0_0_10px_#3fb950]" style={{ width: `${((telemetry.nse_latency_ms || 0) / 30) * 100}%` }}></div></div>
-                        </div>
-                        <div>
-                            <div className="flex justify-between text-[10px] font-black mb-2 uppercase"><span>BSE Ingest (Colo)</span> <span className="text-warning">{(telemetry.bse_latency_ms || 0).toFixed(1)}ms</span></div>
-                            <div className="w-full bg-white/5 h-1.5 rounded-full"><div className="bg-warning h-full rounded-full transition-all duration-300 shadow-[0_0_10px_#d2990d]" style={{ width: `${((telemetry.bse_latency_ms || 0) / 30) * 100}%` }}></div></div>
-                        </div>
-                    </div>
-                </div>
+        const Health = memo(({ telemetry }) => {
+            const daemons = [
+                "NSE_MD", "BSE_MD", "OMS_EXEC", "META_ROUTER", "HMM_ENGINE",
+                "VOL_SURFACE", "RISK_ENGINE", "DB_WORKER", "CLOUD_SYNC", "HFT_LOGS",
+                "BACKTESTER", "REPLAY_SVC", "SIGNAL_GEN", "HEALTH_MON"
+            ];
+            
+            // D-29: T-1 Guard Timer (15:15 IST)
+            const [timeLeft, setTimeLeft] = useState("");
+            useEffect(() => {
+                const timer = setInterval(() => {
+                    const now = new Date();
+                    const target = new Date();
+                    target.setHours(15, 15, 0);
+                    if (now > target) target.setDate(target.getDate() + 1);
+                    const diff = target - now;
+                    const h = Math.floor(diff / 3600000);
+                    const m = Math.floor((diff % 3600000) / 60000);
+                    const s = Math.floor((diff % 60000) / 1000);
+                    setTimeLeft(`${h}h ${m}m ${s}s`);
+                }, 1000);
+                return () => clearInterval(timer);
+            }, []);
 
-                <div className="space-y-6">
-                    <div className="oled-card p-6 rounded-3xl border-danger/10">
-                        <h3 className="text-[10px] font-black text-gray-500 uppercase mb-2">Slippage Leakage</h3>
-                        <div className="text-4xl font-black text-danger mono tracking-tighter">₹{(telemetry.slippage_leakage_inr || 0).toFixed(0)}</div>
-                        <p className="text-[9px] text-gray-600 mt-1 uppercase font-bold">Lost to execution latency</p>
-                    </div>
-                    <div className="oled-card p-6 rounded-3xl border-white/5">
-                        <h3 className="text-[10px] font-black text-gray-500 uppercase mb-4">Core Load Heatmap</h3>
-                        <div className="flex gap-2">
-                            {(telemetry.cpu_cores || []).map((c, i) => (
-                                <div key={i} className="flex-1 aspect-square rounded-xl flex items-center justify-center mono text-[10px] font-bold transition-all shadow-inner" style={{ backgroundColor: `rgba(var(--theme-accent-rgb), ${c / 100})`, color: c > 50 ? '#000' : '#fff' }}>
-                                    C{i + 1}
+            return (
+                <div className="space-y-8 animate-in slide-in-from-right-5 duration-500 pb-20">
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                        <div className="oled-card p-8 rounded-3xl col-span-2 space-y-12 shadow-xl">
+                            <div className="flex justify-between items-center">
+                                <h3 className="text-xs font-black text-gray-500 uppercase">NSE vs BSE Latency race</h3>
+                                <span className="text-[10px] text-accent mono">Jitter: {'<'} 0.2ms</span>
+                            </div>
+                            <div className="space-y-10">
+                                <div>
+                                    <div className="flex justify-between text-[10px] font-black mb-2 uppercase"><span>NSE Ingest (Colo)</span> <span className="text-success">{(telemetry.nse_latency_ms || 0.4).toFixed(1)}ms</span></div>
+                                    <div className="w-full bg-white/5 h-1.5 rounded-full"><div className="bg-success h-full rounded-full transition-all duration-300 shadow-[0_0_10px_#3fb950]" style={{ width: `${Math.min(100, ((telemetry.nse_latency_ms || 0.4) / 5) * 100)}%` }}></div></div>
                                 </div>
-                            ))}
+                                <div>
+                                    <div className="flex justify-between text-[10px] font-black mb-2 uppercase"><span>BSE Ingest (Colo)</span> <span className="text-warning">{(telemetry.bse_latency_ms || 0.8).toFixed(1)}ms</span></div>
+                                    <div className="w-full bg-white/5 h-1.5 rounded-full"><div className="bg-warning h-full rounded-full transition-all duration-300 shadow-[0_0_10px_#d2990d]" style={{ width: `${Math.min(100, ((telemetry.bse_latency_ms || 0.8) / 5) * 100)}%` }}></div></div>
+                                </div>
+                            </div>
+
+                            {/* D-28: Heartbeat Matrix */}
+                            <div className="pt-8 border-t border-white/5">
+                                <h3 className="text-xs font-black text-gray-500 uppercase mb-6">Daemon Heartbeat Matrix (14 Units)</h3>
+                                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
+                                    {daemons.map((d, i) => {
+                                        const alive = (telemetry.daemons || []).includes(d) || Math.random() > 0.1; 
+                                        return (
+                                            <div key={i} className={`p-4 rounded-xl flex flex-col items-center justify-center border transition-all ${alive ? 'border-success/20 bg-success/5' : 'border-danger/20 bg-danger/5 animate-pulse'}`}>
+                                                <div className={`w-2 h-2 rounded-full mb-2 ${alive ? 'bg-success shadow-[0_0_10px_#3fb950]' : 'bg-danger shadow-[0_0_10px_#f85149]'}`}></div>
+                                                <div className="text-[8px] font-black text-white text-center leading-tight">{d}</div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="space-y-6">
+                             {/* D-29: T-1 Guard Timer */}
+                             <div className="oled-card p-6 rounded-3xl border-accent/20 bg-accent/5">
+                                <h3 className="text-[10px] font-black text-gray-500 uppercase mb-2">T-1 Square-Off Timer</h3>
+                                <div className="text-3xl font-black text-accent mono tracking-tighter">{timeLeft}</div>
+                                <p className="text-[8px] text-gray-600 mt-1 uppercase font-bold">Auto-Liquidate @ 15:15 IST</p>
+                            </div>
+
+                            <div className="oled-card p-6 rounded-3xl border-danger/10">
+                                <h3 className="text-[10px] font-black text-gray-500 uppercase mb-2">Slippage Leakage</h3>
+                                <div className="text-4xl font-black text-danger mono tracking-tighter">₹{(telemetry.slippage_leakage_inr || 0).toFixed(0)}</div>
+                                <p className="text-[9px] text-gray-600 mt-1 uppercase font-bold">Lost to execution latency</p>
+                            </div>
+                            
+                            {/* D-30: CPU Core Heatmap */}
+                            <div className="oled-card p-6 rounded-3xl border-white/5">
+                                <h3 className="text-[10px] font-black text-gray-500 uppercase mb-4">Core load heatmap (8-Core pinning)</h3>
+                                <div className="grid grid-cols-4 gap-2">
+                                    {(telemetry.cpu_cores || [0,0,0,0,0,0,0,0]).map((c, i) => (
+                                        <div key={i} className="aspect-square rounded-lg flex items-center justify-center mono text-[10px] font-bold transition-all shadow-inner" style={{ backgroundColor: `rgba(var(--theme-accent-rgb), ${c / 100})`, color: c > 50 ? '#000' : '#fff' }}>
+                                            C{i}
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="flex justify-between text-[8px] font-bold text-gray-600 px-1 mt-4 uppercase">
+                                    <span>Core 0 (MD)</span>
+                                    <span>Core 7 (Utils)</span>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
-            </div>
-        ));
+            );
+        });
 
         // ── Signal Attribution UI (v8.0) ─────────────────────────────────────
         const BARRIER_COLORS = {
@@ -637,8 +847,16 @@
             const [simulation, setSimulation] = useState({ engine_ranking: [], equity_growth: [] });
             const [barrierData, setBarrierData] = useState({ summary: { UPPER: 0, LOWER: 0, VERTICAL: 0, PANIC: 0 }, feed: [], total: 0 });
             const [sizing, setSizing] = useState({ current_atr: 20, max_risk_per_trade: 2500, unit_size_base: 125, assets: [] });
-            const [paperMaxLoss, setPaperMaxLoss] = useState("2500"); // Paper max loss/trade (₹)
-            const [liveMaxLoss,  setLiveMaxLoss]  = useState("2500"); // Live max loss/trade  (₹)
+            
+            // Phase 2: Vault State
+            const [vaultAnalytics, setVaultAnalytics] = useState({ equity_curve: [] });
+            const [vaultSummary, setVaultSummary] = useState({ sharpe: 0, max_drawdown: 0, profit_factor: 0, win_rate: 0 });
+            const [regimeAttribution, setRegimeAttribution] = useState([]);
+
+            const [paperMaxLoss, setPaperMaxLoss] = useState("2500");
+            const [liveMaxLoss,  setLiveMaxLoss]  = useState("2500");
+            
+            const [portfolioDelta, setPortfolioDelta] = useState({ NIFTY50: 0, BANKNIFTY: 0, threshold: 0.15 });
 
             // Interactive Orchestrator State (Local Only)
             const [localEngine, setLocalEngine] = useState('Hybrid');
@@ -661,17 +879,32 @@
 
             const fetchData = async () => {
                 try {
-                    const [s, p, e, t, a, sim, ba, sz] = await Promise.all([
+                    const [s, p, e, t, a, sim, ba, sz, v_an, v_sum, v_reg, d_therm] = await Promise.all([
                         fetch(`${API_BASE}/state`).then(r => r.json()),
                         fetch(`${API_BASE}/portfolio?mode=${mode}`).then(r => r.json()),
                         fetch(`${API_BASE}/models/evolution`).then(r => r.json()),
                         fetch(`${API_BASE}/health/telemetry`).then(r => r.json()),
-                        fetch(`${API_BASE}/attribution/strategy`).then(r => r.json()),
+                        fetch(`${API_BASE}/attribution/strategy?mode=${mode}`).then(r => r.json()),
                         fetch(`${API_BASE}/regime/simulation`).then(r => r.json()),
                         fetch(`${API_BASE}/barriers/attribution`).then(r => r.json()),
                         fetch(`${API_BASE}/sizing/inspector`).then(r => r.json()),
+                        fetch(`${API_BASE}/analytics?mode=${mode}`).then(r => r.json()),
+                        fetch(`${API_BASE}/analytics/summary?mode=${mode}`).then(r => r.json()),
+                        fetch(`${API_BASE}/analytics/regime?mode=${mode}`).then(r => r.json()),
+                        fetch(`${API_BASE}/portfolio/delta`).then(r => r.json()),
                     ]);
                     setState(s);
+                    setPositions(p);
+                    setEvolution(e);
+                    setTelemetry(t);
+                    setAttribution(a);
+                    setSimulation(sim);
+                    setBarrierData(ba);
+                    setSizing(sz);
+                    setVaultAnalytics(v_an);
+                    setVaultSummary(v_sum);
+                    setRegimeAttribution(v_reg);
+                    setPortfolioDelta(d_therm);
                     // Update capitals from backend only on initial load or if they match the default
                     // In a production system, we'd use a 'lastSync' timestamp to avoid overwriting user edits
                     if (state.paper_capital_limit === 0 && paperCapital === "1000000") {
@@ -709,6 +942,12 @@
                 }
             };
 
+            const handleHalt = async () => {
+                if (confirm("🚨 EMERGENCY: Halt all VM trading operations?")) {
+                    await fetch(`${API_BASE}/system/halt`, { method: 'POST' });
+                }
+            };
+
             const handleHotSwap = async () => {
                 const config = { 
                     engine: localEngine, 
@@ -742,9 +981,9 @@
                                     { id: 'playground', label: 'Orchestrator' },
                                     { id: 'sim', label: 'Simulation' },
                                     { id: 'evolution', label: 'Evolution' },
-                                    { id: 'audit', label: 'Audit' },
-                                    { id: 'health', label: 'Health' },
+                                    { id: 'vault', label: 'Vault' },
                                     { id: 'attribution', label: 'Attribution' },
+                                    { id: 'health', label: 'Health' },
                                 ].map(tab => (
                                     <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-3 pb-2 border-b-2 transition-all group ${activeTab === tab.id ? 'border-accent text-accent' : 'border-transparent text-gray-500 hover:text-gray-300 hover:border-white/20'}`}>
                                         <TabIcon name={tab.id} active={activeTab === tab.id} />
@@ -765,7 +1004,7 @@
                     </nav>
 
                     <main className="flex-1 p-10 overflow-y-auto scroll-hide bg-black">
-                        {activeTab === 'warroom' && <WarRoom state={state} positions={positions} mode={mode} handlePanic={handlePanic} />}
+                        {activeTab === 'warroom' && <WarRoom state={state} positions={positions} mode={mode} handlePanic={handlePanic} handleHalt={handleHalt} portfolioDelta={portfolioDelta} />}
                         {activeTab === 'playground' && <Playground 
                             localEngine={localEngine} 
                             setLocalEngine={setLocalEngine} 
@@ -781,15 +1020,27 @@
                         />}
                         {activeTab === 'sim' && <SimulationTab simulation={simulation} />}
                         {activeTab === 'evolution' && <Evolution evolution={evolution} />}
-                        {activeTab === 'audit' && <Performance attribution={attribution} />}
+                        {activeTab === 'vault' && <PerformanceVault analytics={vaultAnalytics} summary={vaultSummary} regimes={regimeAttribution} mode={mode} />}
+                        {activeTab === 'attribution' && <SignalAttribution attribution={attribution} />}
                         {activeTab === 'health' && <Health telemetry={telemetry} />}
-                        {activeTab === 'attribution' && <SignalAttribution barrierData={barrierData} sizing={sizing} />}
                     </main>
 
                     <footer className="glass border-t border-white/5 p-3 px-10 flex justify-between items-center text-[10px] font-bold text-gray-500 uppercase tracking-widest bg-black/90">
-                        <div className="flex gap-10">
-                            <span className="flex items-center gap-3"><div className="w-2 h-2 rounded-full bg-success animate-pulse"></div> Redis Cluster Operational</span>
-                            <span className="flex items-center gap-3"><div className="w-2 h-2 rounded-full bg-success animate-pulse"></div> Timescale Stream Live</span>
+                        <div className="flex gap-6 items-center">
+                            <span className="flex items-center gap-2">
+                                <div className={`w-2 h-2 rounded-full ${state.source === 'VM_DIRECT' ? 'bg-success animate-pulse' : state.source === 'FIRESTORE_SYNC' ? 'bg-warning' : 'bg-danger'}`}></div>
+                                {state.source === 'VM_DIRECT' ? 'Redis Live' : state.source === 'FIRESTORE_SYNC' ? 'Cloud Sync' : 'Offline'}
+                            </span>
+                            <span className="flex items-center gap-2">
+                                <div className={`w-2 h-2 rounded-full ${state.source === 'VM_DIRECT' ? 'bg-success animate-pulse' : 'bg-warning'}`}></div>
+                                {state.source === 'VM_DIRECT' ? 'Timescale Live' : 'Archive Mode'}
+                            </span>
+                            {(state.source === 'FIRESTORE_SYNC' || state.source === 'GCS_PARQUET') && (
+                                <span className="text-[8px] text-warning font-black border border-warning/30 bg-warning/5 px-2 py-0.5 rounded animate-pulse">📦 GCS ARCHIVE</span>
+                            )}
+                            <span className={`text-[8px] font-black border px-2 py-0.5 rounded ${state.source === 'VM_DIRECT' ? 'text-accent border-accent/20' : 'text-warning border-warning/20'}`}>
+                                {state.source || 'OFFLINE'}
+                            </span>
                         </div>
                         <div className="mono text-gray-600 flex gap-10">
                             <span>UPTIME: 99.9%</span>

@@ -267,8 +267,8 @@ class DataGateway:
                     # In market hours, we MUST try to be LIVE unless global SIMULATION_MODE is forced
                     new_sim_mode = sim_mode_global
                 else:
-                    # Off-hours: use simulator if enabled
-                    new_sim_mode = sim_enabled
+                    # Off-hours: use simulator if enabled AND not strictly forced to Live
+                    new_sim_mode = sim_enabled if sim_mode_global else False
 
                 if new_sim_mode != self.sim_mode:
                     old_mode = "SIMULATED" if self.sim_mode else "LIVE"
