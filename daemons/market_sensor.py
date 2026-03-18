@@ -697,7 +697,27 @@ class MarketSensor:
             except queue.Empty:
                 break
 
+    async def _initialize_redis_state(self):
+        """Pre-seeds Redis with UNKNOWN state on boot to avoid nil errors."""
+        assets = ["NIFTY50", "BANKNIFTY", "SENSEX"]
+        for asset in assets:
+            if not await self._redis.exists(f"latest_market_state:{asset}"):
+                initial_state = {
+                    "symbol": asset,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "price": 0.0,
+                    "s_total": 0.0,
+                    "regime": "INITIALIZING",
+                    "status": "AWAITING_TICKS"
+                }
+                await self._redis.set(f"latest_market_state:{asset}", json.dumps(initial_state, cls=NumpyEncoder))
+                logger.info(f"Initialized Redis state for {asset}")
+
     async def run(self):
+        # Initialize Redis state for each symbol on boot
+        # This prevents (nil) errors in the dashboard before the first 50 ticks arrive.
+        await self._initialize_redis_state()
+
         if not self.test_mode:
             # The _start_compute_process is now handled by the new `start` method
             pass
