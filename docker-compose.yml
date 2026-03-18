@@ -45,6 +45,8 @@ services:
         condition: service_healthy
     restart: always
     env_file: .env
+    environment:
+      - TZ=Asia/Kolkata
     cpuset: "0"
     volumes:
       - /ram_disk:/ram_disk
@@ -59,6 +61,8 @@ services:
         condition: service_started
     restart: always
     env_file: .env
+    environment:
+      - TZ=Asia/Kolkata    
     cpuset: "1"
     volumes:
       - /ram_disk:/ram_disk
@@ -73,6 +77,8 @@ services:
         condition: service_started
     restart: always
     env_file: .env
+    environment:
+      - TZ=Asia/Kolkata
     cpuset: "1"
     volumes:
       - /ram_disk:/ram_disk
@@ -85,6 +91,8 @@ services:
       market_sensor:
         condition: service_started
     restart: always
+    environment:
+      - TZ=Asia/Kolkata
     env_file: .env
     cpuset: "1"
     volumes:
@@ -98,6 +106,8 @@ services:
       market_sensor:
         condition: service_started
     restart: always
+    environment:
+      - TZ=Asia/Kolkata
     env_file: .env
     cpuset: "1"
     volumes:
@@ -116,6 +126,8 @@ services:
       hmm_engine_sensex:
         condition: service_started
     restart: always
+    environment:
+      - TZ=Asia/Kolkata
     env_file: .env
     cpuset: "1"
     volumes:
@@ -130,6 +142,8 @@ services:
       timescaledb:
         condition: service_healthy
     restart: always
+    environment:
+      - TZ=Asia/Kolkata
     env_file: .env
     volumes:
       - /ram_disk:/ram_disk
@@ -143,6 +157,8 @@ services:
       paper_bridge:
         condition: service_started
     restart: always
+    environment:
+      - TZ=Asia/Kolkata
     env_file: .env
     volumes:
       - /ram_disk:/ram_disk
@@ -163,6 +179,8 @@ services:
       data_gateway:
         condition: service_started
     restart: always
+    environment:
+      - TZ=Asia/Kolkata
     env_file: .env
     cpuset: "2"
     volumes:
@@ -177,6 +195,8 @@ services:
       strategy_engine:
         condition: service_started
     restart: always
+    environment:
+      - TZ=Asia/Kolkata
     env_file: .env
     cpuset: "3"
     volumes:
@@ -191,6 +211,8 @@ services:
       strategy_engine:
         condition: service_started
     restart: always
+    environment:
+      - TZ=Asia/Kolkata
     env_file: .env
     volumes:
       - /ram_disk:/ram_disk
@@ -204,6 +226,8 @@ services:
       strategy_engine:
         condition: service_started
     restart: always
+    environment:
+      - TZ=Asia/Kolkata
     env_file: .env
     volumes:
       - /ram_disk:/ram_disk
@@ -220,6 +244,8 @@ services:
       redis:
         condition: service_healthy
     restart: always
+    environment:
+      - TZ=Asia/Kolkata
     env_file: .env
     cpuset: "3"
 
@@ -232,6 +258,8 @@ services:
       redis:
         condition: service_healthy
     restart: always
+    environment:
+      - TZ=Asia/Kolkata
     env_file: .env
     cpuset: "3"
     volumes:
@@ -253,6 +281,8 @@ services:
     ports:
       - "8000:8000"
     restart: always
+    environment:
+      - TZ=Asia/Kolkata
     env_file: .env
     volumes:
       - /ram_disk:/ram_disk
@@ -269,5 +299,7 @@ services:
     depends_on:
       - dashboard_api
     restart: always
+    environment:
+      - TZ=Asia/Kolkata
 
 # Volumes section removed to enforce host-path mounts

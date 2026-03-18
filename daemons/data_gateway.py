@@ -54,7 +54,11 @@ def is_market_hours():
     now_dt = datetime.now(IST)
     now = now_dt.time()
     res = MARKET_OPEN <= now <= MARKET_CLOSE
-    # Log every hour or on state change if needed, but for now just ensure it's correct
+    
+    # Extra logging to debug why we might be in simulated mode
+    if random.random() < 0.01: # Sample logging to avoid spam
+        logger.info(f"DEBUG: Current IST Time: {now_dt.strftime('%H:%M:%S')}. Market Open: {res}")
+    
     return res
 
 # Symbols simulated / watched
@@ -276,13 +280,14 @@ class DataGateway:
                 if new_sim_mode != self.sim_mode:
                     old_mode = "SIMULATED" if self.sim_mode else "LIVE"
                     new_mode = "SIMULATED" if new_sim_mode else "LIVE"
-                    logger.info(f"🔄 Mode Transition: {old_mode} -> {new_mode}")
+                    reason = f"Market: {'ON' if market_on else 'OFF'}, GlobalSim: {sim_mode_global}"
+                    logger.info(f"🔄 Mode Transition: {old_mode} -> {new_mode} ({reason})")
                     
                     self.sim_mode = new_sim_mode
-                    self._data_flow_alert_sent = False # Reset to signal first tick in new mode
+                    self._data_flow_alert_sent = False 
                     
                     asyncio.create_task(send_cloud_alert(
-                        f"🔄 DATA GATEWAY: Switch from {old_mode} to {new_mode} data flow.",
+                        f"🔄 DATA GATEWAY: Switch from {old_mode} to {new_mode} ({reason}).",
                         alert_type="SYSTEM"
                     ))
                     
