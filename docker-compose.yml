@@ -10,7 +10,7 @@ services:
     command: redis-server --appendonly yes --save 900 1 --save 300 10
     restart: always
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -26,7 +26,7 @@ services:
       - /opt/trading/data/db:/var/lib/postgresql/data # [Audit 7.4] Map to host path for NVMe
     restart: always
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U trading_user -d trading_db"]
+      test: [ "CMD-SHELL", "pg_isready -U trading_user -d trading_db" ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -47,6 +47,7 @@ services:
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     cpuset: "0"
     volumes:
       - /ram_disk:/ram_disk
@@ -62,7 +63,8 @@ services:
     restart: always
     env_file: .env
     environment:
-      - TZ=Asia/Kolkata    
+      - TZ=Asia/Kolkata
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     cpuset: "1"
     volumes:
       - /ram_disk:/ram_disk
@@ -79,6 +81,7 @@ services:
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     cpuset: "1"
     volumes:
       - /ram_disk:/ram_disk
@@ -93,6 +96,7 @@ services:
     restart: always
     environment:
       - TZ=Asia/Kolkata
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     env_file: .env
     cpuset: "1"
     volumes:
@@ -108,6 +112,7 @@ services:
     restart: always
     environment:
       - TZ=Asia/Kolkata
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     env_file: .env
     cpuset: "1"
     volumes:
@@ -128,6 +133,7 @@ services:
     restart: always
     environment:
       - TZ=Asia/Kolkata
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     env_file: .env
     cpuset: "1"
     volumes:
@@ -144,6 +150,7 @@ services:
     restart: always
     environment:
       - TZ=Asia/Kolkata
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     env_file: .env
     volumes:
       - /ram_disk:/ram_disk
@@ -180,6 +187,7 @@ services:
     restart: always
     environment:
       - TZ=Asia/Kolkata
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     env_file: .env
     cpuset: "2"
     volumes:
@@ -196,6 +204,7 @@ services:
     restart: always
     environment:
       - TZ=Asia/Kolkata
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     env_file: .env
     cpuset: "3"
     volumes:
@@ -212,6 +221,7 @@ services:
     restart: always
     environment:
       - TZ=Asia/Kolkata
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     env_file: .env
     volumes:
       - /ram_disk:/ram_disk
@@ -225,14 +235,13 @@ services:
       strategy_engine:
         condition: service_started
     restart: always
-    environment:
-      - TZ=Asia/Kolkata
     env_file: .env
     volumes:
       - /ram_disk:/ram_disk
       - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
+      - TZ=Asia/Kolkata
 
   # 12. Telegram Alerter (Monitoring)
   telegram_alerter:
@@ -245,6 +254,7 @@ services:
     restart: always
     environment:
       - TZ=Asia/Kolkata
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     env_file: .env
     cpuset: "3"
 
@@ -257,8 +267,6 @@ services:
       redis:
         condition: service_healthy
     restart: always
-    environment:
-      - TZ=Asia/Kolkata
     env_file: .env
     cpuset: "3"
     volumes:
@@ -266,7 +274,7 @@ services:
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-
+      - TZ=Asia/Kolkata
   # 14. Dashboard API & Frontend (UI - depends on all data sources)
   dashboard_api:
     image: trading-app:latest
@@ -280,15 +288,13 @@ services:
     ports:
       - "8000:8000"
     restart: always
-    environment:
-      - TZ=Asia/Kolkata
     env_file: .env
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-
+      - TZ=Asia/Kolkata
   dashboard_frontend:
     build:
       context: ./dashboard/frontend
@@ -300,5 +306,6 @@ services:
     restart: always
     environment:
       - TZ=Asia/Kolkata
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
 
 # Volumes section removed to enforce host-path mounts
