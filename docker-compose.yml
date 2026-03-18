@@ -157,14 +157,13 @@ services:
       paper_bridge:
         condition: service_started
     restart: always
-    environment:
-      - TZ=Asia/Kolkata
     env_file: .env
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
+      - TZ=Asia/Kolkata
 
   # 8. Strategy Engine (Depends on all above)
   strategy_engine:
