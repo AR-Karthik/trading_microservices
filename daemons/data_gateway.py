@@ -622,21 +622,32 @@ class DataGateway:
 
     async def _fetch_and_store_lot_sizes(self):
         """
-        Fetches lot sizes from Shoonya API.
+        Fetches lot sizes from Shoonya API by searching for ATM options.
         Falls back to hardcoded defaults if API unavailable.
         """
-        lot_sizes = dict(DEFAULT_LOT_SIZES)  # start with defaults
+        lot_sizes = dict(DEFAULT_LOT_SIZES)
 
         try:
             # Mock for simulation
             if os.getenv("SIMULATION_MODE", "false").lower() == "true":
-                lot_sizes = {"NIFTY50": 65, "BANKNIFTY": 30, "SENSEX": 10}
+                lot_sizes.update({"NIFTY50": 75, "BANKNIFTY": 15, "SENSEX": 10})
             else:
-                # In production: call Shoonya get_contracts() or search_scrip()
-                lot_sizes = {"NIFTY50": 65, "BANKNIFTY": 30, "SENSEX": 10}
-            logger.info(f"Lot sizes fetched: {lot_sizes}")
+                # [Audit Fix] Dynamically fetch lot sizes for major indices
+                for idx, sym in [("NIFTY50", "NIFTY"), ("BANKNIFTY", "BANKNIFTY"), ("SENSEX", "SENSEX")]:
+                    exch = "BFO" if idx == "SENSEX" else "NFO"
+                    # Search for any derivative to get the 'ls' (lot size) field
+                    res = self.api.search_scrip(exchange=exch, searchtext=sym)
+                    if res and res.get('stat') == 'Ok':
+                        values = res.get('values', [])
+                        # Look for an entry with an 'ls' field
+                        for val in values:
+                            if 'ls' in val:
+                                lot_sizes[idx] = int(val['ls'])
+                                logger.info(f"Dynamic Lot Size for {idx}: {lot_sizes[idx]}")
+                                break
+            logger.info(f"Lot sizes finalized: {lot_sizes}")
         except Exception as e:
-            logger.warning(f"Lot size fetch failed ({e}). Using defaults: {lot_sizes}")
+            logger.warning(f"Lot size fetch failed ({e}). Using existing values: {lot_sizes}")
 
         # Store in Redis
         await self.redis_client.hset("lot_sizes", mapping=lot_sizes)
@@ -704,7 +715,7 @@ class DataGateway:
                 continue
 
             try:
-                for redis_symbol in ["NIFTY50", "BANKNIFTY"]:
+                for redis_symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
                     shoonya_symbol = "NIFTY" if redis_symbol == "NIFTY50" else redis_symbol
                     pcr = await self._calculate_pcr(shoonya_symbol)
                     if pcr:
@@ -727,10 +738,11 @@ class DataGateway:
             if not spot: return None
 
             expiry = await self.redis_client.get(f"EXPIRY:{redis_symbol}") or "26MAR"
+            exch = "BFO" if redis_symbol == "SENSEX" else "NFO"
             
             # Shoonya get_option_chain expects strike for chain discovery
             # We'll pull strikes +/- 500 around spot to get most the OI
-            res = self.api.get_option_chain(exchange='NFO', tradingsymbol=symbol, strike=round(spot/50)*50, count=10)
+            res = self.api.get_option_chain(exchange=exch, tradingsymbol=symbol, strike=round(spot/50)*50, count=10)
             
             if res and res.get('stat') == 'Ok':
                 values = res.get('values', [])

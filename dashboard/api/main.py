@@ -214,7 +214,13 @@ def get_state(asset: str = "NIFTY50"):
                 "oi_accel": float(r.get(f"OI_ACCEL:{asset}") or 0.0)
             }
 
-        ms = json.loads(r.get("latest_market_state:NIFTY50") or r.get("latest_market_state") or "{}")
+        # [Audit-Fix] Index-aware Deep Signals
+        ms_raw = r.get(f"latest_market_state:{asset}")
+        ms = json.loads(ms_raw) if ms_raw else {}
+        
+        # Fallback to NIFTY50 only if specific asset data is missing
+        if not ms:
+            ms = json.loads(r.get("latest_market_state:NIFTY50") or "{}")
 
         deep_signals = {
             "log_ofi_z": ms.get("log_ofi_zscore", 0.0),
@@ -226,7 +232,6 @@ def get_state(asset: str = "NIFTY50"):
             "charm":      ms.get("charm", 0.0),
             "atr":        ms.get("atr", 20.0),
             "basis_z":    ms.get("basis_zscore", 0.0),
-            "cvd_flips":  ms.get("cvd_flip_ticks", 0),
             "cvd_flips":  ms.get("cvd_flip_ticks", 0),
             "atm_iv":     float(r.get(f"LIVE_IV:{asset}") or r.get("atm_iv") or ms.get("atm_iv", 0.18)),
             "asto":       ms.get("asto", 0.0),

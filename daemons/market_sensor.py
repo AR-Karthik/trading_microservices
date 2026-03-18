@@ -501,9 +501,14 @@ class MarketSensor:
         if not test_mode:
             self.pub = self.mq.create_publisher(Ports.MARKET_STATE)
             self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
-            self.shm = ShmManager(mode='w')
+            self.shm_managers = {
+                idx: ShmManager(asset_id=idx, mode='w') for idx in self.all_indices
+            }
+            # Also keep a global one for legacy if needed, or just use NIFTY50 as default
+            self.shm_global = ShmManager(asset_id="GLOBAL", mode='w')
         else:
-            self.shm = None
+            self.shm_managers = {}
+            self.shm_global = None
             self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
 
         self.manager: Any = None
@@ -568,9 +573,9 @@ class MarketSensor:
         self._last_hurst_calc = 0.0
 
         # [Hedge Hybrid] Holistic state
-        self.market_state = "NEUTRAL"
-        self.vwap_cum_pv: dict[str, float] = {}
-        self.vwap_cum_vol: dict[str, float] = {}
+        self.market_states: dict[str, str] = collections.defaultdict(lambda: "NEUTRAL")
+        self.vwap_cum_pv: dict[str, float] = collections.defaultdict(float)
+        self.vwap_cum_vol: dict[str, float] = collections.defaultdict(float)
 
     # Removed redundant compute process methods
 
@@ -980,7 +985,7 @@ class MarketSensor:
         new_state = current_state
         
         if abs_asto >= 90:
-            new_state = "EXTREME_TREND:BULLISH" if asto >= 90 else "EXTREME_TREND:BEARISH"
+            new_state = f"EXTREME_TREND:{'BULLISH' if asto >= 90 else 'BEARISH'}"
         elif abs_asto >= 70:
             if "EXTREME" not in current_state:
                 new_state = "TRENDING"
@@ -988,6 +993,7 @@ class MarketSensor:
             new_state = "NEUTRAL"
             
         state["market_state"] = new_state
+        self.market_states[symbol] = new_state
         await self._redis.set(f"MARKET_STATE:{symbol}", new_state)
         
         if abs_asto >= 90:
@@ -1047,7 +1053,7 @@ class MarketSensor:
                 "progress": round(float(progress), 2)
             }
 
-            if self.shm:
+            if self.shm_managers:
                 # Map heavyweight alpha scores from latest signals
                 hw_list = [0.0] * 10
                 hw_scores = self._latest_signals.get("hw_alphas", {})
@@ -1080,7 +1086,14 @@ class MarketSensor:
                     veto=bool(state.get("flow_toxicity_veto", False)),
                     hw_alpha=hw_list
                 )
-                self.shm.write(signals)
+                
+                # Write to asset-specific SHM
+                if symbol in self.shm_managers:
+                    self.shm_managers[symbol].write(signals)
+                
+                # Also write to global if NIFTY50 for legacy
+                if symbol == "NIFTY50" and self.shm_global:
+                    self.shm_global.write(signals)
             
             # 3. Publish over ZeroMQ [Audit 2.2: Fix parameter order]
             await self.mq.send_json(self.pub, Topics.MARKET_STATE, state)

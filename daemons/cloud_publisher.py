@@ -108,31 +108,41 @@ class CloudPublisher:
 
                 indices = ["NIFTY50", "BANKNIFTY", "SENSEX"]
                 index_states = {}
+                all_deep_signals = {}
+                
                 for asset in indices:
+                    # Fetch market state
                     st_raw = await self.redis.get(f"latest_market_state:{asset}")
                     st = json.loads(st_raw) if st_raw else {}
                     
-                    # Standardize Regime source to hmm_regime_state hash
+                    # Fetch regime
                     asset_reg_raw = await self.redis.hget("hmm_regime_state", asset)
                     asset_reg = "UNKNOWN"
                     if asset_reg_raw:
                         try: asset_reg = json.loads(asset_reg_raw).get("regime", "UNKNOWN")
                         except: pass
                     
-                    index_states[asset] = {"score": st.get("s_total", 0.0), "regime": asset_reg, "price": st.get("price", 0.0)}
+                    index_states[asset] = {
+                        "score": st.get("s_total", 0.0), 
+                        "regime": asset_reg, 
+                        "price": st.get("price", 0.0)
+                    }
 
-                ms_raw = await self.redis.get("latest_market_state:NIFTY50")
-                ms = json.loads(ms_raw) if ms_raw else {}
-                
-                deep_signals = {
-                    "log_ofi_z": ms.get("log_ofi_zscore", 0.0),
-                    "rv":         ms.get("rv", 0.0),
-                    "adx":        ms.get("adx", 20.0),
-                    "atm_iv":     float(await self.redis.get("atm_iv") or ms.get("atm_iv", 0.18)),
-                    "asto":       ms.get("asto", 0.0),
-                    "asto_multiplier": ms.get("asto_multiplier", 3.0),
-                    "asto_regime": ms.get("asto_regime", 0)
-                }
+                    # Fetch Deep Signals for this asset
+                    all_deep_signals[asset] = {
+                        "log_ofi_z": st.get("log_ofi_zscore", 0.0),
+                        "rv":         st.get("rv", 0.0),
+                        "adx":        st.get("adx", 20.0),
+                        "atm_iv":     float(await self.redis.get(f"LIVE_IV:{asset}") or st.get("atm_iv", 0.18)),
+                        "asto":       st.get("asto", 0.0),
+                        "asto_multiplier": st.get("asto_multiplier", 3.0),
+                        "asto_regime": st.get("asto_regime", 0),
+                        "rsi":        st.get("rsi", 50.0),
+                        "pcr":        st.get("pcr", 0.85)
+                    }
+
+                # Legacy/default signal for NIFTY50
+                deep_signals = all_deep_signals.get("NIFTY50", {})
 
 
                 power_five = {}
@@ -171,12 +181,12 @@ class CloudPublisher:
                     "system_health": "HEALTHY",
                     "live_alpha": float(alpha),
                     "live_regime": regime,
-                    # Added for D-36 / Wave 2
-                    "signals": deep_signals,
+                    "signals": deep_signals, # Backward compat
+                    "all_signals": all_deep_signals, # Wave 3: Multi-index
                     "power_five": power_five,
                     "portfolio_delta": portfolio_delta,
                     "index_states": index_states,
-                    "exit_path_70_30": ms.get("exit_path_70_30", {"tp1": 0.0, "tp2": 0.0, "progress": 0.0}),
+                    "exit_path_70_30": all_deep_signals.get("NIFTY50", {}).get("exit_path_70_30", {"tp1": 0.0, "tp2": 0.0, "progress": 0.0}),
                     
                     # Wave 2: Enhanced Indicators
                     "indicators": {
@@ -288,10 +298,7 @@ class CloudPublisher:
                 except Exception as e:
                     logger.error(f"EOD Parquet export failed: {e}")
 
-                try:
-                    await self._upload_hmm_model()
-                except Exception as e:
-                    logger.error(f"HMM model upload failed: {e}")
+                # Legacy HMM model upload removed: system is now purely deterministic.
 
                 try:
                     await self._mark_vm_shutdown_pending()
@@ -408,23 +415,7 @@ class CloudPublisher:
         except Exception as e:
             logger.error(f"Trade Parquet export error: {e}")
 
-    async def _upload_hmm_model(self):
-        """Upload the latest HMM model to GCS for persistence."""
-        if not self.gcs_client:
-            return
-
-        model_path = "data/models/hmm_v_latest.pkl"
-        if not os.path.exists(model_path):
-            model_path = "data/models/hmm_generic.pkl"
-
-        if not os.path.exists(model_path):
-            logger.warning("No HMM model found to upload.")
-            return
-
-        bucket = self.gcs_client.bucket(self.gcs_bucket)
-        blob = bucket.blob(os.path.basename(model_path))
-        blob.upload_from_filename(model_path)
-        logger.info(f"✅ HMM model uploaded to GCS: gs://{self.gcs_bucket}/{os.path.basename(model_path)}")
+    # Legacy _upload_hmm_model removed (System moved to deterministic ASTO)
 
     async def _mark_vm_shutdown_pending(self):
         """Update Firestore to indicate EOD processing is complete."""

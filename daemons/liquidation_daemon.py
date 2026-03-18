@@ -69,6 +69,13 @@ class LiquidationDaemon:
         self._redis: redis.Redis | None = None
         self.pool: asyncpg.Pool | None = None
 
+        # [Audit-Fix] Isolated SHM Managers for Multi-Index Alpha
+        from core.shm import ShmManager
+        self.shm_alpha_managers = {
+            idx: ShmManager(asset_id=idx, mode='r') for idx in ["NIFTY50", "BANKNIFTY", "SENSEX"]
+        }
+        self.shm_alpha_managers["GLOBAL"] = ShmManager(asset_id="GLOBAL", mode='r')
+
     async def _reconnect_pool(self):
         """Reconnect DB pool."""
         try:
@@ -425,7 +432,16 @@ class LiquidationDaemon:
                         total_qty += abs(qty)
                 
                 # Check breach
-                num_lots = max(1, int(total_qty // 50)) # Assuming NIFTY 50-lot base
+                # [Audit-Fix] Index-aware Hybrid Drawdown Scaling
+                sample_leg = legs[0]
+                underlying = "NIFTY50"
+                if "BANKNIFTY" in sample_leg.get("symbol", ""): underlying = "BANKNIFTY"
+                elif "SENSEX" in sample_leg.get("symbol", ""): underlying = "SENSEX"
+                
+                lot_size_raw = await self._redis.hget("lot_sizes", underlying)
+                idx_lot_size = int(lot_size_raw) if lot_size_raw else 50
+                
+                num_lots = max(1, int(total_qty // idx_lot_size))
                 dynamic_limit = float(limit * num_lots)
                 
                 if total_pnl <= -dynamic_limit:
@@ -448,18 +464,24 @@ class LiquidationDaemon:
         if not pos:
             return
 
-        vix_raw = await self._redis.get("vix")
+        # [Audit-Fix] Determine Underlying for Asset-Keyed Signals
+        underlying = "NIFTY50"
+        if "BANKNIFTY" in symbol: underlying = "BANKNIFTY"
+        elif "SENSEX" in symbol: underlying = "SENSEX"
+        
+        # Pull isolated signals
+        vix_raw = await self._redis.get(f"vix:{underlying}") or await self._redis.get("vix")
         vix = float(vix_raw) if vix_raw else 15.0
-        atr_raw = await self._redis.get("atr")
+        atr_raw = await self._redis.get(f"atr:{underlying}") or await self._redis.get("atr")
         atr = float(atr_raw) if atr_raw else 20.0
-        hmm_raw = await self._redis.get("hmm_regime")
+        hmm_raw = await self._redis.get(f"hmm_regime:{underlying}") or await self._redis.get("hmm_regime")
         current_hmm = str(hmm_raw) if hmm_raw else "RANGING"
 
-        # ── Barrier 0: Systemic Vol Panic (RV-based) ──────────────────────────
-        # [Audit 14.2] Applied to ALL lifecycle classes for 3-sigma safety
+        # Pull isolated alpha/cvd from Redis (fallback if SHM not used for some signals)
+        rv_raw = await self._redis.get(f"rv:{underlying}") or await self._redis.get("rv")
+        rv = float(rv_raw or 0.0)
+        
         try:
-            rv_raw = await self._redis.get("rv")
-            rv = float(rv_raw or 0.0)
             if rv > 0.002:
                 price = tick.get("price", 0.0)
                 action = pos.get("action", "BUY")
@@ -522,13 +544,25 @@ class LiquidationDaemon:
         exit_reason = None
         is_partial = False
 
-        # Phase 13.3: Microstructure CVD & Alpha Signal Barrier (Additive Fallback)
+        # Phase 13.3: Microstructure CVD & Alpha Signal Barrier (Isolated Lookup)
         try:
-            cvd_raw = await self._redis.get("cvd_flip_ticks") or await self._redis.get("cvd_score")
-            cvd = float(cvd_raw or 0.0)
-            # Alpha Score Flip (Phase 13.4)
-            s_total_raw = await self._redis.get("COMPOSITE_ALPHA") or await self._redis.get("s_total")
-            s_total = float(s_total_raw or 0.0)
+            underlying = "NIFTY50"
+            if "BANKNIFTY" in symbol: underlying = "BANKNIFTY"
+            elif "SENSEX" in symbol: underlying = "SENSEX"
+
+            # Check isolated SHM first for highest resolution
+            shm = self.shm_alpha_managers.get(underlying)
+            qstate = shm.read() if shm else {}
+            
+            cvd = float(qstate.get("cvd_score", 0.0))
+            if cvd == 0: # Fallback to Redis
+                cvd_raw = await self._redis.get(f"cvd_flip_ticks:{underlying}") or await self._redis.get(f"cvd_score:{underlying}")
+                cvd = float(cvd_raw or 0.0)
+                
+            s_total = float(qstate.get("s_total", 0.0))
+            if s_total == 0: # Fallback to Redis
+                s_total_raw = await self._redis.get(f"COMPOSITE_ALPHA:{underlying}") or await self._redis.get(f"s_total:{underlying}")
+                s_total = float(s_total_raw or 0.0)
             
             if (action == "BUY" and (cvd < -CVD_FLIP_EXIT_THRESHOLD or s_total < -40)) or \
                (action == "SELL" and (cvd > CVD_FLIP_EXIT_THRESHOLD or s_total > 40)):
@@ -538,9 +572,12 @@ class LiquidationDaemon:
                 return
         except Exception: pass
 
-        # [C2-10] ASTO Dynamic Exit (Phase 5): Force exit if |ASTO| < 50 for KINETIC roles
-        asto_raw = await self._redis.get("asto")
-        asto_val = float(asto_raw or 0.0)
+        # [C2-10] ASTO Dynamic Exit (Isolated)
+        asto_val = float(qstate.get("asto", 0.0)) if 'qstate' in locals() else 0.0
+        if asto_val == 0:
+            asto_raw = await self._redis.get(f"asto:{underlying}") or await self._redis.get("asto")
+            asto_val = float(asto_raw or 0.0)
+            
         if abs(asto_val) < 50:
             exit_reason = f"ASTO_KINETIC_EXIT: |{asto_val:.1f}| < 50"
             await self._record_barrier_exit(symbol, "ASTO_EXIT", exit_reason, price, entry)
@@ -773,7 +810,11 @@ class LiquidationDaemon:
         # Sizing: Target 0.0 delta. Since we are at ±0.15, we need to buy/sell ~0.15 of underlying notional.
         # [Audit 11.4] Hedge intent must specify reason to avoid reconciler collisions
         hedge_action = "BUY" if delta < 0 else "SELL"
-        hedge_qty = max(1, int(abs(delta) * 50)) # Proxy multiplier for micro-lot conversion
+        
+        # [Audit-Fix] Use Dynamic Lot Size for Hedge Quantity
+        lot_size_raw = await self._redis.hget("lot_sizes", pos.get("underlying", "NIFTY50"))
+        lot_size = int(lot_size_raw) if lot_size_raw else 50
+        hedge_qty = max(1, int(abs(delta) * lot_size)) 
         
         hedge_order = {
             "order_id": f"hedge_{uuid.uuid4().hex[:8]}",

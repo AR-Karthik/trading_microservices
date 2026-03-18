@@ -50,7 +50,8 @@ class HeuristicEngine:
         self.asset_id = asset_id
         self.core_pin = core_pin
         self.mq = MQManager()
-        self.shm = ShmManager(mode='w')
+        # [Audit-Fix] Isolated SHM Write for Multi-Index
+        self.shm = ShmManager(asset_id=asset_id, mode='w')
         
         # Redis connection
         redis_host = os.getenv("REDIS_HOST", "localhost")

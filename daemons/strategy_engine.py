@@ -30,6 +30,28 @@ redis_logger = RedisLogger()
 # --- Recommendation 7: Shadow Trading Flag ---
 IS_SHADOW_MODE = "--shadow" in sys.argv
 
+# --- [Audit-Fix] Index Metadata for Multi-Index Robustness ---
+INDEX_METADATA = {
+    "NIFTY50": {
+        "increment": 50,
+        "lot_size": 50,
+        "expiry_day": "Thursday",
+        "underlying": "NIFTY"
+    },
+    "BANKNIFTY": {
+        "increment": 100,
+        "lot_size": 15,  # [Audit-Fix] Updated BN lot size to 15
+        "expiry_day": "Wednesday",
+        "underlying": "BANKNIFTY"
+    },
+    "SENSEX": {
+        "increment": 100,
+        "lot_size": 10,
+        "expiry_day": "Friday",
+        "underlying": "SENSEX"
+    }
+}
+
 class BaseStrategy:
     def __init__(self, strategy_id: str, symbols: list[str], **kwargs):
         self.strategy_id = strategy_id
@@ -94,7 +116,8 @@ class DirectionalCreditSpreadStrategy(BaseStrategy):
         
         price = float(data['price'])
         # [SE-01] Generalize strike rounding based on asset
-        increment = 100 if symbol in ["BANKNIFTY", "SENSEX"] else 50
+        meta = INDEX_METADATA.get(symbol, INDEX_METADATA["NIFTY50"])
+        increment = meta["increment"]
 
         # Directional logic: alpha balance determines CE vs PE
         alpha = data.get('s_total', 0)
@@ -104,8 +127,8 @@ class DirectionalCreditSpreadStrategy(BaseStrategy):
             s2 = s1 - self.spread_width
             parent_uuid = f"DCS_{uuid.uuid4().hex[:8]}"
             return [
-                {"action": "SELL", "otype": "PE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
-                {"action": "BUY",  "otype": "PE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"}
+                {"action": "SELL", "otype": "PE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL", "underlying": symbol},
+                {"action": "BUY",  "otype": "PE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL", "underlying": symbol}
             ]
         elif alpha < -25: # Bearish Bias -> Bear Call Spread
             otype = "CE"
@@ -136,7 +159,7 @@ class TastyTrade0DTEStrategy(BaseStrategy):
         }
         
         current_day = now.strftime("%A")
-        if symbol in expiry_days and current_day != expiry_days[symbol]:
+        if symbol in INDEX_METADATA and current_day != INDEX_METADATA[symbol]["expiry_day"]:
             return None
             
         # [S-01] Active 0-DTE window: 09:30 to 10:30 IST
@@ -146,17 +169,18 @@ class TastyTrade0DTEStrategy(BaseStrategy):
         
         price = float(data['price'])
         # [SE-01] Generalize strike rounding based on asset
-        increment = 100 if symbol in ["BANKNIFTY", "SENSEX"] else 50
+        meta = INDEX_METADATA.get(symbol, INDEX_METADATA["NIFTY50"])
+        increment = meta["increment"]
         
         # [S-02] Iron Butterfly (protected straddle) instead of naked straddle
         atm_strike = round(price / increment) * increment
         wing_offset = increment * 4  # e.g., 200 for NIFTY, 400 for others
         parent_uuid = f"TT0_{uuid.uuid4().hex[:8]}"
         return [
-            {"action": "SELL", "otype": "CE", "strike": atm_strike, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE"},
-            {"action": "BUY",  "otype": "CE", "strike": atm_strike + wing_offset, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE"},
-            {"action": "SELL", "otype": "PE", "strike": atm_strike, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE"},
-            {"action": "BUY",  "otype": "PE", "strike": atm_strike - wing_offset, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE"}
+            {"action": "SELL", "otype": "CE", "strike": atm_strike, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE", "underlying": symbol},
+            {"action": "BUY",  "otype": "CE", "strike": atm_strike + wing_offset, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE", "underlying": symbol},
+            {"action": "SELL", "otype": "PE", "strike": atm_strike, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE", "underlying": symbol},
+            {"action": "BUY",  "otype": "PE", "strike": atm_strike - wing_offset, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE", "underlying": symbol}
         ]
 
 
@@ -475,7 +499,7 @@ async def _calibrate_vol_context(redis_client):
         logger.warning("⚠️ B2 Vol Context: No symbols calibrated (prev_close data missing). Proceeding with defaults.")
  
  
-async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_client, shm_ticks, shm_alpha, hedge_socket):
+async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_client, shm_ticks, shm_alpha_managers, hedge_socket):
     """Subscribes to market data and runs strategies using SHM for zero-copy lookups."""
     logger.info("Starting Strategy Engine loop... (v5.5 Quantitative Risk Active)")
     
@@ -490,6 +514,10 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
     # Wave 2: Cache IV for Low Vol Trap
     iv_cache = 15.0
     iv_last_check = 0
+    
+    # [Audit 14.5] Cache Lot Sizes from Redis
+    lot_sizes_cache = {}
+    lot_sizes_last_check = 0
     
     # Track real-time lot overrides from Meta-Router
     strategy_states = collections.defaultdict(lambda: {"lots": 1, "active": True})
@@ -554,29 +582,39 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
             
             price = tick.get("price")
             
-            # --- v5.5: Zero-Latency Risk Veto ---
-            qstate = shm_alpha.read() if shm_alpha else None
-            is_toxic = qstate.get("toxic_veto", False) if qstate else False
-            alpha_total = qstate.get("s_total", 0.0) if qstate else 0.0
-            asto_val = qstate.get("asto", 0.0) if qstate else 0.0
-            adx_val = qstate.get("adx", 0.0) if qstate else 0.0
- 
-            # [F12-01] Refresh HALT_KINETIC cache every 5 seconds (not per tick)
+            # [Audit-Fix] Refresh Risk Caches & Get SHM Alpha (Per Asset)
             if time.time() - halt_kinetic_last_check > 5:
                 halt_kinetic_val = await redis_client.get("HALT_KINETIC")
                 halt_kinetic_cache = (halt_kinetic_val == "True")
                 halt_kinetic_last_check = time.time()
             
-            # Wave 2: Refresh Risk Caches
             if time.time() - macro_lockdown_last_check > 5:
                 lockdown_val = await redis_client.get("MACRO_EVENT_LOCKDOWN")
                 macro_lockdown_cache = (lockdown_val == "True")
                 macro_lockdown_last_check = time.time()
             
             if time.time() - iv_last_check > 5:
-                iv_raw = await redis_client.get("atm_iv")
-                iv_cache = float(iv_raw or 0.15) * 100.0 # Convert to percentage (e.g. 0.15 -> 15.0)
+                iv_raw = await redis_client.get(f"atm_iv:{symbol}") or await redis_client.get("atm_iv")
+                iv_cache = float(iv_raw or 0.15) * 100.0
                 iv_last_check = time.time()
+
+            if time.time() - lot_sizes_last_check > 60:
+                lot_sizes_raw = await redis_client.hgetall("lot_sizes")
+                if lot_sizes_raw:
+                    lot_sizes_cache = {k: int(v) for k, v in lot_sizes_raw.items()}
+                lot_sizes_last_check = time.time()
+
+            # --- Zero-Copy SHM Access for Alpha (Per Asset) ---
+            qstate = None
+            if shm_alpha_managers and symbol in shm_alpha_managers:
+                qstate = shm_alpha_managers[symbol].read()
+            elif shm_alpha_managers and "GLOBAL" in shm_alpha_managers:
+                qstate = shm_alpha_managers["GLOBAL"].read()
+            
+            is_toxic = qstate.get("toxic_veto", False) if qstate else False
+            alpha_total = qstate.get("s_total", 0.0) if qstate else 0.0
+            asto_val = qstate.get("asto", 0.0) if qstate else 0.0
+            adx_val = qstate.get("adx", 0.0) if qstate else 0.0
 
             for strategy in list(active_strategies.values()):
                 s_id = strategy.strategy_id
@@ -670,11 +708,14 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                     if lots_from_router and lots_from_router > 0:
                         qty = lots_from_router
                     else:
-                        # Fallback sizing based on DTE
+                        # Fallback sizing based on DTE - Dynamic [Audit Fix]
+                        meta = INDEX_METADATA.get(symbol, INDEX_METADATA["NIFTY50"])
+                        # Try to find symbol in dynamic lot sizes cache
+                        found_lot_size = lot_sizes_cache.get(symbol) or lot_sizes_cache.get(meta.get("underlying")) or meta.get("lot_size", 50)
+                        
                         now_dt = datetime.now()
-                        # DTE 0/1 (Wed/Thu) = 100%, Others = 50%
-                        is_expiry = now_dt.strftime("%A") in ["Wednesday", "Thursday"]
-                        base_qty = 100
+                        is_expiry = now_dt.strftime("%A") == meta["expiry_day"]
+                        base_qty = int(found_lot_size) * 2  # Default to 2 lots
                         qty = base_qty if is_expiry else int(base_qty * 0.5)
  
                     if isinstance(leg, str) and "QTY" in leg:
@@ -722,7 +763,7 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                     await mq_manager.send_json(push_socket, Topics.ORDER_INTENT, order)
                     await redis_client.hset("pending_orders", order["order_id"], json.dumps(dispatch_meta, cls=NumpyEncoder))
                     
-                    logger.info(f"DISPATCHED {action} {qty} {symbol} @ {price}")
+                    logger.info(f"DISPATCHED {action} {qty} {symbol} @ {price} | Lifecycle: {order['lifecycle_class']}")
                     
         except Exception as e:
             if "Resource temporarily unavailable" in str(e):
@@ -736,9 +777,12 @@ async def start_engine():
     # [Audit 14.4] Use from_url for true async context manager compatibility
     redis_client = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
     
-    # v5.5: Zero-latency Risk & Alpha via SHM
+    # v5.5: Zero-latency Risk & Alpha via SHM (Per Asset) [Audit Fix]
     from core.shm import ShmManager
-    shm_alpha = ShmManager(mode='r')
+    shm_alpha_managers = {
+        idx: ShmManager(asset_id=idx, mode='r') for idx in INDEX_METADATA.keys()
+    }
+    shm_alpha_managers["GLOBAL"] = ShmManager(asset_id="GLOBAL", mode='r')
     
     try:
         shm_ticks = TickSharedMemory(create=False) # Read-only access
@@ -769,10 +813,8 @@ async def start_engine():
     await _calibrate_vol_context(redis_client)
  
     # 3. Recommendation 2: Pre-Flight Warmup
-    await warmup_engine(active_strategies)
- 
     try:
-        await run_strategies(sub_socket, push_socket, cmd_socket, mq, redis_client, shm_ticks, shm_alpha, hedge_socket)
+        await run_strategies(sub_socket, push_socket, cmd_socket, mq, redis_client, shm_ticks, shm_alpha_managers, hedge_socket)
     finally:
         config_task.cancel()
         await redis_client.aclose()
