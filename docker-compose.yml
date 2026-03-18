@@ -3,6 +3,8 @@ services:
   redis:
     image: redis:alpine
     container_name: trading_redis
+    environment:
+      - TZ=Asia/Kolkata
     ports:
       - "6379:6379"
     volumes:
@@ -20,6 +22,8 @@ services:
     image: timescale/timescaledb:latest-pg14
     container_name: trading_timescaledb
     env_file: .env # [Audit 8.3] Load secrets from env file, expecting POSTGRES_USER/PASSWORD/DB
+    environment:
+      - TZ=Asia/Kolkata
     ports:
       - "5432:5432"
     volumes:
@@ -47,6 +51,7 @@ services:
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     cpuset: "0"
     volumes:
@@ -64,6 +69,7 @@ services:
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     cpuset: "1"
     volumes:
@@ -81,6 +87,7 @@ services:
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     cpuset: "1"
     volumes:
@@ -94,10 +101,11 @@ services:
       market_sensor:
         condition: service_started
     restart: always
+    env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-    env_file: .env
     cpuset: "1"
     volumes:
       - /ram_disk:/ram_disk
@@ -110,10 +118,11 @@ services:
       market_sensor:
         condition: service_started
     restart: always
+    env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-    env_file: .env
     cpuset: "1"
     volumes:
       - /ram_disk:/ram_disk
@@ -131,10 +140,11 @@ services:
       hmm_engine_sensex:
         condition: service_started
     restart: always
+    env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-    env_file: .env
     cpuset: "1"
     volumes:
       - /ram_disk:/ram_disk
@@ -148,10 +158,11 @@ services:
       timescaledb:
         condition: service_healthy
     restart: always
+    env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-    env_file: .env
     volumes:
       - /ram_disk:/ram_disk
 
@@ -165,12 +176,13 @@ services:
         condition: service_started
     restart: always
     env_file: .env
+    environment:
+      - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
-    environment:
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-      - TZ=Asia/Kolkata
 
   # 8. Strategy Engine (Depends on all above)
   strategy_engine:
@@ -185,10 +197,11 @@ services:
       data_gateway:
         condition: service_started
     restart: always
+    env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-    env_file: .env
     cpuset: "2"
     volumes:
       - /ram_disk:/ram_disk
@@ -202,10 +215,11 @@ services:
       strategy_engine:
         condition: service_started
     restart: always
+    env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-    env_file: .env
     cpuset: "3"
     volumes:
       - /ram_disk:/ram_disk
@@ -219,10 +233,11 @@ services:
       strategy_engine:
         condition: service_started
     restart: always
+    env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-    env_file: .env
     volumes:
       - /ram_disk:/ram_disk
 
@@ -236,12 +251,13 @@ services:
         condition: service_started
     restart: always
     env_file: .env
+    environment:
+      - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     volumes:
       - /ram_disk:/ram_disk
       - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
-    environment:
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-      - TZ=Asia/Kolkata
 
   # 12. Telegram Alerter (Monitoring)
   telegram_alerter:
@@ -252,10 +268,10 @@ services:
       redis:
         condition: service_healthy
     restart: always
+    env_file: .env
     environment:
       - TZ=Asia/Kolkata
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-    env_file: .env
     cpuset: "3"
 
   # 13. Cloud Publisher (Sync to cloud)
@@ -268,13 +284,15 @@ services:
         condition: service_healthy
     restart: always
     env_file: .env
+    environment:
+      - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     cpuset: "3"
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
-    environment:
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-      - TZ=Asia/Kolkata
+
   # 14. Dashboard API & Frontend (UI - depends on all data sources)
   dashboard_api:
     image: trading-app:latest
@@ -289,12 +307,14 @@ services:
       - "8000:8000"
     restart: always
     env_file: .env
+    environment:
+      - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
+      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
-    environment:
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-      - TZ=Asia/Kolkata
+
   dashboard_frontend:
     build:
       context: ./dashboard/frontend
@@ -307,5 +327,4 @@ services:
     environment:
       - TZ=Asia/Kolkata
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-
-# Volumes section removed to enforce host-path mounts
+      - SIMULATION_MODE=false

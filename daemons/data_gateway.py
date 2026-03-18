@@ -133,7 +133,6 @@ class DataGateway:
         self._oi = {s: random.randint(800_000, 1_500_000) for s in SYMBOLS_UNDERLYING}
         self._last_tick_ts = {}
         self._system_halted = False
-        self.last_expiry_sync = 0  # To track when expiries were last fetched
         self._data_flow_alert_sent = False
         self._lot_sizes_fetched = False
         self.sim_mode = False  # Dynamic state
@@ -214,17 +213,21 @@ class DataGateway:
         asyncio.create_task(send_cloud_alert("🚀 DATA GATEWAY: Service active. Monitoring 13 heavyweights + Indices.", alert_type="SYSTEM"))
         self._data_flow_alert_sent = False
 
-        await asyncio.gather(
-            self._mode_controller(),  # New: Dynamic mode manager
-            self._tick_stream(),
-            self._lot_size_scheduler(),
-            self._staleness_watchdog(),
-            self._circuit_breaker_monitor(),
-            self._dynamic_subscription_manager(),
-            self._dynamic_subscription_listener(), # Phase 6
-            self._pcr_ingestion_loop(), # Phase 0: Heuristic PCR ingestion
-            self._run_heartbeat(),      # Phase 9: UI & Observability
-        )
+        try:
+            await asyncio.gather(
+                self._mode_controller(),  # New: Dynamic mode manager
+                self._tick_stream(),
+                self._lot_size_scheduler(),
+                self._staleness_watchdog(),
+                self._circuit_breaker_monitor(),
+                self._dynamic_subscription_manager(),
+                self._dynamic_subscription_listener(), # Phase 6
+                self._pcr_ingestion_loop(), # Phase 0: Heuristic PCR ingestion
+                self._run_heartbeat(),      # Phase 9: UI & Observability
+            )
+        except Exception as e:
+            logger.critical(f"🛑 FATAL: DataGateway sub-task failed: {e}", exc_info=True)
+            raise
 
     async def _run_heartbeat(self):
         from core.health import HeartbeatProvider
