@@ -9,7 +9,6 @@ __pycache__
 data/
 logs/
 *.log
-*.txt
 *.md
 *.zip
 .vscode/
