@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import hashlib
+import pyotp
 from datetime import datetime, timezone
 import redis.asyncio as redis
 from dotenv import load_dotenv
@@ -30,6 +31,7 @@ class ShoonyaDataStreamer:
         self.redis = redis_client
         self.pub_socket = pub_socket
         self.mq_manager = MQManager()
+        self.loop = None
         
         load_dotenv()
         self.host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP")
@@ -153,36 +155,36 @@ class ShoonyaDataStreamer:
             logger.info(f"Subscribed to Base {exch_token}")
             
         # 2. Dynamically fetch deployed symbols from Redis, resolve NFO tokens, and subscribe
-        try:
-            active_strats = self.redis.hgetall("active_strategies")
-            for strat_id_b, config_b in active_strats.items():
-                config = json.loads(config_b)
-                if config.get("enabled", True):
-                    for symbol in config.get("symbols", []):
-                        # Example: If a strategy deployed "NIFTY24FEB26C22000"
-                        resolved_token = get_token(symbol)
-                        if resolved_token:
-                            self.api.subscribe(f"NFO|{resolved_token}")
-                            self.active_tokens[resolved_token] = symbol
-                            logger.info(f"Subscribed to Dynamic NFO|{resolved_token} for {symbol}")
-        except Exception as e:
-            logger.error(f"Error subscribing to dynamic tokens: {e}")
+        async def _subscribe_dynamic():
+            try:
+                active_strats = await self.redis.hgetall("active_strategies")
+                for strat_id_b, config_b in active_strats.items():
+                    config = json.loads(config_b)
+                    if config.get("enabled", True):
+                        for symbol in config.get("symbols", []):
+                            # Example: If a strategy deployed "NIFTY24FEB26C22000"
+                            resolved_token = get_token(symbol)
+                            if resolved_token:
+                                self.api.subscribe(f"NFO|{resolved_token}")
+                                self.active_tokens[resolved_token] = symbol
+                                logger.info(f"Subscribed to Dynamic NFO|{resolved_token} for {symbol}")
+            except Exception as e:
+                logger.error(f"Error subscribing to dynamic tokens: {e}")
+                
+        asyncio.run_coroutine_threadsafe(_subscribe_dynamic(), self.loop)
 
     async def start(self):
         self.loop = asyncio.get_running_loop()
         logger.info("Authenticating with Shoonya APIs via NorenRest...")
         
-        # Required SHA256 conversion for password and appkey (Noren requirement for standard login loop)
-        pwd = hashlib.sha256(self.pwd.encode('utf-8')).hexdigest()
-        u_app_key = '{0}|{1}'.format(self.user, self.app_key)
-        app_key = hashlib.sha256(u_app_key.encode('utf-8')).hexdigest()
+        totp = pyotp.TOTP(self.factor2).now()
         
         res = self.api.login(
             userid=self.user, 
-            password=pwd, 
-            twoFA=self.factor2, 
+            password=self.pwd, 
+            twoFA=totp, 
             vendor_code=self.vc, 
-            api_secret=app_key, 
+            api_secret=self.app_key, 
             imei=self.imei
         )
         
@@ -201,6 +203,9 @@ class ShoonyaDataStreamer:
                 socket_open_callback=self.open_callback
             )
             
+            # 3. Start JIT Subscription Listener for Liquidation/Strategy engines
+            asyncio.create_task(self._dynamic_subscription_listener())
+            
             # Keep alive and monitor (Audit 9.1)
             self._shutdown_event = asyncio.Event()
             logger.info("Gateway keep-alive active. Monitoring WebSocket...")
@@ -212,6 +217,65 @@ class ShoonyaDataStreamer:
                 self.api.close_websocket()
         else:
             logger.error(f"Failed to authenticate with Shoonya. Halting Data Gateway. Details: {res}")
+
+    async def _dynamic_subscription_listener(self):
+        """
+        Listens to Redis 'dynamic_subscriptions' channel for JIT requests.
+        Format: 'EXCH|TOKEN' (e.g., 'NFO|54321') or just 'SYMBOL' (e.g., 'NIFTY24MAR22500CE')
+        """
+        pubsub = self.redis.pubsub()
+        await pubsub.subscribe("dynamic_subscriptions")
+        logger.info("JIT Subscription Listener active for Liquidation & Strategy engines.")
+        
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    data = message["data"].decode('utf-8') if isinstance(message["data"], bytes) else message["data"]
+                    logger.info(f"⚡ JIT Subscription Request Received: {data}")
+                    
+                    if "|" in data:
+                        # Direct exchange|token format
+                        exch, token = data.split("|")
+                        self.api.subscribe(data)
+                        # We don't always know the symbol here, so we might need a lookup
+                        # but Shoonya uses tokens in its 'tk' field anyway.
+                    else:
+                        # Symbol format - resolve to token
+                        token, exch = await self._resolve_symbol_to_token(data)
+                        if token and exch:
+                            self.api.subscribe(f"{exch}|{token}")
+                            self.active_tokens[token] = data
+                            logger.info(f"Subscribed to {data} ({exch}|{token})")
+                        else:
+                            logger.warning(f"Could not resolve token for symbol: {data}")
+                            
+                except Exception as e:
+                    logger.error(f"Error in JIT subscription listener: {e}")
+
+    async def _resolve_symbol_to_token(self, symbol: str) -> tuple[str | None, str | None]:
+        """Resolves a trading symbol to a token and exchange using Shoonya search_scrip."""
+        # Heuristic: If it has 'CE' or 'PE' and starts with NIFTY/BANKNIFTY, it's NFO
+        exch = "NFO"
+        if "SENSEX" in symbol: exch = "BFO"
+        elif any(s in symbol for s in ["RELIANCE", "HDFCBANK", "INFY", "TCS", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "LT"]):
+            exch = "NSE"
+            
+        try:
+            # For options, symbols are like 'NIFTY26MAR22350CE'
+            # For stocks, they are plain 'RELIANCE'
+            res = self.api.search_scrip(exchange=exch, searchtext=symbol)
+            if res and res.get('stat') == 'Ok':
+                values = res.get('values', [])
+                if values:
+                    # Exact match check
+                    for val in values:
+                        if val.get('tsym') == symbol:
+                            return val.get('token'), val.get('exch')
+                    # Fallback to first result if no exact match (Shoonya search is prefix-heavy)
+                    return values[0].get('token'), values[0].get('exch')
+        except Exception as e:
+            logger.error(f"Search scrip failed for {symbol}: {e}")
+        return None, None
 
 async def main():
     logger.info("Starting Shoonya Live Data Gateway...")

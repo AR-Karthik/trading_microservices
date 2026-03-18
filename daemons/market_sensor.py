@@ -845,9 +845,10 @@ class MarketSensor:
         str_data = {"basis_slope": float(np.mean(basis_list[-5:]) if len(basis_list) >= 5 else 0.0),
                     "dist_max_pain": 10.0, "pcr": 0.85}
         
+        cvd_list = list(self.cvd_series)
         div_data = {"price_slope": float(np.diff(prices_arr[-10:]).mean()) if len(prices_arr) >= 10 else 0.0,
                     "pcr_slope": 0.02, 
-                    "cvd_slope": float(np.diff(list(self.cvd_series)[-5:]).mean()) if len(self.cvd_series) >= 5 else 0.0}
+                    "cvd_slope": float(np.diff(cvd_list[-5:]).mean()) if len(cvd_list) >= 5 else 0.0}
 
         s_env = self.scorer._calc_env(env_data)
         s_str = self.scorer._calc_str(str_data)
@@ -1060,6 +1061,9 @@ class MarketSensor:
                 await self._redis.set("cvd_flip_ticks", str(state["cvd_flip_ticks"]))
                 await self._redis.set("gex_sign", state["gex_sign"])
                 await self._redis.set("atr", str(state["atr"]))
+                await self._redis.set("rv", str(state["rv"]))
+                await self._redis.set("asto", str(state["asto"]))
+                await self._redis.set("asto_regime", str(state["asto_regime"]))
                 await self._redis.set("current_dte", str(state.get("dte", 2)))
             
             # COMPOSITE_ALPHA: partitioned and flat legacy
@@ -1083,7 +1087,7 @@ class MarketSensor:
             # ... existing publication logic ...
             
             # GAP FIX: Store individual heavyweight Z-scores for API / Power Five
-            if symbol in TOP_5_HEAVYWEIGHTS:
+            if symbol in TOP_10_HEAVYWEIGHTS:
                 hw_z = state.get("log_ofi_zscore", 0.0)
                 # Store in a dedicated hash for the API
                 await self._redis.hset("power_five_matrix", symbol, json.dumps({

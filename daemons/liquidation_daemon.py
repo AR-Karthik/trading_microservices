@@ -266,9 +266,8 @@ class LiquidationDaemon:
         """Polls market state and tick data to apply exit barriers."""
         asyncio.create_task(send_cloud_alert("🛡️ LIQUIDATION DAEMON: Active and monitoring risk thresholds.", alert_type="SYSTEM"))
         
-        # Subscribe to all supported symbols instead of just TICK.NIFTY50
-        topics = ["TICK.NIFTY50", "TICK.BANKNIFTY", "TICK.SENSEX"]
-        market_sub = self.mq.create_subscriber(Ports.MARKET_DATA, topics=topics)
+        # [Bugfix] Subscribe to ALL ticks using "TICK." prefix to cover JIT option symbols
+        market_sub = self.mq.create_subscriber(Ports.MARKET_DATA, topics=["TICK."])
         state_sub = self.mq.create_subscriber(Ports.MARKET_STATE, topics=["STATE"])
 
         latest_state: dict = {}
@@ -290,30 +289,36 @@ class LiquidationDaemon:
             try:
                 topic, tick = await self.mq.recv_json(market_sub)
                 if topic and tick and self.orphaned_positions:
-                    # Extract the tick's underlying symbol
-                    tick_symbol = str(topic).split(".")[-1]
+                    incoming_symbol = str(topic).split(".")[-1]
                     
-                    # Check Stop Day Loss on every tick cycle
-                    await self._check_stop_day_loss()
-                    
-                    for pos_symbol, pos in list(self.orphaned_positions.items()):
-                        # Dynamically bucket the position by its underlying index
-                        underlying = "UNKNOWN"
-                        if pos_symbol.startswith("BANKNIFTY"):
-                            underlying = "BANKNIFTY"
-                        elif pos_symbol.startswith("SENSEX"):
-                            underlying = "SENSEX"
-                        elif pos_symbol.startswith("NIFTY"):
-                            underlying = "NIFTY50"
+                    # 1. Update global index prices for underlying-based logic
+                    if incoming_symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
+                        await self._check_stop_day_loss()
+                        
+                        # Trigger move-based barriers for all related positions (Bucket Match)
+                        for pos_symbol, pos in list(self.orphaned_positions.items()):
+                            underlying = "UNKNOWN"
+                            if pos_symbol.startswith("BANKNIFTY"): underlying = "BANKNIFTY"
+                            elif pos_symbol.startswith("SENSEX"): underlying = "SENSEX"
+                            elif pos_symbol.startswith("NIFTY"): underlying = "NIFTY50"
                             
-                        # Only evaluate barriers if the tick matches the position's bucket
-                        if underlying == tick_symbol:
-                            await self._evaluate_barriers(pos_symbol, tick, latest_state)
+                            if underlying == incoming_symbol:
+                                await self._evaluate_barriers(pos_symbol, tick, latest_state, is_index_tick=True)
                     
                     # [Hedge Hybrid] Perform periodic hybrid drawdown check
                     await self._check_hybrid_drawdown()
-                    # Perform daily stop loss check
-                    await self._check_stop_day_loss()
+
+                    # 2. Evaluate barriers for the SPECIFIC symbol that just ticked
+                    if incoming_symbol in self.orphaned_positions:
+                        # This is a tick for the actual position (e.g. an Option tick)
+                        await self._evaluate_barriers(incoming_symbol, tick, latest_state, is_index_tick=False)
+                    
+                    # 3. If it's an underlying tick, trigger move-based barriers for all related positions (Prefix Match)
+                    if incoming_symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
+                        for pos_symbol, pos in list(self.orphaned_positions.items()):
+                            if incoming_symbol in pos_symbol: # Simple prefix match
+                                await self._evaluate_barriers(pos_symbol, tick, latest_state, is_index_tick=True)
+
             except Exception as e:
                 logger.error(f"Market monitor error: {e}")
                 await asyncio.sleep(0.5)
@@ -420,8 +425,8 @@ class LiquidationDaemon:
                         total_qty += abs(qty)
                 
                 # Check breach
-                num_lots = max(1, total_qty // 50) # Assuming NIFTY 50-lot base
-                dynamic_limit = limit * num_lots
+                num_lots = max(1, int(total_qty // 50)) # Assuming NIFTY 50-lot base
+                dynamic_limit = float(limit * num_lots)
                 
                 if total_pnl <= -dynamic_limit:
                     logger.critical(f"🛑 HYBRID DRAWDOWN: Parent {p_uuid} P&L ₹{total_pnl:.0f} <= -₹{dynamic_limit:.0f}")
@@ -436,10 +441,10 @@ class LiquidationDaemon:
         except Exception as e:
             logger.error(f"Hybrid Drawdown check error: {e}")
 
-    # ── Barrier Evaluation ────────────────────────────────────────────────────
+    # ── [Audit 11.2] Barrier Evaluation ───────────────────────────────────────
 
-    async def _evaluate_barriers(self, symbol: str, tick: dict, state: dict):
-        pos: dict = self.orphaned_positions.get(symbol)
+    async def _evaluate_barriers(self, symbol: str, tick: dict, state: dict, is_index_tick: bool = False):
+        pos: dict | None = self.orphaned_positions.get(symbol)
         if not pos:
             return
 
@@ -469,21 +474,25 @@ class LiquidationDaemon:
 
         lifecycle = str(pos.get("lifecycle_class") or "KINETIC")
         if lifecycle == "POSITIONAL":
-            await self._evaluate_positional_barriers(symbol, tick, state, pos, rv, vix, atr, current_hmm)
+            await self._evaluate_positional_barriers(symbol, tick, state, pos, rv, vix, atr, current_hmm, is_index_tick)
         elif lifecycle == "ZERO_DTE":
-            # [S-03] ZERO_DTE-specific exit logic
-            await self._evaluate_zero_dte_barriers(symbol, tick, state, pos, rv, vix, atr, current_hmm)
+            await self._evaluate_zero_dte_barriers(symbol, tick, state, pos, rv, vix, atr, current_hmm, is_index_tick)
         else:
-            await self._evaluate_kinetic_barriers(symbol, tick, state, pos, rv, vix, atr, current_hmm)
+            await self._evaluate_kinetic_barriers(symbol, tick, state, pos, rv, vix, atr, current_hmm, is_index_tick)
 
-    async def _evaluate_kinetic_barriers(self, symbol: str, tick: dict, state: dict, pos: dict, rv: float, vix: float, atr: float, current_hmm: str):
-        price = tick.get("price", 0.0)
-        entry = pos.get("price", price)
-        elapsed = time.time() - pos.get("entry_time", time.time())
+    async def _evaluate_kinetic_barriers(self, symbol: str, tick: dict, state: dict, pos: dict, rv: float, vix: float, atr: float, current_hmm: str, is_index_tick: bool):
+        if is_index_tick:
+            # Kinetic barriers are primarily price-based on the symbol itself.
+            # We don't process most of them on index ticks to avoid SL/TP artifacts.
+            return
+            
+        price = float(tick.get("price", 0.0))
+        entry_raw = pos.get("price")
+        entry = float(entry_raw if entry_raw is not None else price)
+        elapsed = time.time() - float(pos.get("entry_time", time.time()))
         action = pos.get("action", "BUY")
 
-
-
+        # [Audit 14.1] Adaptive Threshold Scaling
         sl_mult = float(1.5 if (rv > 0.001 or vix > 18.0) else ATR_SL_MULTIPLIER)
         tp1_mult = float(ATR_TP1_MULTIPLIER)
         tp2_mult = float(ATR_TP_MULTIPLIER)
@@ -513,14 +522,18 @@ class LiquidationDaemon:
         exit_reason = None
         is_partial = False
 
-        # Phase 13.3: Microstructure CVD Flip Exit
+        # Phase 13.3: Microstructure CVD & Alpha Signal Barrier (Additive Fallback)
         try:
-            cvd_raw = await self._redis.get("cvd_score")
+            cvd_raw = await self._redis.get("cvd_flip_ticks") or await self._redis.get("cvd_score")
             cvd = float(cvd_raw or 0.0)
-            if (action == "BUY" and cvd < -CVD_FLIP_EXIT_THRESHOLD) or \
-               (action == "SELL" and cvd > CVD_FLIP_EXIT_THRESHOLD):
-                exit_reason = f"CVD_FLIP_EXIT: Score {cvd:.2f}"
-                await self._record_barrier_exit(symbol, "CVD_FLIP", exit_reason, price, entry)
+            # Alpha Score Flip (Phase 13.4)
+            s_total_raw = await self._redis.get("COMPOSITE_ALPHA") or await self._redis.get("s_total")
+            s_total = float(s_total_raw or 0.0)
+            
+            if (action == "BUY" and (cvd < -CVD_FLIP_EXIT_THRESHOLD or s_total < -40)) or \
+               (action == "SELL" and (cvd > CVD_FLIP_EXIT_THRESHOLD or s_total > 40)):
+                exit_reason = f"SIGNAL_FLIP_EXIT: CVD={cvd:.1f}, S_Total={s_total:.0f}"
+                await self._record_barrier_exit(symbol, "SIGNAL_FLIP", exit_reason, price, entry)
                 await self._attempt_exit(pos, symbol, price, exit_reason)
                 return
         except Exception: pass
@@ -560,51 +573,61 @@ class LiquidationDaemon:
                     exit_reason = f"HMM_SHIFT_SHORT: {entry_hmm} -> {current_hmm}"
             elif price >= sl_short: exit_reason = f"SL_HIT_SHORT: {price:.2f} >= {sl_short:.2f}"
 
-        # [C4-04] Stagnation exit: must check 0.1 ATR price band + time elapsed
+        # [C4-04] Stagnation exit: Optimal Stopping (5-minute timer)
         if not exit_reason and elapsed >= stall_timer:
-            # Check price range within the stall window
-            tick_store_key = f"tick_history:{symbol}"  # [F3-04] Fixed: was 'ticks:', actual key is 'tick_history:'
-            try:
-                recent_prices_raw = await self._redis.lrange(tick_store_key, -50, -1)
-                if recent_prices_raw and len(recent_prices_raw) >= 2:
-                    recent_prices = [float(p) for p in recent_prices_raw]
-                    price_range = max(recent_prices) - min(recent_prices)
-                    if price_range < 0.1 * atr:
-                        exit_reason = f"THETA_STALL: Range {price_range:.2f} < 0.1*ATR({atr:.2f}) within {elapsed:.0f}s"
-                    # else: price moved enough, don't stall-exit
-                else:
-                    # Fallback: if we can't check range, use time-only
-                    exit_reason = f"THETA_STALL: {elapsed:.0f}s >= {stall_timer:.0f}s (no range data)"
-            except Exception:
-                exit_reason = f"THETA_STALL: {elapsed:.0f}s >= {stall_timer:.0f}s"
+            # Regime-Aware Stall (Phase 15.3 - Additive Fallback)
+            hurst_raw = await self._redis.get("hurst") or await self._redis.get("hurst_exponent")
+            hurst = float(hurst_raw or 0.5)
+            # If Hurst < 0.45 (Mean Reverting), stall-exit more aggressively
+            if hurst < 0.45 and elapsed >= 180:
+                exit_reason = f"REGIME_STALL: Hurst {hurst:.2f} (Mean Reverting) @ {elapsed:.0f}s"
+            else:
+                # Check price range within the stall window
+                tick_store_key = f"tick_history:{symbol}"
+                try:
+                    recent_prices_raw = await self._redis.lrange(tick_store_key, -50, -1)
+                    if recent_prices_raw and len(recent_prices_raw) >= 10:
+                        recent_prices = [float(p) for p in recent_prices_raw]
+                        price_range = max(recent_prices) - min(recent_prices)
+                        # Optimal stopping: if range < 0.1 ATR, exit as theta is eating premium
+                        if price_range < 0.1 * atr:
+                            exit_reason = f"OPTIMAL_STOPPING: Range {price_range:.2f} < 0.1*ATR({atr:.2f}) over {elapsed:.0f}s"
+                    elif elapsed >= stall_timer:
+                        # Hard fallback stall
+                        exit_reason = f"THETA_STALL: {elapsed:.0f}s >= {stall_timer:.0f}s (No Range Data)"
+                except Exception:
+                    exit_reason = f"THETA_STALL: {elapsed:.0f}s >= {stall_timer:.0f}s"
 
         if exit_reason:
             await self._record_barrier_exit(symbol, "KINETIC", exit_reason, float(price), float(entry))
             if is_partial:
                 await self._attempt_partial_exit(pos, symbol, float(price), exit_reason, 0.70)
+                # Phase 15.4: Set Runner Active for remaining 30%
+                pos["runner_active"] = True
+                logger.info(f"🏃 RUNNER ACTIVATED for {symbol} after Partial Exit TP1")
             else:
                 await self._attempt_exit(pos, symbol, float(price), exit_reason)
 
-    async def _evaluate_positional_barriers(self, symbol: str, tick: dict, state: dict, pos: dict, rv: float, vix: float, atr: float, current_hmm: str):
+    async def _evaluate_positional_barriers(self, symbol: str, tick: dict, state: dict, pos: dict, rv: float, vix: float, atr: float, current_hmm: str, is_index_tick: bool):
         """Hardened Positional Barriers (Spec 11.3)"""
+        # 1. Structural Breach: Underlying breaches short strike (ONLY check on Index Tick)
+        if is_index_tick:
+            spot = float(tick.get("price", 0.0))
+            short_strikes = pos.get("short_strikes") or {}
+            call_strike = short_strikes.get("call", 999999)
+            put_strike = short_strikes.get("put", 0)
+            
+            if spot > call_strike or spot < put_strike:
+                exit_reason = f"STRUCTURAL_BREACH: Spot {spot:.0f} outside [{put_strike}, {call_strike}]"
+                await self._record_barrier_exit(symbol, "STRUCTURAL", exit_reason, spot, 0)
+                await self._attempt_exit(pos, symbol, 0, exit_reason)
+            return
+
+        # Remaining barriers are price-based on the OPTION symbol itself
         price = float(tick.get("price", 0.0))
         entry = float(pos.get("price", 0.0))
         parent_uuid = pos.get("parent_uuid")
         if not parent_uuid: return
-
-        # 1. Structural Breach: Underlying breaches short strike
-        short_strikes = pos.get("short_strikes") or {}
-        spot_raw = state.get("spot")
-        spot = float(spot_raw) if spot_raw is not None else price
-        
-        call_strike = short_strikes.get("call", 999999)
-        put_strike = short_strikes.get("put", 0)
-        
-        if spot > call_strike or spot < put_strike:
-            exit_reason = f"STRUCTURAL_BREACH: Spot {spot:.0f} outside [{put_strike}, {call_strike}]"
-            await self._record_barrier_exit(symbol, "STRUCTURAL", exit_reason, price, entry)
-            await self._attempt_exit(pos, symbol, price, exit_reason)
-            return
 
         # 2. DTE Vertical Barrier (Spec 11.3)
         expiry_date = pos.get("expiry_date")
@@ -692,15 +715,30 @@ class LiquidationDaemon:
                     await self._attempt_exit(pos, symbol, price, exit_reason)
                     return
 
-    async def _evaluate_zero_dte_barriers(self, symbol: str, tick: dict, state: dict, pos: dict, rv: float, vix: float, atr: float, current_hmm: str):
+    async def _evaluate_zero_dte_barriers(self, symbol: str, tick: dict, state: dict, pos: dict, rv: float, vix: float, atr: float, current_hmm: str, is_index_tick: bool):
         """
         [S-03] ZERO_DTE Exit Logic:
         - Profit Target: 50% of credit received
         - Aggressive Stop: Exit if underlying moves > 0.5% from inception
         """
+        if is_index_tick:
+            # 2. Underlying Move Stop (0.5% from inception)
+            price = float(tick.get("price", 0.0))
+            inception_spot = float(pos.get("inception_spot", entry))
+            if inception_spot > 0:
+                move_pct = abs(price - inception_spot) / inception_spot * 100
+                if move_pct > 0.5:
+                    exit_reason = f"ZERO_DTE_STOP: Spot moved {move_pct:.2f}% > 0.5% from inception"
+                    await self._record_barrier_exit(symbol, "ZERO_DTE_STOP", exit_reason, price, entry)
+                    await self._attempt_exit(pos, symbol, price, exit_reason)
+                    return
+            return
+
+        # Price-based barriers on the symbol itself
         price = float(tick.get("price", 0.0))
         entry = float(pos.get("price", 0.0))
-
+        inception_spot = float(pos.get("inception_spot", entry))
+        
         # 1. Credit-based Take Profit (50%)
         initial_credit = float(pos.get("initial_credit", 0.0))
         if initial_credit > 0:
@@ -708,16 +746,6 @@ class LiquidationDaemon:
             if current_value / initial_credit <= 0.50:  # 50% decayed = 50% profit
                 exit_reason = f"ZERO_DTE_TP: Value {current_value:.2f} <= 50% of credit {initial_credit:.2f}"
                 await self._record_barrier_exit(symbol, "ZERO_DTE_TP", exit_reason, price, entry)
-                await self._attempt_exit(pos, symbol, price, exit_reason)
-                return
-
-        # 2. Underlying Move Stop (0.5% from inception)
-        inception_spot = float(pos.get("inception_spot", entry))
-        if inception_spot > 0:
-            move_pct = abs(price - inception_spot) / inception_spot * 100
-            if move_pct > 0.5:
-                exit_reason = f"ZERO_DTE_STOP: Spot moved {move_pct:.2f}% > 0.5% from inception"
-                await self._record_barrier_exit(symbol, "ZERO_DTE_STOP", exit_reason, price, entry)
                 await self._attempt_exit(pos, symbol, price, exit_reason)
                 return
 
@@ -848,15 +876,19 @@ class LiquidationDaemon:
 
     async def _attempt_exit(self, pos: dict, symbol: str, price: float, reason: str):
         """Fires a SELL order with HTTP 400 mitigation."""
-        qty = abs(pos.get("quantity", 0))
+        current_qty = pos.get("quantity", 0)
+        qty = abs(current_qty)
         if qty == 0:
             self.orphaned_positions.pop(symbol, None)
             return
 
+        # To exit a SHORT (qty < 0), we must BUY. To exit a LONG (qty > 0), we must SELL.
+        action = "BUY" if current_qty < 0 else "SELL"
+
         order = {
             "order_id": str(uuid.uuid4()),
             "symbol": symbol,
-            "action": "SELL",
+            "action": action,
             "quantity": qty,
             "order_type": "MARKET",
             "strategy_id": "LIQUIDATION",
