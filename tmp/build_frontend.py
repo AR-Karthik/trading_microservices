@@ -1,4 +1,6 @@
-<!DOCTYPE html>
+import os
+
+html_content = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -615,3 +617,7 @@
     </script>
 </body>
 </html>
+'''
+
+with open(r"c:\Users\karth\.gemini\antigravity\scratch\trading_microservices\dashboard\frontend\index.html", "w", encoding="utf-8") as f:
+    f.write(html_content)

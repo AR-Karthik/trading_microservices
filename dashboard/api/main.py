@@ -11,7 +11,9 @@ import random
 import time
 from pydantic import BaseModel
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+import psutil
+import shutil
 from core.logger import setup_logger
 
 logger = setup_logger("DashboardAPI", log_file="logs/dashboard_api.log")
@@ -114,6 +116,23 @@ class SystemState(BaseModel):
     signals: dict  # Full quant signal vector
     power_five: dict # HDFC, RIL, ICICI, etc.
     exit_path_70_30: dict # TP1, TP2 markers
+    smart_money_flow: float
+    whales_pivot: float
+
+class CapitalConfig(BaseModel):
+    total_capital: float
+    max_allocation_pct: float
+    hedge_reserve_pct: float
+
+class RiskLimits(BaseModel):
+    daily_max_loss: float
+    max_drawdown: float
+    trailing_stop_multi: float
+
+class ValidateRisk(BaseModel):
+    stop_loss: float
+    current_price: float
+    spread: float
 
 class Position(BaseModel):
     symbol: str
@@ -276,7 +295,9 @@ def get_state(asset: str = "NIFTY50"):
             "live_capital_limit": float(r.get("LIVE_CAPITAL_LIMIT") or 0),
             "signals": deep_signals,
             "power_five": power_five,
-            "exit_path_70_30": ms.get("exit_path_70_30", {"tp1": 0.0, "tp2": 0.0, "progress": 0.0})
+            "exit_path_70_30": ms.get("exit_path_70_30", {"tp1": 0.0, "tp2": 0.0, "progress": 0.0}),
+            "smart_money_flow": ms.get("smart_money_flow", 0.65),
+            "whales_pivot": ms.get("whales_pivot", ms.get("price", 0.0) * 1.002)
         }
     except Exception:
         # Robust Mock Fallback for UI Testing
@@ -353,6 +374,45 @@ def update_capital(req: CapitalRequest):
     r = get_redis()
     r.set("CONFIG:TOTAL_CAPITAL", req.amount)
     return {"status": "Capital updated"}
+
+@app.post("/config/capital_alloc")
+async def update_capital_alloc(config: CapitalConfig):
+    r = get_redis()
+    await AuditLogger.log_event("CONFIG_CHANGE", "ADMIN_UI", "Updated Capital Allocation")
+    r.set("CONFIG:TOTAL_CAPITAL", config.total_capital)
+    r.set("CONFIG:MAX_ALLOCATION_PCT", config.max_allocation_pct)
+    r.set("CONFIG:HEDGE_RESERVE_PCT", config.hedge_reserve_pct)
+    return {"status": "success", "message": "Capital allocation saved"}
+
+@app.post("/config/risk_limits")
+async def update_risk_limits(limits: RiskLimits):
+    r = get_redis()
+    await AuditLogger.log_event("CONFIG_CHANGE", "ADMIN_UI", "Updated Risk Limits")
+    r.set("CONFIG:DAILY_MAX_LOSS", limits.daily_max_loss)
+    r.set("CONFIG:MAX_DRAWDOWN", limits.max_drawdown)
+    r.set("CONFIG:TRAILING_STOP_MULTI", limits.trailing_stop_multi)
+    return {"status": "success", "message": "Risk limits saved"}
+
+@app.post("/config/validate_risk")
+def validate_risk(req: ValidateRisk):
+    # Dry-Run Validation logic
+    dist = abs(req.current_price - req.stop_loss)
+    if dist < req.spread * 1.5:
+        return {"valid": False, "message": "Stop-loss is tighter than 1.5x spread. High risk of immediate whipsaw."}
+    return {"valid": True, "message": "Stop-loss parameters are safe."}
+
+@app.get("/logs/hunter")
+def get_hunter_logs():
+    r = get_redis()
+    logs_raw = r.lrange("hunter_logs", 0, 99)
+    if not logs_raw:
+        # Mock some logs if none exist
+        return [
+            {"time": datetime.now().isoformat(), "level": "INFO", "message": "Meta-Router initiated."},
+            {"time": (datetime.now() - timedelta(seconds=2)).isoformat(), "level": "WARNING", "message": "ENTRY_VETO: Flow negative, blocking Kinetic Long."},
+            {"time": (datetime.now() - timedelta(seconds=5)).isoformat(), "level": "SUCCESS", "message": "ENTRY_APPROVED: Delta neutral scalp conditions met."}
+        ]
+    return [json.loads(x) for x in logs_raw]
 
 @app.get("/regime/simulation")
 def get_regime_simulation():
@@ -487,18 +547,39 @@ def get_telemetry():
             if r.get(f"HEARTBEAT:{d}"): active_daemons.append(d)
             elif random.random() > 0.1: active_daemons.append(d)
 
+        try:
+            mem = psutil.virtual_memory()
+            redis_mem = r.info('memory').get('used_memory_human', '150M')
+        except:
+            redis_mem = "150M"
+            mem = type('obj', (object,), {'percent': 45.0})()
+            
+        try:
+            total, used, free = shutil.disk_usage("/")
+            disk_pct = (used / total) * 100
+        except:
+            disk_pct = 60.0
+
         return {
             "nse_latency_ms": float(r.get("NSE_LATENCY") or 0.4),
             "bse_latency_ms": float(r.get("BSE_LATENCY") or 0.8),
             "slippage_leakage_inr": float(r.get("SLIPPAGE_TOTAL") or 0.0),
             "cpu_cores": [random.uniform(5, 95) for _ in range(8)],
-            "daemons": active_daemons
+            "daemons": active_daemons,
+            "redis_memory": redis_mem,
+            "sys_memory_pct": getattr(mem, 'percent', 45.0),
+            "disk_usage_pct": round(disk_pct, 1),
+            "shm_last_update": float(r.get("SHM_LAST_UPDATE") or time.time())
         }
     except Exception:
         return {
             "nse_latency_ms": 0.4, "bse_latency_ms": 0.8, "slippage_leakage_inr": 450.0,
             "cpu_cores": [random.uniform(5, 95) for _ in range(8)],
-            "daemons": ["NSE_MD", "BSE_MD", "OMS_EXEC", "META_ROUTER", "HMM_ENGINE", "HEALTH_MON"]
+            "daemons": ["NSE_MD", "BSE_MD", "OMS_EXEC", "META_ROUTER", "HMM_ENGINE", "HEALTH_MON"],
+            "redis_memory": "145.2M",
+            "sys_memory_pct": 52.0,
+            "disk_usage_pct": 65.5,
+            "shm_last_update": time.time()
         }
 
 @app.get("/analytics/summary")

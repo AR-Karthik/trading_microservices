@@ -254,6 +254,26 @@ async def system_halt():
     }, merge=True)
     return {"status": "Halt QUEUED in Firestore"}
 
+@app.post("/config/capital_alloc")
+async def update_capital_alloc(config: dict):
+    vm_data = await smart_proxy("config/capital_alloc", method="POST", body=config)
+    return vm_data if vm_data else {"status": "error", "message": "VM offline"}
+
+@app.post("/config/risk_limits")
+async def update_risk_limits(limits: dict):
+    vm_data = await smart_proxy("config/risk_limits", method="POST", body=limits)
+    return vm_data if vm_data else {"status": "error", "message": "VM offline"}
+
+@app.post("/config/validate_risk")
+async def validate_risk(req: dict):
+    vm_data = await smart_proxy("config/validate_risk", method="POST", body=req)
+    return vm_data if vm_data else {"valid": False, "message": "Validation requires active VM"}
+
+@app.get("/logs/hunter")
+async def get_hunter_logs():
+    vm_data = await smart_proxy("logs/hunter")
+    return vm_data if vm_data else []
+
 @app.get("/regime/simulation")
 async def get_regime_sim():
     vm_data = await smart_proxy("regime/simulation")
