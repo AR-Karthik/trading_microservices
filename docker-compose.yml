@@ -79,7 +79,7 @@ services:
   hmm_engine_nifty:
     image: trading-app:latest
     container_name: hmm_engine_nifty
-    command: python -m daemons.hmm_engine --asset NIFTY --core 1
+    command: python -m daemons.hmm_engine --asset NIFTY50 --core 1
     depends_on:
       market_sensor:
         condition: service_started
@@ -292,6 +292,19 @@ services:
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
+
+  fii_dii_fetcher:
+    image: trading-app:latest
+    container_name: fii_dii_fetcher
+    command: python -m daemons.fii_dii_fetcher
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+    env_file: .env
+    environment:
+      - TZ=Asia/Kolkata
+    cpuset: "3"
 
   # 14. Dashboard API & Frontend (UI - depends on all data sources)
   dashboard_api:

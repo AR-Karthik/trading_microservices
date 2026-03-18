@@ -203,8 +203,23 @@
         });
 
 
-        const WarRoom = memo(({ state, positions, mode, handlePanic, handleHalt, portfolioDelta }) => {
-            const [selectedIdx, setSelectedIdx] = useState('NIFTY50');
+        const InstitutionalPulse = memo(({ data }) => (
+            <div className="w-full mt-4 border-t border-white/5 pt-4">
+                <div className="text-[9px] font-black text-gray-500 uppercase mb-3 tracking-widest">Institutional Flow (NSE)</div>
+                <div className="grid grid-cols-2 gap-4">
+                    {data.map((item, idx) => (
+                        <div key={idx} className="flex justify-between items-center bg-white/5 p-2 rounded-lg">
+                            <span className="text-[10px] font-bold text-gray-400">{item.category}</span>
+                            <span className={`text-[11px] font-black mono ${item.netValue >= 0 ? 'text-success' : 'text-danger'}`}>
+                                {item.netValue >= 0 ? '+' : ''}{(item.netValue / 100).toFixed(1)}Cr
+                            </span>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        ));
+
+        const WarRoom = memo(({ state, positions, mode, handlePanic, handleHalt, portfolioDelta, fiiDiiData, selectedIdx, setSelectedIdx }) => {
             const powerData = state.power_five?.[selectedIdx] || {};
             const signals = state.signals || {};
 
@@ -237,7 +252,21 @@
                         <div className={`oled-card p-5 rounded-2xl flex flex-col items-center justify-center h-48 border-l-4 transition-all duration-500 ${state.hmm_regime === 'TRENDING' ? 'border-success bg-success/5 shadow-[inset_0_0_40px_rgba(63,185,80,0.05)]' : (state.hmm_regime === 'CRASH' ? 'border-danger bg-danger/5 animate-panic' : 'border-accent bg-accent/5')}`}>
                             <span className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-2">Citadel Indicator</span>
                             <div className="text-3xl font-black uppercase text-white tracking-tighter">{state.hmm_regime}</div>
-                            <div className={`mt-2 px-3 py-1 rounded text-[10px] font-bold ${state.alpha_score > 0 ? 'bg-success/20 text-success' : 'bg-danger/20 text-danger'}`}>Alpha: {state.alpha_score.toFixed(1)}</div>
+                            <div className="flex gap-4 mt-2">
+                                <div className={`px-2 py-0.5 rounded text-[10px] font-bold ${state.alpha_score > 0 ? 'bg-success/20 text-success' : 'bg-danger/20 text-danger'}`}>Alpha: {state.alpha_score.toFixed(1)}</div>
+                                <div className={`px-2 py-0.5 rounded text-[10px] font-bold ${signals.change_pct >= 0 ? 'bg-success/20 text-success' : 'bg-danger/20 text-danger'}`}>{signals.change_pct > 0 ? '+' : ''}{signals.change_pct?.toFixed(2)}%</div>
+                            </div>
+                            
+                            <div className="flex gap-6 mt-3 border-t border-white/5 pt-3 w-full justify-center">
+                                <div className="text-center">
+                                    <div className="text-[7px] text-gray-500 font-black uppercase">RSI (14)</div>
+                                    <div className={`text-[11px] font-black mono ${signals.rsi > 70 ? 'text-danger' : (signals.rsi < 30 ? 'text-success' : 'text-accent')}`}>{signals.rsi?.toFixed(1)}</div>
+                                </div>
+                                <div className="text-center">
+                                    <div className="text-[7px] text-gray-500 font-black uppercase">PCR (OI)</div>
+                                    <div className="text-[11px] font-black mono text-warning">{signals.pcr?.toFixed(2)}</div>
+                                </div>
+                            </div>
                             <div className="mt-4 flex gap-4 items-center w-full px-2">
                                 <ADXSpeedometer adx={signals.adx || 20} />
                                 <div className="flex-1">
@@ -247,6 +276,13 @@
                                         multiplier={signals.asto_multiplier || 3.0} 
                                     />
                                 </div>
+                            </div>
+                            
+                            {/* NEW: Price Walls & Gamma Flip */}
+                            <div className="w-full mt-4 flex justify-between px-2 text-[8px] font-black mono uppercase tracking-tighter text-gray-400">
+                                <div>Call Wall: <span className="text-rose-400">{signals.call_wall}</span></div>
+                                <div>Gamma Flip: <span className="text-warning">{signals.gamma_flip?.toFixed(0)}</span></div>
+                                <div>Put Wall: <span className="text-emerald-400">{signals.put_wall}</span></div>
                             </div>
                         </div>
 
@@ -265,6 +301,7 @@
                                 <div className="text-gray-400">TP2: <span className="text-accent">{(state.exit_path_70_30?.tp2 || 0).toFixed(1)}</span></div>
                             </div>
                             <DeltaThermometer delta={portfolioDelta.NIFTY50 || 0} threshold={portfolioDelta.threshold || 0.15} />
+                            <InstitutionalPulse data={fiiDiiData} />
                         </div>
                     </div>
 
@@ -283,6 +320,11 @@
                                                 {p.stall_timer > 300 && <span className="bg-warning/20 text-warning text-[8px] px-1 rounded font-black animate-pulse">STALL</span>}
                                             </div>
                                             <div className="text-[10px] text-gray-500 uppercase font-black">{p.strategy_id}</div>
+                                            <div className="flex gap-2 mt-1 text-[8px] font-bold text-gray-600 mono uppercase tracking-tighter">
+                                                <span className="bg-white/5 px-1 rounded text-gray-400">UID: {p.parent_uuid?.slice(0, 8)}</span>
+                                                <span>Δ: <span className={p.delta > 0 ? 'text-success' : 'text-danger'}>{p.delta?.toFixed(2)}</span></span>
+                                                <span>Θ: <span className="text-warning">{p.theta?.toFixed(2)}</span></span>
+                                            </div>
                                         </div>
                                         <div className="text-center">
                                             <div className="text-[9px] text-gray-600 font-bold uppercase">Stop (ATR)</div>
@@ -872,8 +914,10 @@
                 alpha_score: 0, hmm_regime: 'UNKNOWN', gex_sign: 'UNKNOWN',
                 system_halted: false, macro_lockdown: false,
                 available_margin_paper: 0, available_margin_live: 0,
-                signals: {}, power_five: {}, exit_path_70_30: { tp1: 0, tp2: 0, progress: 0 }
+                signals: {}, power_five: {}, exit_path_70_30: { tp1: 0, tp2: 0, progress: 0 },
+                primary_asset: 'NIFTY50'
             });
+            const [selectedIdx, setSelectedIdx] = useState('NIFTY50');
             const [positions, setPositions] = useState([]);
             const [evolution, setEvolution] = useState({ leaderboard: [], transition_matrix: [], data_mix: { seed: 50, live: 50 } });
             const [telemetry, setTelemetry] = useState({ nse_latency_ms: 0, bse_latency_ms: 0, slippage_leakage_inr: 0, cpu_cores: [0, 0, 0] });
@@ -881,6 +925,7 @@
             const [simulation, setSimulation] = useState({ engine_ranking: [], equity_growth: [] });
             const [barrierData, setBarrierData] = useState({ summary: { UPPER: 0, LOWER: 0, VERTICAL: 0, PANIC: 0 }, feed: [], total: 0 });
             const [sizing, setSizing] = useState({ current_atr: 20, max_risk_per_trade: 2500, unit_size_base: 125, assets: [] });
+            const [fiiDiiData, setFiiDiiData] = useState([]);
             
             // Phase 2: Vault State
             const [vaultAnalytics, setVaultAnalytics] = useState({ equity_curve: [] });
@@ -913,8 +958,8 @@
 
             const fetchData = async () => {
                 try {
-                    const [s, p, e, t, a, sim, ba, sz, v_an, v_sum, v_reg, d_therm] = await Promise.all([
-                        fetch(`${API_BASE}/state`).then(r => r.json()),
+                    const [s, p, e, t, a, sim, ba, sz, v_an, v_sum, v_reg, d_therm, fd] = await Promise.all([
+                        fetch(`${API_BASE}/state?asset=${selectedIdx}`).then(r => r.json()),
                         fetch(`${API_BASE}/portfolio?mode=${mode}`).then(r => r.json()),
                         fetch(`${API_BASE}/models/evolution`).then(r => r.json()),
                         fetch(`${API_BASE}/health/telemetry`).then(r => r.json()),
@@ -926,6 +971,7 @@
                         fetch(`${API_BASE}/analytics/summary?mode=${mode}`).then(r => r.json()),
                         fetch(`${API_BASE}/analytics/regime?mode=${mode}`).then(r => r.json()),
                         fetch(`${API_BASE}/portfolio/delta`).then(r => r.json()),
+                        fetch(`${API_BASE}/analytics/fiidii`).then(r => r.json()),
                     ]);
                     setState(s);
                     setPositions(p);
@@ -939,6 +985,7 @@
                     setVaultSummary(v_sum);
                     setRegimeAttribution(v_reg);
                     setPortfolioDelta(d_therm);
+                    setFiiDiiData(fd);
                     // Update capitals from backend only on initial load or if they match the default
                     // In a production system, we'd use a 'lastSync' timestamp to avoid overwriting user edits
                     if (state.paper_capital_limit === 0 && paperCapital === "1000000") {
@@ -1038,7 +1085,7 @@
                     </nav>
 
                     <main className="flex-1 p-10 overflow-y-auto scroll-hide bg-black">
-                        {activeTab === 'warroom' && <WarRoom state={state} positions={positions} mode={mode} handlePanic={handlePanic} handleHalt={handleHalt} portfolioDelta={portfolioDelta} />}
+                        {activeTab === 'warroom' && <WarRoom state={state} positions={positions} mode={mode} handlePanic={handlePanic} handleHalt={handleHalt} portfolioDelta={portfolioDelta} fiiDiiData={fiiDiiData} />}
                         {activeTab === 'playground' && <Playground 
                             localEngine={localEngine} 
                             setLocalEngine={setLocalEngine} 

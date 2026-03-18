@@ -122,6 +122,9 @@ class Position(BaseModel):
     avg_price: float
     realized_pnl: float
     unrealized_pnl: float
+    parent_uuid: str
+    delta: float
+    theta: float
 
 class StrategyStatus(BaseModel):
     name: str
@@ -178,12 +181,14 @@ def get_metrics():
     ]
     return "\n".join(metrics)
 
-# D-05: /state was dead code inside /metrics — now a proper endpoint
+# D-05: /state now supports asset switching [API-01]
 @app.get("/state")
-def get_state():
+def get_state(asset: str = "NIFTY50"):
     try:
         r = get_redis()
         indices = ["NIFTY50", "BANKNIFTY", "SENSEX"]
+        if asset not in indices: asset = "NIFTY50"
+        
         index_states = {}
         for asset in indices:
             st_raw = r.get(f"latest_market_state:{asset}")
@@ -200,7 +205,13 @@ def get_state():
                 "price": st.get("price", 0.0),
                 "asto": st.get("asto", 0.0),
                 "asto_regime": st.get("asto_regime", 0),
-                "asto_multiplier": st.get("asto_multiplier", 3.0)
+                "asto_multiplier": st.get("asto_multiplier", 3.0),
+                "rsi": st.get("rsi", 50.0),
+                "pcr": st.get("pcr", 0.85),
+                "change_pct": st.get("change_pct", 0.0),
+                "call_wall": r.get(f"CALL_WALL:{asset}") or "—",
+                "put_wall": r.get(f"PUT_WALL:{asset}") or "—",
+                "oi_accel": float(r.get(f"OI_ACCEL:{asset}") or 0.0)
             }
 
         ms = json.loads(r.get("latest_market_state:NIFTY50") or r.get("latest_market_state") or "{}")
@@ -216,10 +227,22 @@ def get_state():
             "atr":        ms.get("atr", 20.0),
             "basis_z":    ms.get("basis_zscore", 0.0),
             "cvd_flips":  ms.get("cvd_flip_ticks", 0),
-            "atm_iv":     float(r.get("atm_iv") or ms.get("atm_iv", 0.18)),
+            "cvd_flips":  ms.get("cvd_flip_ticks", 0),
+            "atm_iv":     float(r.get(f"LIVE_IV:{asset}") or r.get("atm_iv") or ms.get("atm_iv", 0.18)),
             "asto":       ms.get("asto", 0.0),
             "asto_regime": ms.get("asto_regime", 0),
             "asto_multiplier": ms.get("asto_multiplier", 3.0),
+            "rsi": ms.get("rsi", 50.0),
+            "pcr": ms.get("pcr", 0.85),
+            "change_pct": ms.get("change_pct", 0.0),
+            "call_wall": r.get(f"CALL_WALL:{asset}") or "—",
+            "put_wall": r.get(f"PUT_WALL:{asset}") or "—",
+            "oi_accel": float(r.get(f"OI_ACCEL:{asset}") or 0.0),
+            "gamma_flip": ms.get("price", 0.0) * 0.995, # Mock/Calculated
+            "price_walls": {
+                "support": [ms.get("price", 0.0) * 0.99, ms.get("price", 0.0) * 0.98],
+                "resistance": [ms.get("price", 0.0) * 1.01, ms.get("price", 0.0) * 1.02]
+            }
         }
 
         power_five = {}
@@ -236,10 +259,11 @@ def get_state():
 
         return {
             "source": "VM_DIRECT",
-            "alpha_score": index_states["NIFTY50"]["score"],
-            "hmm_regime": index_states["NIFTY50"]["regime"],
+            "alpha_score": index_states[asset]["score"],
+            "hmm_regime": index_states[asset]["regime"],
             "index_states": index_states,
-            "gex_sign": r.get("gex_sign:NIFTY50") or "UNKNOWN",
+            "primary_asset": asset,
+            "gex_sign": r.get(f"gex_sign:{asset}") or "UNKNOWN",
             "system_halted": r.get("SYSTEM_HALTED") == "True",
             "macro_lockdown": r.get("MACRO_EVENT_LOCKDOWN") == "True",
             "available_margin_paper": float(r.get("CASH_COMPONENT_PAPER") or 0) + float(r.get("COLLATERAL_COMPONENT_PAPER") or 0),
@@ -592,7 +616,10 @@ def get_portfolio(mode: str = "Paper"):
                     positions.append({
                         "symbol": sym, "strategy_id": row['strategy_id'], "quantity": qty,
                         "avg_price": avg_p, "realized_pnl": float(row['realized_pnl']),
-                        "unrealized_pnl": unrealized, "stall_timer": stall, "atr_stop": round(atr_stop, 2)
+                        "unrealized_pnl": unrealized, "stall_timer": stall, "atr_stop": round(atr_stop, 2),
+                        "parent_uuid": row.get('parent_uuid', 'NONE'),
+                        "delta": float(row.get('delta', 0.0)),
+                        "theta": float(row.get('theta', 0.0))
                     })
         return positions
     except Exception:
@@ -624,6 +651,12 @@ async def panic(mode: str = "Paper"):
     }
     r.publish("panic_channel", json.dumps(payload))
     return {"status": "Panic signal sent"}
+
+@app.get("/audit")
+def get_audit():
+    r = get_redis()
+    events = r.lrange("audit_trail", 0, 99)
+    return [json.loads(e) for e in events]
 
 @app.get("/signals/history")
 def get_signal_history(limit: int = 100):
@@ -744,6 +777,17 @@ def get_sizing_inspector():
         "assets": assets_data
     }
 
+
+@app.get("/analytics/fiidii")
+def get_fii_dii():
+    r = get_redis()
+    raw = r.get("latest_fii_dii")
+    if raw:
+        return json.loads(raw)
+    return [
+        {"category": "FII", "buyValue": 0, "sellValue": 0, "netValue": 0, "date": "—"},
+        {"category": "DII", "buyValue": 0, "sellValue": 0, "netValue": 0, "date": "—"}
+    ]
 
 # --- Static Files (Serve Frontend) ---
 # NOTE: Mount this AFTER all API routes to avoid shadowing

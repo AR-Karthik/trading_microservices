@@ -19,6 +19,7 @@ import json
 import time
 import os
 import sys
+import collections
 from collections import deque
 import redis.asyncio as redis # type: ignore
 
@@ -88,11 +89,21 @@ async def init_db(pool):
                 initial_credit NUMERIC(15, 2) DEFAULT 0.0,
                 short_strikes JSONB DEFAULT '{}',
                 realized_pnl NUMERIC(15, 2) DEFAULT 0.0,
+                delta NUMERIC(15, 4) DEFAULT 0.0,
+                theta NUMERIC(15, 4) DEFAULT 0.0,
                 execution_type TEXT NOT NULL DEFAULT 'Paper',
                 updated_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY (symbol, strategy_id, parent_uuid, execution_type)  -- [F6-01]
             );
         """)
+
+        # [D-44] Ensure delta and theta columns exist for existing tables
+        try:
+            await conn.execute("ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS delta NUMERIC(15, 4) DEFAULT 0.0;")
+            await conn.execute("ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS theta NUMERIC(15, 4) DEFAULT 0.0;")
+            logger.info("portfolio schema updated with delta/theta columns.")
+        except Exception as e:
+            logger.warning(f"Portfolio ALTER failed (already exists?): {e}")
         
         try:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_strategy ON portfolio (strategy_id);")
@@ -107,7 +118,7 @@ class PaperBridge:
         self.redis = redis_client
         self.trade_pub_socket = self.mq.create_publisher(Ports.TRADE_EVENTS)
         self.order_timestamps = deque()
-        self.total_realized_pnl = 0.0
+        self.total_realized_pnl: dict[str, float] = collections.defaultdict(float)
 
     async def _reconnect_pool(self):
         """Attempt to reconnect the DB pool on failure."""
@@ -142,9 +153,9 @@ class PaperBridge:
                 INSERT INTO portfolio (
                     symbol, strategy_id, parent_uuid, underlying, lifecycle_class, 
                     expiry_date, quantity, avg_price, initial_credit, short_strikes, 
-                    execution_type, updated_at, has_calendar_risk
+                    delta, theta, execution_type, updated_at, has_calendar_risk
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 """,
                 symbol, strategy_id, parent_uuid, 
                 execution.get('underlying'), 
@@ -153,6 +164,8 @@ class PaperBridge:
                 qty, price, 
                 float(execution.get('initial_credit', 0.0)),
                 json.dumps(execution.get('short_strikes', {})),
+                float(execution.get('delta', 0.0)),
+                float(execution.get('theta', 0.0)),
                 exec_type, execution['time'],
                 execution.get('has_calendar_risk', False)
             )
@@ -179,14 +192,27 @@ class PaperBridge:
         await conn.execute(
             """
             UPDATE portfolio
-            SET quantity = $1, avg_price = $2, realized_pnl = $3, updated_at = $4
-            WHERE symbol = $5 AND strategy_id = $6 AND execution_type = $7 AND parent_uuid = $8
+            SET quantity = $1, avg_price = $2, realized_pnl = $3, delta = $4, theta = $5, updated_at = $6
+            WHERE symbol = $7 AND strategy_id = $8 AND execution_type = $9 AND parent_uuid = $10
             """,
-            new_qty, new_avg_price, realized_pnl, execution['time'], symbol, strategy_id, exec_type, parent_uuid
+            new_qty, new_avg_price, realized_pnl, 
+            float(execution.get('delta', 0.0)),
+            float(execution.get('theta', 0.0)),
+            execution['time'], symbol, strategy_id, exec_type, parent_uuid
         )
-        # Update cache for dashboard
-        self.total_realized_pnl += (realized_pnl - float(record['realized_pnl']))
-        await self.redis.set("DAILY_REALIZED_PNL_PAPER", str(self.total_realized_pnl))
+        # Update PnL cache per asset [Audit Fix]
+        underlying = execution.get('underlying') or symbol.split()[0]
+        # Standardize underlying
+        if "NIFTY" in underlying and "BANK" not in underlying: underlying = "NIFTY50"
+        elif "BANK" in underlying: underlying = "BANKNIFTY"
+        
+        diff = (realized_pnl - float(record['realized_pnl']))
+        self.total_realized_pnl[underlying] += diff
+        await self.redis.set(f"DAILY_REALIZED_PNL_PAPER:{underlying}", str(self.total_realized_pnl[underlying]))
+        
+        # Keep global for legacy consumers if needed (additive rule)
+        # self.total_realized_pnl_global += diff
+        # await self.redis.set("DAILY_REALIZED_PNL_PAPER", str(self.total_realized_pnl_global))
 
     async def execute_orders(self, pull_socket):
         logger.info("Paper Bridge execution loop active.")
@@ -194,6 +220,10 @@ class PaperBridge:
             try:
                 topic, order = await self.mq.recv_json(pull_socket)
                 if not order: continue
+
+                # [Audit 9.1] Strict Paper Filtering: Drop intents not intended for Paper environment
+                if order.get("execution_type") != "Paper" and order.get("cmd") not in ["BASKET_ROLLBACK", "FORCE_MARKET_ORDER"]:
+                    continue
                 
                 # Command handling (Phase 13.3)
                 if order.get("cmd") == "BASKET_ROLLBACK":
@@ -227,7 +257,9 @@ class PaperBridge:
                     "fees": fees,
                     "strategy_id": order['strategy_id'],
                     "execution_type": order.get('execution_type', 'Paper'),
-                    "parent_uuid": order.get('parent_uuid', 'NONE')
+                    "parent_uuid": order.get('parent_uuid', 'NONE'),
+                    "delta": order.get('delta', 0.0),
+                    "theta": order.get('theta', 0.0)
                 }
                 
                 async with self.pool.acquire() as conn:
@@ -396,8 +428,17 @@ class PaperBridge:
                     logger.error(f"Paper Panic exception: {e}")
 
 async def calculate_slippage_and_fees(order: dict) -> tuple[float, float]:
+    """Calculates slippage based on index-specific tick size [PB-01]."""
     price = float(order['price'])
-    slip = random.uniform(0.3, 0.5)
+    symbol = order['symbol']
+    
+    # Tick size mapping
+    tick_size = 0.05 # Default for NIFTY/BANKNIFTY
+    if "SENSEX" in symbol:
+        tick_size = 0.05 # SENSEX also 0.05
+        
+    # [PB-01] Dynamic slippage (2 to 5 ticks)
+    slip = random.randint(2, 5) * tick_size
     exec_price = price + slip if order['action'] == 'BUY' else price - slip
     return float(f"{exec_price:.2f}"), 20.0
 

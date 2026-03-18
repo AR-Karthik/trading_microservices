@@ -64,6 +64,13 @@ TOP_10_HEAVYWEIGHTS = [
     "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", 
     "ITC", "SBIN", "AXISBANK", "KOTAKBANK", "LT"
 ]
+
+# [Audit-Fix] Asset-specific components for Alpha Calculation
+INDEX_COMPONENTS = {
+    "NIFTY50": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "ITC", "SBIN", "AXISBANK", "KOTAKBANK", "LT"],
+    "BANKNIFTY": ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "INDUSINDBK", "AUBL", "FEDERALBNK", "IDFCFIRSTB", "BANDHANBNK"],
+    "SENSEX": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "ITC", "TCS", "LT", "AXISBANK", "SBIN", "KOTAKBANK"]
+}
 OFI_WINDOW = 100          # ticks for rolling OFI
 DISPERSION_WINDOW_MIN = 3 # minutes for correlation rolling window
 # RISK_FREE_RATE now dynamic (Audit 5.1)
@@ -208,9 +215,10 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
     from core.greeks import BlackScholes
     import collections
 
-    # Per-symbol state for ASTO
+    # Per-symbol state for ASTO and RSI
     asto_engines = collections.defaultdict(lambda: AdaptiveSuperTrendOscillator())
     atr_histories = collections.defaultdict(lambda: collections.deque(maxlen=100))
+    rsi_windows = collections.defaultdict(lambda: collections.deque(maxlen=15)) # 14 + current
 
     def bs_call_price(S, K, T, r, sigma):
         return BlackScholes.call_price(S, K, T, r, sigma)
@@ -351,6 +359,27 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         # ── Phase 12.1: Sentiment Fusion ───────────────────────────────────
         sentiment_score = snapshot.get("sentiment_score", 0.0) # -1.0 to 1.0
         result["sentiment_bias"] = float(sentiment_score)
+
+        # ── [D-40] RSI-14 Calculation ──────────────────────────────────────
+        rsi_win = rsi_windows[symbol]
+        rsi_win.append(spot)
+        if len(rsi_win) >= 15:
+            delta = np.diff(list(rsi_win))
+            gain = np.mean(delta[delta > 0]) if any(delta > 0) else 0.0
+            loss = np.abs(np.mean(delta[delta < 0])) if any(delta < 0) else 0.0
+            rs = gain / loss if loss > 0 else 100.0
+            result["rsi"] = float(100 - (100 / (1 + rs)))
+        else:
+            result["rsi"] = 50.0
+
+        # ── [D-41] PCR Calculation (Put-Call Ratio) ────────────────────────
+        pe_oi = float(snapshot.get("pe_oi", 0))
+        ce_oi = float(snapshot.get("ce_oi", 0))
+        result["pcr"] = float(pe_oi / ce_oi) if ce_oi > 0 else 1.0
+
+        # ── [D-42] Change% Calculation ─────────────────────────────────────
+        day_open = float(snapshot.get("day_open", spot))
+        result["change_pct"] = float((spot - day_open) / day_open * 100) if day_open > 0 else 0.0
 
         # ── Individual Heavyweight Alpha Scores (for SHM) ──────────────────
         hw_alphas = {}
@@ -496,23 +525,34 @@ class MarketSensor:
         self.tick_store: dict[str, collections.deque[dict[str, Any]]] = collections.defaultdict(
             lambda: collections.deque(maxlen=2000)
         )
-        all_assets = ["NIFTY50", "BANKNIFTY", "SENSEX"] + TOP_10_HEAVYWEIGHTS
+        self.all_indices = ["NIFTY50", "BANKNIFTY", "SENSEX"]
+        all_assets = self.all_indices + TOP_10_HEAVYWEIGHTS
         self.hw_prices: dict[str, collections.deque[float]] = {
             sym: collections.deque(maxlen=500) for sym in all_assets
         }
-        self.ofi_series: collections.deque[float] = collections.deque(maxlen=200)
-        self.vix_series: collections.deque[float] = collections.deque(maxlen=300) # 5m @ 1s pub
-        self.cvd: float = 0.0
-        self.cvd_series: collections.deque[float] = collections.deque(maxlen=200)
-        self.basis_series: collections.deque[float] = collections.deque(maxlen=500)
-        self.spot_15m_series: collections.deque[float] = collections.deque(maxlen=900)  # ~15min @ 1/s
+        self.ofi_series: dict[str, collections.deque[float]] = {
+            idx: collections.deque(maxlen=200) for idx in self.all_indices
+        }
+        self.vix_series: collections.deque[float] = collections.deque(maxlen=300) # 5m @ 1s pub - Keep global as VIX is cross-asset
+        self.cvd: dict[str, float] = collections.defaultdict(float)
+        self.cvd_series: dict[str, collections.deque[float]] = {
+            idx: collections.deque(maxlen=200) for idx in self.all_indices
+        }
+        self.basis_series: dict[str, collections.deque[float]] = {
+            idx: collections.deque(maxlen=500) for idx in self.all_indices
+        }
+        self.spot_15m_series: dict[str, collections.deque[float]] = {
+            idx: collections.deque(maxlen=900) for idx in self.all_indices
+        }
 
-        # VPIN State (SRS Phase 2)
+        # VPIN State (SRS Phase 2) - Asset Scoped
         self.vpin_bucket_size = 5000  # [D-01] Spec: 5000 volume units per bucket, was 100
-        self.current_bucket_vol = 0
-        self.current_bucket_buy_vol = 0
-        self.current_bucket_sell_vol = 0
-        self.vpin_series: collections.deque[float] = collections.deque(maxlen=50)
+        self.vpin_current_vol: dict[str, int] = collections.defaultdict(int)
+        self.vpin_buy_vol: dict[str, int] = collections.defaultdict(int)
+        self.vpin_sell_vol: dict[str, int] = collections.defaultdict(int)
+        self.vpin_series: dict[str, collections.deque[float]] = {
+            idx: collections.deque(maxlen=50) for idx in self.all_indices
+        }
 
         # ASTO Indicators (SRS Part 1)
         self.atr_buffer: collections.deque[float] = collections.deque(maxlen=10)
@@ -642,14 +682,14 @@ class MarketSensor:
 
         return (bid_size - ask_size) * price_change_direction
 
-    def _update_cvd(self, tick: dict):
+    def _update_cvd(self, tick: dict, symbol: str):
         """Cumulative Volume Delta update using Lee-Ready classification."""
         sign = self._classify_trade(tick)
-        volume = tick.get("last_volume", 1)
-        self.cvd += sign # sign already includes volume in _classify_trade
-        self.cvd_series.append(self.cvd)
+        # volume = tick.get("last_volume", 1) # classification already includes volume conceptually
+        self.cvd[symbol] += sign 
+        self.cvd_series[symbol].append(self.cvd[symbol])
 
-    def _update_vpin(self, tick: dict):
+    def _update_vpin(self, tick: dict, symbol: str):
         """Updates VPIN volume buckets and calculates VPIN on bucket completion."""
         if self.use_rust:
             rt = tick_engine.TickData(
@@ -660,25 +700,25 @@ class MarketSensor:
             )
             vpin_val = self.rust_engine.update_vpin(rt)
             if vpin_val is not None:
-                self.vpin_series.append(vpin_val)
+                self.vpin_series[symbol].append(vpin_val)
             return
 
         sign = self._classify_trade(tick)
         volume = tick.get("last_volume", 1)
         
-        self.current_bucket_vol += volume
+        self.vpin_current_vol[symbol] += volume
         if sign > 0:
-            self.current_bucket_buy_vol += volume
+            self.vpin_buy_vol[symbol] += volume
         elif sign < 0:
-            self.current_bucket_sell_vol += volume
+            self.vpin_sell_vol[symbol] += volume
             
         # When bucket fills, calculate VPIN and reset
-        if self.current_bucket_vol >= self.vpin_bucket_size:
-            vpin = abs(self.current_bucket_buy_vol - self.current_bucket_sell_vol) / self.current_bucket_vol
-            self.vpin_series.append(vpin)
-            self.current_bucket_vol = 0
-            self.current_bucket_buy_vol = 0
-            self.current_bucket_sell_vol = 0
+        if self.vpin_current_vol[symbol] >= self.vpin_bucket_size:
+            vpin_val = abs(self.vpin_buy_vol[symbol] - self.vpin_sell_vol[symbol]) / self.vpin_current_vol[symbol]
+            self.vpin_series[symbol].append(vpin_val)
+            self.vpin_current_vol[symbol] = 0
+            self.vpin_buy_vol[symbol] = 0
+            self.vpin_sell_vol[symbol] = 0
 
     async def _drain_compute_output(self):
         """Non-blocking drain of compute_out queue into latest_signals."""
@@ -751,17 +791,19 @@ class MarketSensor:
                         self.hw_prices[symbol].append(price)
 
                     # Update OFI, CVD, VPIN, basis
-                    self.ofi_series.append(self._ofi(tick))
-                    self._update_cvd(tick)
-                    if symbol == "NIFTY50":  # Typically VPIN is calculated on the underlying/liquid asset
-                        self._update_vpin(tick)
+                    self.ofi_series[symbol].append(self._ofi(tick))
+                    self._update_cvd(tick, symbol)
+                    
+                    # [Audit Fix] Asset-specific logic for VPIN, Basis, and 15m Slope
+                    self._update_vpin(tick, symbol)
 
                     # Simulate basis (futures_price - spot)
                     futures_est = price * (1 + 0.0005 * (np.random.random() - 0.5))
-                    self.basis_series.append(futures_est - price)
+                    self.basis_series[symbol].append(futures_est - price)
 
-                    if symbol == "NIFTY50":
-                        self.spot_15m_series.append(float(price))
+                    # [Audit Fix] 15m Spot series for all indices
+                    if symbol in self.all_indices:
+                        self.spot_15m_series[symbol].append(float(price))
 
                     tick_count = int(tick_count + 1)
 
@@ -771,15 +813,24 @@ class MarketSensor:
                     # Send snapshot to compute process every 20 ticks
                     if tick_count % 20 == 0 and not self.test_mode:
                         price_series = [t.get("price", price) for t in list(self.tick_store[symbol])]
+                        # [D-43] Fetch Raw Data for Signal Expansion
+                        base_asset = symbol.replace("50", "") if "NIFTY" in symbol else symbol
+                        day_open = await self._redis.get(f"DAY_OPEN:{symbol}")
+                        ce_oi = await self._redis.get(f"OI:CE:{base_asset}")
+                        pe_oi = await self._redis.get(f"OI:PE:{base_asset}")
+
                         snapshot = {
                             "symbol": symbol,
                             "spot": price,
-                            "ofi_series": list(self.ofi_series),
+                            "day_open": float(day_open) if day_open else price,
+                            "ce_oi": float(ce_oi) if ce_oi else 0.0,
+                            "pe_oi": float(pe_oi) if pe_oi else 0.0,
+                            "ofi_series": list(self.ofi_series[symbol]),
                             "hw_prices": {k: list(v) for k, v in self.hw_prices.items() if len(v) >= 10},
-                            "cvd_series": list(self.cvd_series),
-                            "basis_series": list(self.basis_series),
-                            "spot_15m_series": list(self.spot_15m_series),
-                            "vpin_series": list(self.vpin_series) if self.vpin_series else [0.0],
+                            "cvd_series": list(self.cvd_series[symbol]),
+                            "basis_series": list(self.basis_series[symbol]),
+                            "spot_15m_series": list(self.spot_15m_series[symbol]),
+                            "vpin_series": list(self.vpin_series[symbol]) if self.vpin_series[symbol] else [0.0],
                             "zero_gamma_level": find_zero_gamma_level(np.array(price_series), price),
                             "price_series": price_series,
                             "hurst_val": calculate_hurst(np.array(price_series[-500:])) if len(price_series) >= 50 else 0.5,
@@ -841,11 +892,12 @@ class MarketSensor:
 
         env_data = {"fii_bias": fii_bias, "vix_slope": 0.01, "ivp": 25, "sentiment_score": sentiment_score}
         
-        basis_list = list(self.basis_series)
+        basis_list = list(self.basis_series[symbol])
+        curr_pcr = float(sig.get("pcr", 0.85))
         str_data = {"basis_slope": float(np.mean(basis_list[-5:]) if len(basis_list) >= 5 else 0.0),
-                    "dist_max_pain": 10.0, "pcr": 0.85}
+                    "dist_max_pain": 10.0, "pcr": curr_pcr}
         
-        cvd_list = list(self.cvd_series)
+        cvd_list = list(self.cvd_series[symbol])
         div_data = {"price_slope": float(np.diff(prices_arr[-10:]).mean()) if len(prices_arr) >= 10 else 0.0,
                     "pcr_slope": 0.02, 
                     "cvd_slope": float(np.diff(cvd_list[-5:]).mean()) if len(cvd_list) >= 5 else 0.0}
@@ -884,12 +936,15 @@ class MarketSensor:
             "price_dislocation": sig.get("price_dislocation", False),
             "spot_zscore_15m": sig.get("spot_zscore_15m", 0.0),
             "vpin": vpin,
-            "cvd": float(self.cvd),
+            "cvd": float(self.cvd[symbol]),
             "asto": sig.get("asto", 0.0),
             "asto_regime": sig.get("asto_regime", 0),
             "asto_multiplier": sig.get("asto_multiplier", 3.0),
             "flow_toxicity_veto": flow_toxicity_veto,
             "sentiment_score": sentiment_score,
+            "rsi": float(sig.get("rsi", 50.0)),
+            "pcr": curr_pcr,
+            "change_pct": float(sig.get("change_pct", 0.0)),
             "time_of_day": datetime.now().strftime("%H:%M:%S")
         }
 
@@ -908,8 +963,8 @@ class MarketSensor:
         
         # 2. Calculate 15-min Price Slope
         slope_15m = 0.0
-        if len(self.spot_15m_series) >= 60: # at least 1 min of data for a slope
-            s15 = list(self.spot_15m_series)
+        if len(self.spot_15m_series[symbol]) >= 60: # at least 1 min of data for a slope
+            s15 = list(self.spot_15m_series[symbol])
             slope_15m = float(s15[-1]) - float(s15[-60]) # point-to-point 1m delta as slope proxy
             
         # 3. Calculate Whale Pivot (S22)
@@ -920,27 +975,25 @@ class MarketSensor:
             s22 = -1.0
         state["whale_pivot"] = s22
 
-        # 4. Update MARKET_STATE with Hysteresis
-        current_state = str(self.market_state)
+        # 4. Update MARKET_STATE with Hysteresis - Asset Scoped [Audit Fix]
+        current_state = str(await self._redis.get(f"MARKET_STATE:{symbol}") or "NEUTRAL")
         new_state = current_state
         
         if abs_asto >= 90:
             new_state = "EXTREME_TREND:BULLISH" if asto >= 90 else "EXTREME_TREND:BEARISH"
         elif abs_asto >= 70:
-            # Revert from EXTREME to TRENDING or stay TRENDING
             if "EXTREME" not in current_state:
                 new_state = "TRENDING"
         else: # abs_asto < 70
             new_state = "NEUTRAL"
             
-        self.market_state = new_state
         state["market_state"] = new_state
-        await self._redis.set("MARKET_STATE", new_state)
+        await self._redis.set(f"MARKET_STATE:{symbol}", new_state)
         
         if abs_asto >= 90:
-            await self._redis.set("MARKET_STATE:EXTREME_TREND", "TRUE")
+            await self._redis.set(f"MARKET_STATE:EXTREME_TREND:{symbol}", "TRUE")
         elif abs_asto <= 50:
-             await self._redis.set("MARKET_STATE:EXTREME_TREND", "FALSE")
+             await self._redis.set(f"MARKET_STATE:EXTREME_TREND:{symbol}", "FALSE")
 
         # ── [R3-04] Publish India VIX to Redis ─────────────────────────
         # India VIX approximated from ATM IV when direct feed unavailable.
@@ -1017,7 +1070,7 @@ class MarketSensor:
                     s_div=state.get("s_div", 0.0),
                     rv=state["rv"],
                     adx=state["adx"],
-                    pcr=state.get("pcr", 0.85),
+                    pcr=state.get("pcr", curr_pcr),
                     asto=state["asto"],
                     asto_regime=state["asto_regime"],
                     whale_pivot=state["whale_pivot"],
@@ -1051,6 +1104,9 @@ class MarketSensor:
             await self._redis.set(f"asto:{symbol}", str(state["asto"]))
             await self._redis.set(f"asto_regime:{symbol}", str(state["asto_regime"]))
             await self._redis.set(f"flow_toxicity_veto:{symbol}", "1" if state["flow_toxicity_veto"] else "0")
+            await self._redis.set(f"rsi:{symbol}", str(state["rsi"]))
+            await self._redis.set(f"pcr:{symbol}", str(state["pcr"]))
+            await self._redis.set(f"change_pct:{symbol}", str(state["change_pct"]))
             await self._redis.set(f"current_dte:{symbol}", str(state.get("dte", 2)))
             
             # Legacy compatibility for NIFTY50

@@ -144,9 +144,9 @@ class LiveExecutionEngine:
                 INSERT INTO portfolio (
                     symbol, strategy_id, parent_uuid, underlying, lifecycle_class, 
                     expiry_date, quantity, avg_price, initial_credit, short_strikes, 
-                    execution_type, updated_at, has_calendar_risk
+                    delta, theta, execution_type, updated_at, has_calendar_risk
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 """,
                 symbol, strategy_id, parent_uuid,
                 execution.get('underlying'),
@@ -155,6 +155,8 @@ class LiveExecutionEngine:
                 qty, price, 
                 float(execution.get('initial_credit', 0.0)),
                 json.dumps(execution.get('short_strikes', {})),
+                float(execution.get('delta', 0.0)), 
+                float(execution.get('theta', 0.0)),
                 exec_type, execution['time'],
                 execution.get('has_calendar_risk', False)
             )
@@ -181,10 +183,13 @@ class LiveExecutionEngine:
         await conn.execute(
             """
             UPDATE portfolio
-            SET quantity = $1, avg_price = $2, realized_pnl = $3, updated_at = $4
-            WHERE symbol = $5 AND strategy_id = $6 AND execution_type = $7 AND parent_uuid = $8
+            SET quantity = $1, avg_price = $2, realized_pnl = $3, delta = $4, theta = $5, updated_at = $6
+            WHERE symbol = $7 AND strategy_id = $8 AND execution_type = $9 AND parent_uuid = $10
             """,
-            new_qty, new_avg_price, realized_pnl, execution['time'], symbol, strategy_id, exec_type, parent_uuid
+            new_qty, new_avg_price, realized_pnl, 
+            float(execution.get('delta', 0.0)),
+            float(execution.get('theta', 0.0)),
+            execution['time'], symbol, strategy_id, exec_type, parent_uuid
         )
         # [Audit 8.4] Only update realized PnL delta to avoid overwriting from multiple threads
         self.total_realized_pnl += (realized_pnl - float(record['realized_pnl']))

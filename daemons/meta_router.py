@@ -585,13 +585,16 @@ class MetaRouter:
         
         # Helper to find strike for target delta
         async def find_strike(target_delta: float, otype: str) -> float:
-            base = round(spot / 50) * 50
+            # [MR-01] Generalize strike rounding based on asset
+            increment = 100 if asset in ["BANKNIFTY", "SENSEX"] else 50
+            base = round(spot / increment) * increment
             best_s = base
             min_diff = 1.0
             r = 0.07 # Risk-free rate
             iv = 0.18 # Default IV
             t = 2.0 / 365 # 2 days to expiry
-            for offset in range(-1000, 1050, 50):
+            # Search 20 strikes above and below
+            for offset in range(-increment * 20, increment * 21, increment):
                 s = base + offset
                 d = abs(BlackScholes.delta(spot, s, t, r, iv, otype.lower()))
                 if abs(d - target_delta) < min_diff:

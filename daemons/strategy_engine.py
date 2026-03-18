@@ -93,11 +93,14 @@ class DirectionalCreditSpreadStrategy(BaseStrategy):
             return None
         
         price = float(data['price'])
+        # [SE-01] Generalize strike rounding based on asset
+        increment = 100 if symbol in ["BANKNIFTY", "SENSEX"] else 50
+
         # Directional logic: alpha balance determines CE vs PE
         alpha = data.get('s_total', 0)
         if alpha > 25: # Bullish Bias -> Bull Put Spread
             otype = "PE"
-            s1 = round((price * 0.98) / 50) * 50
+            s1 = round((price * 0.98) / increment) * increment
             s2 = s1 - self.spread_width
             parent_uuid = f"DCS_{uuid.uuid4().hex[:8]}"
             return [
@@ -106,7 +109,7 @@ class DirectionalCreditSpreadStrategy(BaseStrategy):
             ]
         elif alpha < -25: # Bearish Bias -> Bear Call Spread
             otype = "CE"
-            s1 = round((price * 1.02) / 50) * 50
+            s1 = round((price * 1.02) / increment) * increment
             s2 = s1 + self.spread_width
             parent_uuid = f"DCS_{uuid.uuid4().hex[:8]}"
             return [
@@ -125,17 +128,29 @@ class TastyTrade0DTEStrategy(BaseStrategy):
 
     def on_tick(self, symbol: str, data: dict) -> list | None:
         now = datetime.now()
-        # [S-01] Only active on 0-DTE (Wed/Thu) between 09:30 and 10:30 IST
-        current_time = now.hour * 60 + now.minute  # minutes since midnight
-        if now.strftime("%A") not in ["Wednesday", "Thursday"]:
+        # [SE-02] 0-DTE Schedule: BANKNIFTY (Wed), NIFTY50 (Thu), SENSEX (Fri)
+        expiry_days = {
+            "BANKNIFTY": "Wednesday",
+            "NIFTY50": "Thursday",
+            "SENSEX": "Friday"
+        }
+        
+        current_day = now.strftime("%A")
+        if symbol in expiry_days and current_day != expiry_days[symbol]:
             return None
+            
+        # [S-01] Active 0-DTE window: 09:30 to 10:30 IST
+        current_time = now.hour * 60 + now.minute  # minutes since midnight
         if current_time < 570 or current_time > 630:  # 09:30=570, 10:30=630
             return None
         
         price = float(data['price'])
+        # [SE-01] Generalize strike rounding based on asset
+        increment = 100 if symbol in ["BANKNIFTY", "SENSEX"] else 50
+        
         # [S-02] Iron Butterfly (protected straddle) instead of naked straddle
-        atm_strike = round(price / 50) * 50
-        wing_offset = 200  # 200-point protective wings
+        atm_strike = round(price / increment) * increment
+        wing_offset = increment * 4  # e.g., 200 for NIFTY, 400 for others
         parent_uuid = f"TT0_{uuid.uuid4().hex[:8]}"
         return [
             {"action": "SELL", "otype": "CE", "strike": atm_strike, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE"},
@@ -214,7 +229,12 @@ class IronCondorStrategy(BaseStrategy):
             else:
                 high = mid if otype == 'call' else high
                 low = mid if otype == 'put' else low
-        return round(mid / 50) * 50 # Snap to 50-point strike
+        
+        # [SE-01] Generalize strike rounding based on asset (inferred from symbol)
+        # Assuming first symbol in list is representative or self has context
+        asset = self.symbols[0] if self.symbols else "NIFTY50"
+        increment = 100 if "BANKNIFTY" in asset or "SENSEX" in asset else 50
+        return round(mid / increment) * increment # Snap to asset-specific strike
 
     def _calculate_net_delta(self, spot: float, r: float) -> float:
         """Calculates total delta across all active option legs."""

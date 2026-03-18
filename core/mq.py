@@ -69,14 +69,17 @@ class MQManager:
     def create_publisher(self, port: int, bind: bool = True):
         """Creates an async Publisher socket."""
         socket = self.context.socket(zmq.PUB)
-        host = self._get_host(port, bind)
-        addr = f"tcp://{host}:{port}"
-        if bind:
-            socket.bind(addr)
-            self.logger.info(f"Publisher bound to {addr}")
-        else:
-            socket.connect(addr)
-            self.logger.info(f"Publisher connected to {addr}")
+        host_str = self._get_host(port, bind)
+        hosts = [h.strip() for h in host_str.split(",")]
+        
+        for host in hosts:
+            addr = f"tcp://{host}:{port}"
+            if bind:
+                socket.bind(addr)
+                self.logger.info(f"Publisher bound to {addr}")
+            else:
+                socket.connect(addr)
+                self.logger.info(f"Publisher connected to {addr}")
         socket.setsockopt(zmq.LINGER, 1000)  # [F2-02] Prevent shutdown hang
         return socket
 
@@ -85,14 +88,17 @@ class MQManager:
         if topics is None:
             topics = [""]
         socket = self.context.socket(zmq.SUB)
-        host = self._get_host(port, bind)
-        addr = f"tcp://{host}:{port}"
-        if bind:
-            socket.bind(addr)
-            self.logger.info(f"Subscriber bound to {addr}")
-        else:
-            socket.connect(addr)
-            self.logger.info(f"Subscriber connected to {addr}")
+        host_str = self._get_host(port, bind)
+        hosts = [h.strip() for h in host_str.split(",")]
+        
+        for host in hosts:
+            addr = f"tcp://{host}:{port}"
+            if bind:
+                socket.bind(addr)
+                self.logger.info(f"Subscriber bound to {addr}")
+            else:
+                socket.connect(addr)
+                self.logger.info(f"Subscriber connected to {addr}")
             
         for topic in topics:
             if isinstance(topic, str):
@@ -106,28 +112,34 @@ class MQManager:
     def create_push(self, port: int, bind: bool = True):
         """Creates an async Push socket."""
         socket = self.context.socket(zmq.PUSH)
-        host = self._get_host(port, bind)
-        addr = f"tcp://{host}:{port}"
-        if bind:
-            socket.bind(addr)
-            self.logger.info(f"Push socket bound to {addr}")
-        else:
-            socket.connect(addr)
-            self.logger.info(f"Push socket connected to {addr}")
+        host_str = self._get_host(port, bind)
+        hosts = [h.strip() for h in host_str.split(",")]
+        
+        for host in hosts:
+            addr = f"tcp://{host}:{port}"
+            if bind:
+                socket.bind(addr)
+                self.logger.info(f"Push socket bound to {addr}")
+            else:
+                socket.connect(addr)
+                self.logger.info(f"Push socket connected to {addr}")
         socket.setsockopt(zmq.LINGER, 1000)  # [F2-02] [F2-03] Removed RCVTIMEO (PUSH never receives)
         return socket
 
     def create_pull(self, port: int, bind: bool = False):
         """Creates an async Pull socket."""
         socket = self.context.socket(zmq.PULL)
-        host = self._get_host(port, bind)
-        addr = f"tcp://{host}:{port}"
-        if bind:
-            socket.bind(addr)
-            self.logger.info(f"Pull socket bound to {addr}")
-        else:
-            socket.connect(addr)
-            self.logger.info(f"Pull socket connected to {addr}")
+        host_str = self._get_host(port, bind)
+        hosts = [h.strip() for h in host_str.split(",")]
+        
+        for host in hosts:
+            addr = f"tcp://{host}:{port}"
+            if bind:
+                socket.bind(addr)
+                self.logger.info(f"Pull socket bound to {addr}")
+            else:
+                socket.connect(addr)
+                self.logger.info(f"Pull socket connected to {addr}")
         socket.setsockopt(zmq.RCVTIMEO, 5000)
         socket.setsockopt(zmq.LINGER, 1000)  # [F2-02]
         return socket

@@ -430,6 +430,17 @@ class DataGateway:
                 prev_price = self._prices.get(symbol, price)
                 self._prices[symbol] = price
 
+                # [D-38] Store DAY_OPEN for Change% calculation if not already set
+                await self.redis_client.setnx(f"DAY_OPEN:{symbol}", str(price))
+
+                # [D-39] Identify Option Type and Store OI for PCR calculation
+                if " CE" in symbol:
+                    base_asset = symbol.split()[0] # e.g. "NIFTY"
+                    await self.redis_client.set(f"OI:CE:{base_asset}", str(raw_tick.get('oi', 0)))
+                elif " PE" in symbol:
+                    base_asset = symbol.split()[0]
+                    await self.redis_client.set(f"OI:PE:{base_asset}", str(raw_tick.get('oi', 0)))
+
                 tick = {
                     "symbol": symbol,
                     "price": price,
@@ -446,6 +457,14 @@ class DataGateway:
                     "type": "TICK"
                 }
 
+                # [OF-01] Pressure Gauge (OI Accel)
+                oi_diff = tick["oi"] - tick["prev_oi"]
+                if abs(oi_diff) > 500: # Threshold for 'Acceleration'
+                    tick["oi_accel"] = float(oi_diff)
+                    await self.redis_client.set(f"OI_ACCEL:{symbol}", str(oi_diff))
+                else:
+                    tick["oi_accel"] = 0.0
+
                 # Save to Redis
                 async with self.redis_client.pipeline(transaction=True) as pipe:
                     pipe.set(f"latest_tick:{symbol}", json.dumps(tick, cls=NumpyEncoder))
@@ -456,11 +475,12 @@ class DataGateway:
                 
                 self._last_tick_ts[symbol] = datetime.now(timezone.utc).timestamp()
 
-                # Optimized Strike Sync (NIFTY only)
-                if symbol == "NIFTY50" and random.random() < 0.1:
+                # Optimized Strike Sync (Multi-Index)
+                if symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"] and random.random() < 0.1:
                     ce = await self.get_optimal_strike(price, "call")
                     pe = await self.get_optimal_strike(price, "put")
-                    await self.redis_client.hset("optimal_strikes", mapping={"NIFTY_CE": ce, "NIFTY_PE": pe})
+                    base = "NIFTY" if symbol == "NIFTY50" else symbol
+                    await self.redis_client.hset("optimal_strikes", mapping={f"{base}_CE": ce, f"{base}_PE": pe})
 
                 # Publish
                 await self.mq.send_json(self.pub_socket, f"TICK.{symbol}", tick)
@@ -482,8 +502,8 @@ class DataGateway:
                 continue
                 
             try:
-                # 1. Selection logic for NIFTY50 & BANKNIFTY
-                for idx in ["NIFTY50", "BANKNIFTY"]:
+                # 1. Selection logic for all major indices
+                for idx in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
                     spot = self._prices.get(idx)
                     if not spot: continue
                     
@@ -729,7 +749,17 @@ class DataGateway:
                         put_oi += oi
                 
                 if call_oi > 0:
-                    return put_oi / call_oi
+                    pcr = put_oi / call_oi
+                    
+                    # [SB-01] Identify Structural Walls (Major Resistance/Support)
+                    # We find the strike with max OI in the chain
+                    ce_wall = max(values, key=lambda x: int(x.get('oi', 0)) if x.get('tsym', '').endswith('CE') else 0)
+                    pe_wall = max(values, key=lambda x: int(x.get('oi', 0)) if x.get('tsym', '').endswith('PE') else 0)
+                    
+                    await self.redis_client.set(f"CALL_WALL:{redis_symbol}", ce_wall.get('tsym', '—'))
+                    await self.redis_client.set(f"PUT_WALL:{redis_symbol}", pe_wall.get('tsym', '—'))
+                    
+                    return pcr
                     
         except Exception as e:
             logger.error(f"Failed to calculate PCR for {symbol}: {e}")
