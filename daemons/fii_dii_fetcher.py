@@ -25,20 +25,20 @@ class FIIDIIFetcher:
 
     async def fetch_data(self):
         try:
-            # First, visit home page to get cookies if needed (NSE requires cookies)
+            # Prime session state before attempting authenticated target URLs natively
             await self.session.get("https://www.nseindia.com", follow_redirects=True)
             
             response = await self.session.get(self.url)
             if response.status_code == 200:
                 data = response.json()
-                # Store in Redis for dashboard
+                # Publish the latest authoritative data for subscriber visualization
                 self.redis.set("latest_fii_dii", json.dumps(data))
                 self.redis.set("LAST_FII_DII_FETCH", datetime.now().isoformat())
                 logger.info("Successfully fetched FII/DII data")
                 return data
             else:
                 logger.error(f"Failed to fetch FII/DII data: {response.status_code}")
-                # Mock if failed to keep dashboard alive
+                # Present fallback testing structures defensively
                 return self._get_mock_data()
         except Exception as e:
             logger.error(f"Error fetching FII/DII data: {str(e)}")
@@ -53,12 +53,12 @@ class FIIDIIFetcher:
     async def run(self):
         logger.info("Starting FII/DII Fetcher (Running every 30 mins during market hours)")
         while True:
-            # check if market is open (9AM to 4PM)
+            # Gate fetching intervals strictly against primary active banking hours
             now = datetime.now()
             if 9 <= now.hour <= 16:
                 await self.fetch_data()
             
-            # Update every 30 minutes
+            # Impose fixed polling delay enforcing exchange rate-limits natively
             await asyncio.sleep(1800)
 
 if __name__ == "__main__":

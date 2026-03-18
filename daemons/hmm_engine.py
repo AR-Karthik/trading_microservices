@@ -1,11 +1,7 @@
 """
-daemons/hmm_engine.py
-=====================
-Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)
-
-Responsibilities:
-- Deterministic heuristic regime classification (RV/ADX/PCR).
-- Real-time parameter synchronization via Redis.
+Heuristic Regime Engine
+Computes multi-index market regimes deterministically using Realized Volatility, 
+Trend Strength (ADX), and Implied Volatility parameters, synchronized through Redis.
 """
 
 import argparse
@@ -22,7 +18,7 @@ import redis.asyncio as redis
 from core.mq import MQManager, Ports, Topics, NumpyEncoder
 from core.shm import ShmManager, SignalVector
 
-# [Audit-Fix] Add Shoonya API for fallback lookback
+# External API fallback for historic market data
 try:
     from NorenRestApiPy.NorenApi import NorenApi
     import pyotp
@@ -42,7 +38,7 @@ REGIME_TOXIC = "TOXIC"
 REGIME_OVERBOUGHT = "OVERBOUGHT"
 REGIME_OVERSOLD = "OVERSOLD"
 
-# [C1-05] Stale data threshold (seconds)
+# Maximum acceptable delay for realtime price ticks before triggering failsafe
 STALE_DATA_THRESHOLD_S = 10
 
 class HeuristicEngine:
@@ -50,7 +46,7 @@ class HeuristicEngine:
         self.asset_id = asset_id
         self.core_pin = core_pin
         self.mq = MQManager()
-        # [Audit-Fix] Isolated SHM Write for Multi-Index
+        # Thread-safe Shared Memory isolation per specific index
         self.shm = ShmManager(asset_id=asset_id, mode='w')
         
         # Redis connection
@@ -62,15 +58,15 @@ class HeuristicEngine:
         self.last_pcr = 1.0
         self.adx_val = 0.0
         self.rv_val = 0.0
-        self.iv_val = 0.15       # [C1-02] Live ATM Implied Volatility
-        self.vpin_val = 0.0      # [C1-03] Flow Toxicity (VPIN)
-        self.stale_override = False  # [C1-05] Stale data flag
-        self.last_regime_ts = 0.0    # [C1-04] 5-second regime gate
+        self.iv_val = 0.15       # Implied Volatility of At-The-Money Strikes
+        self.vpin_val = 0.0      # Order Flow Toxicity volume indicator
+        self.stale_override = False  # Failsafe threshold flag for stale data
+        self.last_regime_ts = 0.0    # Time-gate to prevent regime oscillation flutter
         
         # Tick buffer for intraday vol
         self.tick_buffer = deque(maxlen=300)
 
-        # [Audit-Fix] Shoonya API instantiation for fallback
+        # Direct Rest API instantiation for critical historical data gaps
         self.api = None
         if _HAS_SHOONYA:
             host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
@@ -137,7 +133,7 @@ class HeuristicEngine:
             logger.error(f"[{self.asset_id}] Parameter fetch error: {e}")
 
     async def _load_lookback_shoonya(self):
-        """[Audit-Fix] Additive Fallback: Directly fetches 14D history from Shoonya if Redis is empty."""
+        """Restores missing 14-day trailing historical data via direct brokerage fetch."""
         if not self.api: return
         
         logger.info(f"[{self.asset_id}] Triggering Fallback Lookback Fetch from Shoonya API...")

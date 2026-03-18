@@ -19,8 +19,7 @@ class CloudAlerts:
     def __init__(self):
         redis_host = os.environ.get("REDIS_HOST", "localhost")
         self.redis_url = f"redis://{redis_host}:6379"
-        # We don't initialize _redis here because it's async and __init__ is sync.
-        # It will be initialized on first alert() call or we can add an init_async method.
+        # Redis connection is deferred to _ensure_redis to prevent blocking the synchronous constructor.
         pass
 
     async def _ensure_redis(self):
@@ -33,8 +32,7 @@ class CloudAlerts:
 
     async def alert(self, text: str, alert_type: str = "SYSTEM", **kwargs):
         """
-        Pushes an alert to the local Redis queue.
-        Uses redis.asyncio to avoid blocking the event loop.
+        Pushes an alert to the Redis queue asynchronously to avoid event loop stalls.
         """
         await self._ensure_redis()
         if not self._redis:
@@ -42,18 +40,18 @@ class CloudAlerts:
             return
 
         payload = {
-            "message": text, # Match telegram_bot.py expected key
+            "message": text,  # Key required by external telegram consumers
             "type": alert_type,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             **kwargs
         }
         
         try:
-            # LPUSH is O(1) and atomic
+            # Execute atomic left-push to the alert queue
             await self._redis.lpush("telegram_alerts", json.dumps(payload))
         except Exception as e:
             logger.error(f"Failed to push alert to Redis: {e}")
 
-# Global helper for easy access
+# Global entrypoint for triggering alerts without managing the singleton instance directly
 async def send_cloud_alert(text: str, alert_type: str = "SYSTEM", **kwargs):
     await CloudAlerts.get_instance().alert(text, alert_type, **kwargs)

@@ -24,22 +24,20 @@ class SignalVector:
     pcr: float = 0.0
     asto: float = 0.0
     asto_regime: float = 0.0
-    whale_pivot: float = 0.0  # S22
+    whale_pivot: float = 0.0
     net_delta_nifty: float = 0.0
     net_delta_banknifty: float = 0.0
     net_delta_sensex: float = 0.0
     veto: bool = False
-    hw_alpha: list[float] = None  # To be initialized as [0.0]*10
+    hw_alpha: list[float] = None
 
 class ShmManager:
     """
-    Zero-latency Shared Memory IPC for Alpha Scores & Quantitative Signals.
-    Layout: [Timestamp] [Alpha] [VPIN] [OFI] [Vanna] [Charm] [ENV] [STR] [DIV] [RV] [ADX] [PCR] [ASTO] [ASTO_REGIME] [S22] [ND_N] [ND_B] [Veto] [CRC]
+    Handles memory-mapped inter-process communication for transmitting high-frequency quantitative signals.
     """
-    SIZE = 1024 # Expanded further for ASTO and future scaling
-    # Layout: [Timestamp] [Total Alpha] [VPIN] [OFI] [Vanna] [Charm] [ENV] [STR] [DIV] [RV] [ADX] [PCR] 
-    #         [ASTO] [ASTO_REGIME] [S22] [ND_Nifty] [ND_BNifty] [ND_Sensex] [Veto] [10x HW_Alpha] [CRC]
-    # Format: d (ts) + 17d (base signals) + ? (veto) + 10d (hw_alpha) + d (crc)
+    # Pre-allocate 1KB memory map buffer size for current and future structural scaling
+    SIZE = 1024 
+    # Data packing format matching SignalVector attributes
     STRUCT_FORMAT = "dddddddddddddddddd?ddddddddddd" 
 
     def __init__(self, asset_id: str = "GLOBAL", mode='r'):
@@ -64,13 +62,13 @@ class ShmManager:
             self.shm = None
 
     def write(self, signals: SignalVector):
-        """Standardized write using SignalVector dataclass."""
+        """Serializes and writes the SignalVector state, including checksum, into shared memory."""
         if not self.shm: return
         try:
             ts = time.time()
             hw_a = signals.hw_alpha if signals.hw_alpha and len(signals.hw_alpha) == 10 else [0.0]*10
             
-            # Cyclic check: sum of all signals
+            # Calculate primitive checksum for data integrity verification
             crc = (signals.s_total + signals.vpin + signals.ofi_z + signals.vanna + 
                    signals.charm + signals.s_env + signals.s_str + signals.s_div + 
                    signals.rv + signals.adx + signals.pcr + signals.asto + signals.asto_regime +
@@ -93,7 +91,7 @@ class ShmManager:
             logger.error(f"SHM write error: {e}")
 
     def read(self) -> dict | None:
-        """Standardized read with integrity check."""
+        """Reads, deserializes, and validates the shared memory buffer into a signal dictionary."""
         if not self.shm: return None
         try:
             self.shm.seek(0)
@@ -108,11 +106,11 @@ class ShmManager:
             hw_alphas = list(read_data[19:29])
             crc = read_data[29]
             
-            # Check staleness (if > 1s, data is stale)
+            # Reject payload if delta from write timestamp exceeds 1.0 second
             if time.time() - ts > 1.0:
                 return None
             
-            # Integrity check
+            # Validate checksum sum against the stored CRC value to ensure atomic read
             check_val = (s_total + vpin + ofi_z + vanna + charm + s_env + s_str + s_div + 
                          rv + adx + pcr + asto + asto_regime + whale_p + nd_nifty + nd_bnifty + nd_sensex + sum(hw_alphas) + (100.0 if veto else 0.0))
             if abs(crc - check_val) > 1e-4:

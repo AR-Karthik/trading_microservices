@@ -50,8 +50,7 @@ class TinyRecorder:
                                     websocket='wss://api.shoonya.com/NorenWSTP/')
         self.connected = False
         
-        # Sensex Power 5 and Nifty/BN Native Tokens
-        # Important: BSE token mapping needs to be accurate in practice. Using placeholders like BSE:HDFCBANK.
+        # Required instrument tokens tracking primary indices and highest-weight constituent assets
         self.symbols = [
             "NSE|26000", # NIFTY 50
             "NSE|26009", # NIFTY BANK
@@ -108,7 +107,7 @@ class TinyRecorder:
             lp = float(tick_data.get('lp', 0.0))
             vol = int(tick_data.get('v', 0))
             
-            # Pack into binary struct. >BdIfl : big-endian, byte, double, uint32, float, int32
+            # Condense raw market tick into absolute minimal binary payload to preserve disk IO
             return struct.pack('>B d I f i', e_id, ts, token, lp, vol)
         except Exception as e:
             logger.error(f"Failed to compress tick: {e}")
@@ -158,7 +157,7 @@ class TinyRecorder:
         """Main connection and reconnection loop."""
         self.send_telegram_message("🔴 <b>Tiny Recorder Started</b>\nSpinning up e2-micro telemetry.")
         
-        # Open LZMA Compressed Binary file
+        # Initialize ultra-high-compression file stream for incoming tick bursts
         self.file_handle = lzma.open(self.binary_file_path, "ab")
         
         while True:

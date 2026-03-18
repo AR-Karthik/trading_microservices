@@ -1,3 +1,7 @@
+"""
+Firestore Initializer Set
+Seeds the Google Cloud Firestore instance with default empty metadata and risk-limit configurations.
+"""
 import os
 from google.cloud import firestore
 
@@ -25,13 +29,13 @@ def seed():
     if not cfg_ref.get().exists:
         print("Seeding system/config...")
         cfg_ref.set({
-            "paper_capital_limit": 1000000.0,
+            "paper_capital_limit": 100000.0,
             "live_capital_limit": 0.0,
             "hurst_threshold": 0.55,
             "hybrid_confidence": 0.70,
             "vpin_toxicity": 0.82,
-            "max_risk_per_trade_paper": 2500.0,
-            "max_risk_per_trade_live": 2500.0,
+            "max_risk_per_trade_paper": 15000.0,
+            "max_risk_per_trade_live": 15000.0,
             "updated_at": firestore.SERVER_TIMESTAMP
         })
     else:

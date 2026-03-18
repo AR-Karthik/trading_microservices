@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
-Cloud Run Dashboard Deployer — Project K.A.R.T.H.I.K.
-======================================================
-Deploys the Firestore-backed dashboard to Cloud Run.
-Usage:
-    python infrastructure/deploy_cloudrun.py --action deploy
-    python infrastructure/deploy_cloudrun.py --action teardown
+Cloud Run Provisioning Tool
+Automates the containerization and managed serverless deployment of the 
+Command Center Dashboard, establishing direct ties to Firestore and BigQuery infrastructure.
 """
 import os
 import subprocess
@@ -88,7 +85,7 @@ def setup_bigquery():
     print(f"\n=== Setting up BigQuery Dataset: {dataset} ===")
     run_cmd(f"bq mk --if_exists --dataset {PROJECT_ID}:{dataset}")
 
-    # 1. Market History External Table (D-37)
+    # Mount high-frequency Parquet market state archives into BigQuery for ad-hoc querying
     market_table = f"{dataset}.market_history_external"
     print(f"Creating External Table: {market_table}")
     run_cmd(
@@ -96,7 +93,7 @@ def setup_bigquery():
         f"{market_table}"
     )
 
-    # 1b. Tick History External Table (Legacy alignment)
+    # Maintain raw tick telemetry external tables mapping to GCS
     tick_table = f"{dataset}.tick_history_external"
     print(f"Creating External Table: {tick_table}")
     run_cmd(

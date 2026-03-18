@@ -1,11 +1,7 @@
 """
-Cloud Run Dashboard API — Project K.A.R.T.H.I.K. V8.1 (Unified Hybrid)
-========================================================================
-Smart Proxy Architecture:
-  1. Caches VM IP from Firestore (60s TTL) — D-02
-  2. Tries VM direct-read for live data (2s timeout) — D-04 heartbeat age check
-  3. Falls back to GCS Parquet + Firestore when VM is offline — D-06
-  4. Firestore field names standardised to match cloud_publisher writes — D-13
+Cloud Run Dashboard API Gateway
+Provides external client access to internal market datastores, dynamically routing traffic 
+between the live VM instance and fallback GCP storage depending on the VM's real-time heartbeat status.
 """
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +14,7 @@ import os, json, time, httpx, asyncio
 
 app = FastAPI(title="🦸 PROJECT K.A.R.T.H.I.K. — Pro Cloud Dashboard")
 
-# ─── Auth Middleware ─────────────────────────────────────────────────────────
+# Authentication Middleware
 def get_dashboard_access_key():
     env_key = os.getenv("DASHBOARD_ACCESS_KEY")
     if env_key and env_key != "K_A_R_T_H_I_K_2026_PRO":
@@ -57,7 +53,7 @@ async def check_access_key(request: Request, call_next):
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"])
 
-# ─── Cloud Clients ────────────────────────────────────────────────────────────
+# GCP Service Clients
 GCP_PROJECT = os.getenv("GCP_PROJECT_ID", "karthiks-trading-assistant")
 GCS_BUCKET  = os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models")
 
@@ -78,11 +74,11 @@ def get_bigquery():
         _bq_client = bigquery.Client(project=GCP_PROJECT)
     return _bq_client
 
-# ─── VM IP Cache (D-02) ──────────────────────────────────────────────────────
+# VM Network Routing State
 _vm_ip_cache: dict = {"ip": None, "expires_at": 0.0}
 
 async def get_vm_ip() -> Optional[str]:
-    """Cache Firestore VM-IP lookup with 60-second TTL."""
+    """Retrieves the live VM IP from Firestore, caching the result to minimize database reads."""
     now = time.monotonic()
     if _vm_ip_cache["ip"] and now < _vm_ip_cache["expires_at"]:
         return _vm_ip_cache["ip"]
@@ -91,7 +87,7 @@ async def get_vm_ip() -> Optional[str]:
         doc = db.collection("system").document("metadata").get()
         if doc.exists:
             data = doc.to_dict()
-            # D-04: Only treat VM as ONLINE if heartbeat is within 90 seconds
+            # Treat VM as offline if the heartbeat is older than 90 seconds
             last_hb_str = data.get("last_heartbeat", "")
             vm_online = False
             if last_hb_str:
@@ -113,7 +109,7 @@ async def get_vm_ip() -> Optional[str]:
     return None
 
 async def smart_proxy(path: str, method: str = "GET", body: dict = None, params: dict = None):
-    """Route to VM if ONLINE (2s timeout), else return None."""
+    """Attempts direct REST communication with the live VM instance using a rapid timeout to enforce low-latency failure."""
     vm_ip = await get_vm_ip()
     if not vm_ip:
         return None
@@ -132,7 +128,7 @@ async def smart_proxy(path: str, method: str = "GET", body: dict = None, params:
         _vm_ip_cache["ip"] = None
     return None
 
-# ─── GCS Parquet Fallback helpers (D-06) ─────────────────────────────────────
+# Offline Storage Fallback Connectors
 def _gcs_read_parquet(blob_prefix: str, columns: list = None):
     """Read GCS parquet files via gcsfs + pyarrow. Returns pandas DataFrame."""
     try:

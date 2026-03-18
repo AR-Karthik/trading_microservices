@@ -4,7 +4,10 @@ import sys
 import argparse
 
 def wait_for_ssh(instance_name, zone, timeout=300):
-    """Waits for a GCP instance to be ready for SSH."""
+    """
+    Blocks continuous deployment pipelines until the Compute Engine's 
+    Identity-Aware Proxy (IAP) SSH tunnel is fully established, verifying network plane readiness.
+    """
     print(f"⌛ Waiting for SSH readiness on '{instance_name}' in '{zone}'...")
     start_time = time.time()
     while time.time() - start_time < timeout:

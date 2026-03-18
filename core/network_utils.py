@@ -7,7 +7,7 @@ logger = logging.getLogger("NetworkUtils")
 
 def exponential_backoff(max_retries=5, base_delay=1, max_delay=30):
     """
-    Decorator for exponential backoff on async functions.
+    Wraps asynchronous routines with retry logic governing exponential wait times up to a defined ceiling.
     """
     def decorator(func):
         @wraps(func)
@@ -29,8 +29,8 @@ def exponential_backoff(max_retries=5, base_delay=1, max_delay=30):
 
 class CircuitBreaker:
     """
-    Basic Circuit Breaker pattern.
-    States: CLOSED (normal), OPEN (tripped), HALF_OPEN (probing)
+    Implements stateful failure isolation to prevent persistent execution of broken dependencies.
+    Transitions through CLOSED, OPEN, and HALF_OPEN states based on consecutive failure counts and timeouts.
     """
     def __init__(self, failure_threshold=5, recovery_timeout=60):
         self.failure_threshold = failure_threshold

@@ -18,8 +18,8 @@ def is_nse_holiday():
 
 def schedule_trading_vm(event, context):
     """
-    Triggered by Cloud Scheduler via Pub/Sub (Gen 1).
-    Expects a message 'START' or 'STOP'.
+    Google Cloud Function entry point toggling the core engine VM 
+    lifecycle to strictly align with NSE market hours, minimizing compute overhead.
     """
     pubsub_message = base64.b64decode(event['data']).decode('utf-8').upper()
     print(f"Received action: {pubsub_message}")

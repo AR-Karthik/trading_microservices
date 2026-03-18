@@ -27,7 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- NEW: Logging Middleware (#103) ---
+# Registers HTTP requests with duration and client IP metrics
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
@@ -43,7 +43,7 @@ async def log_requests(request: Request, call_next):
     )
     return response
 
-# --- NEW: Audit Logger (#106) ---
+# Asynchronous Redis-backed audit trail for system-level actions
 class AuditLogger:
     @staticmethod
     async def log_event(event_type: str, user: str, details: str):
@@ -54,12 +54,12 @@ class AuditLogger:
             "user": user,
             "details": details
         }
-        # Non-blocking async push to Redis stream or list
+        # Ensure audit trail maintains a rolling window of recent events without blocking execution
         r.lpush("audit_trail", json.dumps(event))
         r.ltrim("audit_trail", 0, 9999)
         logger.warning(f"AUDIT EVENT: {event_type} by {user} - {details}")
 
-# Connections
+# Database and cache connection managers
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 DB_HOST = os.getenv("DB_HOST", "localhost")
 
@@ -79,7 +79,7 @@ def get_db():
     except Exception:
         return None
 
-# --- NEW: Configuration Models ---
+# FastAPI Pydantic request models
 class RegimeConfigRequest(BaseModel):
     engine: str
     hurst_threshold: float
@@ -87,8 +87,8 @@ class RegimeConfigRequest(BaseModel):
     vpin_toxicity: float
     paper_capital: float
     live_capital: float
-    paper_max_risk: float = 0.0  # Default 0.0 to prevent orders until UI configures it
-    live_max_risk: float  = 0.0  # Default 0.0 to prevent orders until UI configures it
+    paper_max_risk: float = 0.0
+    live_max_risk: float  = 0.0
 
 class CapitalRequest(BaseModel):
     amount: float
@@ -99,7 +99,7 @@ class TelemetryMetrics(BaseModel):
     slippage_leakage_inr: float
     cpu_cores: List[float]
 
-# Models
+# Application domain models
 class SystemState(BaseModel):
     alpha_score: float
     hmm_regime: str
@@ -131,11 +131,11 @@ class StrategyStatus(BaseModel):
     status: str
     parameters: dict
 
-# --- Endpoints ---
+# REST API route handlers
 
 @app.get("/health")
 def health():
-    # Enhanced Health Check (#108)
+    # Deep health validation of all connected downstream infrastructure
     health_status = {"status": "ok", "components": {}}
     
     # Check Redis
@@ -181,7 +181,6 @@ def get_metrics():
     ]
     return "\n".join(metrics)
 
-# D-05: /state now supports asset switching [API-01]
 @app.get("/state")
 def get_state(asset: str = "NIFTY50"):
     try:
@@ -214,7 +213,7 @@ def get_state(asset: str = "NIFTY50"):
                 "oi_accel": float(r.get(f"OI_ACCEL:{asset}") or 0.0)
             }
 
-        # [Audit-Fix] Index-aware Deep Signals
+        # Index-aware Deep Signals
         ms_raw = r.get(f"latest_market_state:{asset}")
         ms = json.loads(ms_raw) if ms_raw else {}
         
@@ -280,7 +279,7 @@ def get_state(asset: str = "NIFTY50"):
             "exit_path_70_30": ms.get("exit_path_70_30", {"tp1": 0.0, "tp2": 0.0, "progress": 0.0})
         }
     except Exception:
-        # D-00: Robust Mock Fallback for UI Testing
+        # Robust Mock Fallback for UI Testing
         return {
             "source": "MOCK_MODE",
             "alpha_score": 0.82, "hmm_regime": "TRENDING_UP",
@@ -321,7 +320,6 @@ def get_strategies():
         })
     return results
 
-# --- NEW: Tab 2: Regime Orchestrator ---
 @app.post("/regime/config")
 async def update_regime_config(config: RegimeConfigRequest):
     r = get_redis()
@@ -356,7 +354,6 @@ def update_capital(req: CapitalRequest):
     r.set("CONFIG:TOTAL_CAPITAL", req.amount)
     return {"status": "Capital updated"}
 
-# --- NEW: Tab 7: Engine Simulation ---
 @app.get("/regime/simulation")
 def get_regime_simulation():
     r = get_redis()
@@ -393,7 +390,6 @@ def get_regime_simulation():
         ]
     }
 
-# --- NEW: Tab 3: Model Evolution ---
 @app.get("/models/evolution")
 def get_model_evolution():
     # In a production system, this would pull from a 'model_registry' table
@@ -412,7 +408,6 @@ def get_model_evolution():
         "data_mix": {"seed": 40, "live": 60}
     }
 
-# --- NEW: Tab 4: Strategy Audit ---
 @app.get("/attribution/strategy")
 def get_strategy_attribution(mode: str = "Paper"):
     conn = get_db()
@@ -478,7 +473,6 @@ def get_strategy_attribution(mode: str = "Paper"):
     except Exception as e:
         return {"error": str(e)}
 
-# --- NEW: Tab 5: Observability ---
 @app.get("/health/telemetry")
 def get_telemetry():
     try:
@@ -507,7 +501,6 @@ def get_telemetry():
             "daemons": ["NSE_MD", "BSE_MD", "OMS_EXEC", "META_ROUTER", "HMM_ENGINE", "HEALTH_MON"]
         }
 
-# --- Modified: Tab 6: Analytics ---
 @app.get("/analytics/summary")
 def get_analytics_summary(mode: str = "Paper"):
     try:
@@ -635,7 +628,7 @@ def get_portfolio(mode: str = "Paper"):
 
 @app.get("/portfolio/delta")
 def get_portfolio_delta():
-    # D-17: Delta Thermometer data
+    # Delta Thermometer data
     r = get_redis()
     return {
         "NIFTY50":   float(r.get("NET_DELTA_NIFTY50") or 0.0),
@@ -726,7 +719,7 @@ def get_barrier_attribution():
 
 @app.post("/system/halt")
 def halt_system():
-    # D-21: Manual system kill switch
+    # Manual system kill switch
     r = get_redis()
     r.set("SYSTEM_HALTED", "True")
     return {"status": "System halted"}

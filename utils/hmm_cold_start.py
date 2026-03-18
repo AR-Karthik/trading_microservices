@@ -1,13 +1,7 @@
 """
-utils/hmm_cold_start.py
-=======================
-The HMM Bootstrapper (SRS Phase 11)
-
-Responsibilities:
-- Downloads historical Nifty 50 minute data from Kaggle (debashis74017/nifty-50-minute-data).
-- Downloads recent 1-minute data from Yahoo Finance (^NSEI) for the last 30 days.
-- Preprocesses and merges data to ensure the HMM starts with a valid "Generic" model.
-- Saves the initial model to 'data/models/hmm_generic.pkl'.
+Off-Platform Model Bootstrapper
+Aggregates Kaggle static datasets and short-term Yahoo Finance candles to initialize
+a generic Gaussian mixture hidden Markov model, bypassing live tick requirements.
 """
 
 import os

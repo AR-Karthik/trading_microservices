@@ -1,14 +1,7 @@
 """
-utils/hmm_trainer.py
-====================
-The Nightly Brain: HMM Training & Validation (SRS Phase 10)
-
-Responsibilities:
-- Queries 'market_history' from TimescaleDB for feature-label pairs.
-- Calculates ground truth returns (T+5, T+10, T+30) as market outcome labels.
-- Trains a GMM-HMM (Gaussian Mixture Model Hidden Markov Model).
-- Validates model log-likelihood against the existing 'hmm_v_latest.pkl'.
-- Saves the most accurate model to 'data/models/'.
+Historical Parameter Calibration Worker
+Iteratively trains Gaussian Mixture HMM regimes using TimeScaleDB OHLCV data,
+evaluating convergence likelihoods before promoting to production via GCS.
 """
 
 import os

@@ -1,13 +1,7 @@
 """
-daemons/data_logger.py
-======================
-Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)
-
-Responsibilities:
-- Subscribes to Ports.MARKET_STATE (engineered features).
-- Batches writes to 'market_history' in TimescaleDB.
-- Respects SYSTEM_HALTED and LOGGER_STOP flags.
-- Ensures clean data ingestion (all indices: NIFTY, BANKNIFTY, SENSEX).
+Market History Database Logger
+Consumes engineered market states continuously mapping all configured financial instruments into TimescaleDB tables 
+for historic quantitative analysis, and safely buffers against database outages.
 """
 
 import asyncio
@@ -53,7 +47,7 @@ class DataLogger:
         logger.info("Initializing DataLogger...")
         try:
             self.pool = await asyncpg.create_pool(DB_DSN)
-            # D-37: Ensure schema is up to date (Additive)
+            # Migrates dynamic target fields smoothly into the historical schema on start
             async with self.pool.acquire() as conn:
                 await conn.execute("ALTER TABLE market_history ADD COLUMN IF NOT EXISTS exit_path_70_progress NUMERIC(10, 2);")
                 await conn.execute("ALTER TABLE market_history ADD COLUMN IF NOT EXISTS asto NUMERIC(10, 2);")
@@ -66,11 +60,11 @@ class DataLogger:
 
         sub = self.mq.create_subscriber(Ports.MARKET_STATE, topics=[Topics.MARKET_STATE])
         
-        # Phase 11: Heartbeat
+        # Begins telemetry reporting to prove active consumption
         self.hb = HeartbeatProvider("DataLogger", self._redis)
         asyncio.create_task(self.hb.run_heartbeat())
         
-        # Periodically flush the batch to TimescaleDB
+        # Activates asynchronous flusher thread
         writer_task = asyncio.create_task(self._batch_writer())
         
         logger.info("DataLogger active. Listening for market state updates...")
@@ -81,7 +75,7 @@ class DataLogger:
                 if not state:
                     continue
                 
-                # Check for logger stop flag (Market on Close prevention)
+                # Prevents writing artificial artifacts into history when trading session boundaries approach
                 logger_stop = await self._redis.get("LOGGER_STOP") == "True"
                 if logger_stop:
                     continue
@@ -121,11 +115,10 @@ class DataLogger:
             
             try:
                 async with self.pool.acquire() as conn:
-                    # Prepare the data for bulk insert
-                    # Columns: time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, vol_term_ratio, exit_path_progress
+                    # Transforms in-memory records onto TimescaleDB schema mapping
                     data_to_insert = []
                     for s in current_batch:
-                        # Log all indices and heavyweight signals
+                        # Normalizes specific signal attributes cleanly avoiding KeyErrors
                         symbol = s.get("symbol")
                         if not symbol:
                             continue

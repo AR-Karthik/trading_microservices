@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-GCP Spot VM Provisioner for Trading Microservices.
-Provisions a c2-standard-4 Spot VM in asia-south1-a, installs Docker + Tailscale,
-clones the repo, injects .env securely via instance metadata, and starts all services.
+Core Trading Engine Infrastructure Provisioner
+Automates the daily instantiation of the high-performance Compute Engine instance,
+orchestrating zero-trust metadata injection, hardware-accelerated NIC attachments,
+and isolated RAM disk mounting for nanosecond IPC before bootstrapping the trading daemon hive.
 """
 import os
 import time
@@ -48,7 +49,7 @@ def abort_if_holiday():
         sys.exit(0)  # Clean exit (not error) so Cloud Scheduler marks success
 
 
-# ------ Macro Event Pre-fetch -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Pre-boot Global Macroeconomic Calendar Sync
 def prefetch_macro_events():
     """
     Fetches latest macro events from ForexFactory + FMP and writes to
@@ -93,7 +94,7 @@ ENV_VARS = {
 }
 ENV_CONTENT = "\n".join(f"{k}={v}" for k, v in ENV_VARS.items())
 
-# --------- Startup Script ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Virtual Machine Bootstrap Command Payload
 STARTUP_SCRIPT = f"""#!/bin/bash
 set -e
 exec > /var/log/trading-startup.log 2>&1

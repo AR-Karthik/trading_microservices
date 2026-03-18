@@ -7,7 +7,7 @@ from datetime import datetime
 
 class JsonFormatter(logging.Formatter):
     """
-    Custom formatter to output logs in JSON format.
+    Formats standard Python LogRecords into JSON string payloads for structured logging.
     """
     def format(self, record):
         log_entry = {
@@ -29,21 +29,21 @@ class JsonFormatter(logging.Formatter):
 
 def setup_logger(name, log_file=None, level=logging.INFO):
     """
-    Configures a logger with JSON formatting and optional rotation.
+    Initializes a logger instance with JSON console output and an optional rotating file handler.
     """
     logger = logging.getLogger(name)
     logger.setLevel(level)
     
-    # Prevent duplicate handlers if called multiple times
+    # Ensure idempotency of handler configuration
     if logger.hasHandlers():
         return logger
 
-    # Console Handler (JSON)
+    # Attach synchronous stdout handler
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setFormatter(JsonFormatter())
     logger.addHandler(stdout_handler)
 
-    # File Handler (Rotation) - #107
+    # Attach rotating file handler if a destination path is provided
     if log_file:
         log_dir = os.path.dirname(log_file)
         if log_dir and not os.path.exists(log_dir):
@@ -57,5 +57,5 @@ def setup_logger(name, log_file=None, level=logging.INFO):
 
     return logger
 
-# Default logger for general use
+# Instantiate a global default logger
 logger = setup_logger("TradingSystem", log_file="logs/system.log")

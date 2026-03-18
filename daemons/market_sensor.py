@@ -1,22 +1,8 @@
 """
-daemons/market_sensor.py
-========================
-Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)
-
-Architecture:
-  Main asyncio loop  →  ZMQ I/O + Polars feature prep
-  ComputeProcess     →  Heavy math (GEX, dispersion, Greeks) 
-  IPC               →  multiprocessing.Queue
-
-Signals computed for NIFTY, BANKNIFTY, SENSEX:
-  - Log-OFI Z-score
-  - Zero-Gamma Level
-  - Index Dispersion
-  - Volatility Term Structure
-  - Vanna & Charm
-  - VPIN
-  - CVD Absorption
-  - Composite Alpha Score
+Market Sensor Daemon
+High-performance asynchronous data ingestion and signal calculation engine.
+Ingests real-time tick sequences, dispatches intense mathematical computations (Greeks, GEX) 
+to dedicated CPU sub-processes, and merges quantitative arrays to form unified Alpha Scores.
 """
 
 import asyncio
@@ -65,7 +51,7 @@ TOP_10_HEAVYWEIGHTS = [
     "ITC", "SBIN", "AXISBANK", "KOTAKBANK", "LT"
 ]
 
-# [Audit-Fix] Asset-specific components for Alpha Calculation
+# Instrument constituent weight definitions locking alpha generation to core liquidity
 INDEX_COMPONENTS = {
     "NIFTY50": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "ITC", "SBIN", "AXISBANK", "KOTAKBANK", "LT"],
     "BANKNIFTY": ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "INDUSINDBK", "AUBL", "FEDERALBNK", "IDFCFIRSTB", "BANDHANBNK"],
@@ -73,11 +59,11 @@ INDEX_COMPONENTS = {
 }
 OFI_WINDOW = 100          # ticks for rolling OFI
 DISPERSION_WINDOW_MIN = 3 # minutes for correlation rolling window
-# RISK_FREE_RATE now dynamic (Audit 5.1)
+# Risk-free rate continuously resolved from macroeconomic models
 NEAR_TERM_DTE = 2         # days for "near term" IV
 FAR_TERM_DTE = 30         # days for "far term" IV
 
-# ── Signal Math Helpers (SRS §2.3) ───────────────────────────────────────────
+# Signal Math Helpers
 
 def find_zero_gamma_level(prices_arr: np.ndarray, current_spot: float) -> float:
     """

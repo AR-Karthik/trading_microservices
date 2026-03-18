@@ -1,3 +1,9 @@
+"""
+Automated Infrastructure Lifecycle Scheduler
+Deploys the Pub/Sub topics and Gen-1 Cloud Functions required to rigidly
+control the startup and shutdown sequence of the core trading Virtual Machine
+based on actual daily market timings.
+"""
 import os
 import subprocess
 import shutil

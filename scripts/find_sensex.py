@@ -1,3 +1,8 @@
+"""
+BSE Token Discovery Utility
+Authenticates with the Shoonya API and queries the broker's master contract list 
+to reliably resolve static instrument tokens for SENSEX derivatives.
+"""
 import os
 import sys
 from dotenv import load_dotenv

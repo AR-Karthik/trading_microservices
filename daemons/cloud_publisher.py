@@ -1,14 +1,8 @@
 """
-Cloud Publisher Daemon — Project K.A.R.T.H.I.K. V5.4
-=====================================================
-Decouples the dashboard from the trading VM by publishing state to cloud services.
-
-Responsibilities:
-1. Heartbeat (Every 10s): Push current P&L, Active Lots, Regime, and Greeks
-   to Google Firestore for real-time Cloud Run dashboard consumption.
-2. EOD Snapshot (15:35 IST): Export full day's tick log as .parquet to GCS
-   and upload the latest HMM model .pkl to GCS.
-3. Command Watcher: Listen to Firestore for remote commands (e.g., PANIC_BUTTON).
+Remote Dashboard Gateway Controller
+Periodically broadcasts the internal operational snapshot (P&L, exposure, algorithmic regimes)
+from isolated VMs to Google Cloud Firestore, decoupling public client traffic from core trading latency.
+Also manages end-of-day statistical archives over GCS limits.
 """
 import os
 import sys
@@ -87,8 +81,8 @@ class CloudPublisher:
 
     async def _heartbeat_loop(self):
         """
-        Wave 2: High-frequency heartbeat (5s) for real-time dashboard updates.
-        Includes safety audits and market heatmaps.
+        Maintains an aggressive outbound polling loop, transmitting deep portfolio and 
+        market heatmaps without interrupting zero-zmq databuses.
         """
         while True:
             try:
@@ -98,7 +92,7 @@ class CloudPublisher:
 
                 # Fetch live metrics from Redis for fallback visibility
                 alpha = await self.redis.get("COMPOSITE_ALPHA") or "0.0"
-                # --- D-36: Fetch Enriched Metrics for Command Center ---
+                # Aggregate distributed subsystem indicators into a monolithic Command Center object
                 # Retrieve global regime from NIFTY50 as default
                 nifty_reg_raw = await self.redis.hget("hmm_regime_state", "NIFTY50")
                 regime = "UNKNOWN"

@@ -11,7 +11,10 @@ def get_secret(secret_id, project_id):
     return response.payload.data.decode("UTF-8")
 
 def telegram_alert_executor(event, context):
-    """Triggered from a message on a Cloud Pub/Sub topic."""
+    """
+    Cloud Function endpoint consuming Pub/Sub streams to reliably push Markdown-formatted
+    trading alerts via Telegram API, resolving credentials securely via Secret Manager.
+    """
     pubsub_message = base64.b64decode(event['data']).decode('utf-8')
     try:
         data = json.loads(pubsub_message)

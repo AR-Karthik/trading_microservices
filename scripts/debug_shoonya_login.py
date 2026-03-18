@@ -1,3 +1,7 @@
+"""
+Shoonya API Integration Diagnostic Script
+Bypasses standard client wrappers to manually execute HTTP POST login requests using raw SHA256 hashing and TOTP generation.
+"""
 import os
 import requests
 import pyotp
