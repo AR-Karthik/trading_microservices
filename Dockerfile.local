@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     libprotobuf32 \
     libpq-dev \
     libssl3 \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -51,8 +51,11 @@ MARKET_OPEN = dt_time(9, 15)
 MARKET_CLOSE = dt_time(15, 30)
 
 def is_market_hours():
-    now = datetime.now(IST).time()
-    return MARKET_OPEN <= now <= MARKET_CLOSE
+    now_dt = datetime.now(IST)
+    now = now_dt.time()
+    res = MARKET_OPEN <= now <= MARKET_CLOSE
+    # Log every hour or on state change if needed, but for now just ensure it's correct
+    return res
 
 # Symbols simulated / watched
 # Symbols simulated / watched
@@ -264,11 +267,11 @@ class DataGateway:
                 new_sim_mode = self.sim_mode
                 
                 if market_on:
-                    # In market hours, we MUST try to be LIVE unless global SIMULATION_MODE is forced
+                    # In market hours, follow the global setting
                     new_sim_mode = sim_mode_global
                 else:
-                    # Off-hours: use simulator if enabled AND not strictly forced to Live
-                    new_sim_mode = sim_enabled if sim_mode_global else False
+                    # Off-hours: switch to simulated if enabled
+                    new_sim_mode = sim_enabled
 
                 if new_sim_mode != self.sim_mode:
                     old_mode = "SIMULATED" if self.sim_mode else "LIVE"
@@ -319,80 +322,30 @@ class DataGateway:
 
     async def _tick_stream(self):
         """
-        Processes live ticks from the Shoonya WebSocket background thread.
-        Uses asyncio.Queue to bridge the synchronous callback to the async event loop.
+        Processes ticks from either the Shoonya WebSocket or a simulator.
+        Designed to switch dynamically based on self.sim_mode.
         """
-        logger.info("Starting live Shoonya WebSocket integration...")
-        sim_enabled = os.getenv("ENABLE_OFF_HOUR_SIMULATOR", "true").lower() == "true"
-        sim_mode_global = os.getenv("SIMULATION_MODE", "false").lower() == "true"
+        logger.info("Starting tick stream manager...")
         loop = asyncio.get_running_loop()
+        ws_thread = None
+        ws_stopped = threading.Event()
+        feed_opened = threading.Event()
 
-        while True:
-            if not self.sim_mode:
-                try:
-                    await self._ensure_login()
-                except Exception:
-                    if is_market_hours():
-                        logger.error("Market is OPEN but Shoonya login failed. Zero data flow!")
-                        asyncio.create_task(send_cloud_alert("🚨 DATA GATEWAY: Shoonya login failed during market hours!", alert_type="CRITICAL"))
-                    # Fallback to simulation if off-hours and enabled
-                    if not is_market_hours() and sim_enabled:
-                         self.sim_mode = True
-                         continue
-                    else:
-                        await asyncio.sleep(60)
-                        continue
+        def on_tick(tick_msg):
+            loop.call_soon_threadsafe(self.tick_queue.put_nowait, tick_msg)
 
-            feed_opened = threading.Event()
-            ws_stopped = threading.Event()
+        def on_open():
+            logger.info("✅ Shoonya WebSocket Connected")
+            feed_opened.set()
+            for sub in SHOONYA_SUBSCRIPTIONS:
+                self.api.subscribe(sub)
 
-            def on_feed_update(tick_msg):
-                loop.call_soon_threadsafe(self.tick_queue.put_nowait, tick_msg)
+        def on_error(err):
+            logger.error(f"Shoonya WS Error: {err}")
 
-            def on_open():
-                logger.info("✅ Shoonya WebSocket Connected")
-                feed_opened.set()
-                for sub in SHOONYA_SUBSCRIPTIONS:
-                    self.api.subscribe(sub)
-
-            def on_error(err):
-                logger.error(f"Shoonya WS Error: {err}")
-
-            def on_close():
-                logger.warning("Shoonya WS Closed. Triggering reconnect...")
-                ws_stopped.set()
-
-            ws_thread = threading.Thread(
-                target=self.api.start_websocket,
-                kwargs={
-                    "subscribe_callback": on_feed_update,
-                    "order_update_callback": lambda o: None,
-                    "socket_open_callback": on_open,
-                    "socket_error_callback": on_error,
-                    "socket_close_callback": on_close
-                },
-                daemon=True
-            )
-            ws_thread.start()
-
-            if not self.sim_mode:
-                # Wait for socket to open
-                success = await asyncio.to_thread(lambda: feed_opened.wait(30.0))
-                if not success:
-                    logger.error("WebSocket failed to connect. Retrying...")
-                    # We don't 'stop' the api because it likely failed to start
-                    await asyncio.sleep(5)
-                    continue
-                
-                # Monitor for closure
-                while not ws_stopped.is_set():
-                    await asyncio.sleep(1)
-                
-                logger.warning("WebSocket stopped. Re-initiating startup sequence...")
-                await asyncio.sleep(5)
-            else:
-                # Simulation mode: break the inner loop and run simulation logic
-                break
+        def on_close():
+            logger.warning("Shoonya WS Closed.")
+            ws_stopped.set()
 
         while True:
             if self._system_halted:
@@ -400,120 +353,114 @@ class DataGateway:
                 continue
 
             try:
-                # Read from queue or simulate
+                # 1. Manage WebSocket Connection
+                if not self.sim_mode:
+                    # If we should be live but aren't
+                    if ws_thread is None or not ws_thread.is_alive() or ws_stopped.is_set():
+                        logger.info("Initializing/Restarting Shoonya WebSocket...")
+                        try:
+                            await self._ensure_login()
+                            feed_opened.clear()
+                            ws_stopped.clear()
+                            ws_thread = threading.Thread(
+                                target=self.api.start_websocket,
+                                kwargs={
+                                    "subscribe_callback": on_tick,
+                                    "order_update_callback": lambda o: None,
+                                    "socket_open_callback": on_open,
+                                    "socket_error_callback": on_error,
+                                    "socket_close_callback": on_close
+                                },
+                                daemon=True
+                            )
+                            ws_thread.start()
+                            
+                            # Wait for connection success
+                            success = await asyncio.to_thread(lambda: feed_opened.wait(20.0))
+                            if not success:
+                                logger.error("WebSocket failed to connect within timeout.")
+                        except Exception as e:
+                            logger.error(f"Failed to start WebSocket: {e}")
+                            await asyncio.sleep(5)
+                            continue
+
+                # 2. Get next tick (Simulated or Real)
                 if self.sim_mode:
-                    await asyncio.sleep(random.uniform(0.01, 0.1)) # Faster ticks for simulation
-                    # Pick from symbols OR active options
+                    await asyncio.sleep(random.uniform(0.1, 0.5))
                     choices = SYMBOLS_UNDERLYING + list(self.active_option_tokens.values())
                     symbol = random.choice(choices)
                     base_price = self._prices.get(symbol, 1000.0)
-                    price = base_price * (1 + random.uniform(-0.0005, 0.0005))
+                    price = base_price * (1 + random.uniform(-0.0002, 0.0002))
                     
-                    # Correct Mapping: Force it to find a valid token even in simulation
                     token = "FAKE_TOKEN"
-                    # Add missing symbols to TOKEN_TO_SYMBOL for simulation completeness
-                    EXTENDED_MAPPING = {**TOKEN_TO_SYMBOL, **self.active_option_tokens}
-                    # If symbol not in mapping, pick a dummy or add it
-                    if symbol not in EXTENDED_MAPPING.values():
-                        token = f"SIM_{symbol}"
-                    else:
-                        for t, s in EXTENDED_MAPPING.items():
-                            if s == symbol:
-                                token = t
-                                break
-                            
-                    raw_tick = {'t': 'tk', 'tk': token, 'lp': str(price), 'v': str(random.randint(1, 100))}
+                    mapping = {**TOKEN_TO_SYMBOL, **self.active_option_tokens}
+                    for t, s in mapping.items():
+                        if s == symbol:
+                            token = t
+                            break
+                    raw_tick = {'t': 'tk', 'tk': token, 'lp': str(price), 'v': str(random.randint(1, 10))}
                 else:
-                    # [F14-01] Added timeout to prevent indefinite blocking on dead WebSocket
                     try:
-                        raw_tick = await asyncio.wait_for(self.tick_queue.get(), timeout=5.0)
+                        raw_tick = await asyncio.wait_for(self.tick_queue.get(), timeout=1.0)
                     except asyncio.TimeoutError:
                         continue
 
+                # 3. Process raw_tick
                 if raw_tick.get('t') not in ('tk', 'tf'):
                     continue
 
-                # Signal live data flow on first valid tick
                 if not getattr(self, '_data_flow_alert_sent', False):
                     source = "SIMULATED" if self.sim_mode else "LIVE"
-                    asyncio.create_task(send_cloud_alert(f"✅ DATA INGESTION {source}: First market ticks received and broadcasting via Redis.", alert_type="INFO"))
+                    asyncio.create_task(send_cloud_alert(f"✅ DATA INGESTION {source}: Market ticks active.", alert_type="INFO"))
                     self._data_flow_alert_sent = True
 
                 token = raw_tick.get('tk')
-                if not isinstance(token, str):
-                    continue
-                    
                 symbol = TOKEN_TO_SYMBOL.get(token) or self.active_option_tokens.get(token)
+                if not symbol: continue
 
-                if not symbol:
-                    continue
+                price = float(raw_tick.get('lp', self._prices.get(symbol, 0.0)))
+                prev_price = self._prices.get(symbol, price)
+                self._prices[symbol] = price
 
-                if 'lp' in raw_tick:
-                    price = float(raw_tick['lp'])
-                    self._prices[symbol] = price
-                else:
-                    price = self._prices[symbol]
-
-                # Synthesize standard fields safely handles missing properties in touchlines
-                bid = float(raw_tick.get('bp1', price))
-                ask = float(raw_tick.get('sp1', price))
-                # Fallback for indices lacking order book
-                if bid == price and ask == price:
-                    bid = price - 0.5
-                    ask = price + 0.5
-
-                vol = int(raw_tick.get('v', 1))
-                if vol == 0: vol = 1
-
-                now_ts = datetime.now(timezone.utc)
                 tick = {
                     "symbol": symbol,
                     "price": price,
-                    "prev_price": self._prices[symbol],
-                    "volume": vol,
-                    "last_volume": vol,
+                    "prev_price": prev_price,
+                    "volume": int(raw_tick.get('v', 1)),
+                    "last_volume": int(raw_tick.get('v', 1)),
                     "oi": int(raw_tick.get('oi', self._oi.get(symbol, 0))),
                     "prev_oi": self._oi.get(symbol, 0),
-                    "bid": bid,
-                    "ask": ask,
+                    "bid": float(raw_tick.get('bp1', price - 0.05)),
+                    "ask": float(raw_tick.get('sp1', price + 0.05)),
                     "bid_vol": int(raw_tick.get('bq1', 100)),
                     "ask_vol": int(raw_tick.get('sq1', 100)),
-                    "timestamp": now_ts.isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "type": "TICK"
                 }
 
-                # Update Redis [Audit 10.2: Match tick_history format for consistency]
+                # Save to Redis
                 async with self.redis_client.pipeline(transaction=True) as pipe:
                     pipe.set(f"latest_tick:{symbol}", json.dumps(tick, cls=NumpyEncoder))
                     history_key = f"tick_history:{symbol}"
                     pipe.rpush(history_key, json.dumps(tick, cls=NumpyEncoder))
-                    pipe.ltrim(history_key, -2000, -1)  # [F12-02] Reduced from 10000 to save Redis memory
+                    pipe.ltrim(history_key, -2000, -1)
                     await pipe.execute()
                 
-                self._last_tick_ts[symbol] = now_ts.timestamp()
+                self._last_tick_ts[symbol] = datetime.now(timezone.utc).timestamp()
 
-                # Simulate Strike Selection
-                if symbol == "NIFTY50":
-                    optimal_ce_strike = await self.get_optimal_strike(price, "call", 2/365, 0.18)
-                    optimal_pe_strike = await self.get_optimal_strike(price, "put", 2/365, 0.18)
-                    
-                    await self.redis_client.hset("optimal_strikes", mapping={
-                        "NIFTY_CE": optimal_ce_strike,
-                        "NIFTY_PE": optimal_pe_strike
-                    })
+                # Optimized Strike Sync (NIFTY only)
+                if symbol == "NIFTY50" and random.random() < 0.1:
+                    ce = await self.get_optimal_strike(price, "call")
+                    pe = await self.get_optimal_strike(price, "put")
+                    await self.redis_client.hset("optimal_strikes", mapping={"NIFTY_CE": ce, "NIFTY_PE": pe})
 
-                # Publish via ZMQ
-                topic = f"TICK.{symbol}"
-                await self.mq.send_json(self.pub_socket, topic, tick)
-                
-                # Debug sample to keep terminal clean
-                if random.random() < 0.05:
-                    logger.debug(f"LIVE TICK {symbol} @ {price}")
+                # Publish
+                await self.mq.send_json(self.pub_socket, f"TICK.{symbol}", tick)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Tick stream processing error: {e}")
+                logger.error(f"Tick processing error: {e}")
                 await asyncio.sleep(0.1)
 
     # ── Dynamic Option Subscriptions ──────────────────────────────────────────
