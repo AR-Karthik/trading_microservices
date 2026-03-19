@@ -64,8 +64,13 @@ class TelegramAlerter:
     ):
         self.bot_token = bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
-        self.redis_host = os.getenv("REDIS_HOST", "localhost")
-        self.redis_url = redis_url or f"redis://{self.redis_host}:6379"
+        
+        if redis_url is None:
+            from core.auth import get_redis_url
+            self.redis_url = get_redis_url()
+        else:
+            self.redis_url = redis_url
+        
         self._redis: redis.Redis | None = None
         self._enabled = bool(self.bot_token and self.chat_id)
 

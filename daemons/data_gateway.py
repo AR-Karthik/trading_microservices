@@ -127,11 +127,10 @@ class DataGateway:
     def __init__(self, redis_url: str | None = None):
         self.mq = MQManager()
         if redis_url is None:
-            redis_host = os.getenv("REDIS_HOST", "localhost")
-            redis_pass = os.getenv("REDIS_PASSWORD", "")
-            auth_str = f":{redis_pass}@" if redis_pass else ""
-            redis_url = f"redis://{auth_str}{redis_host}:6379"
-        self.redis_url = redis_url
+            from core.auth import get_redis_url
+            self.redis_url = get_redis_url()
+        else:
+            self.redis_url = redis_url
         self.redis_client: redis.Redis | None = None
         self.pub_socket = self.mq.create_publisher(Ports.MARKET_DATA)
 
@@ -212,8 +211,9 @@ class DataGateway:
         retry_count = 0
         while True:
             try:
+                from core.auth import get_redis_url
                 self.redis_client = redis.from_url(
-                    self.redis_url, 
+                    self.redis_url or get_redis_url(), 
                     decode_responses=True
                 )
                 await self.redis_client.ping()
@@ -709,21 +709,21 @@ class DataGateway:
                 for symbol, last_ts in list(self._last_tick_ts.items()):
                     age_ms = (now - last_ts) * 1000
                     if age_ms > STALENESS_THRESHOLD_MS:
-                        logger.warning(
-                            f"STALE FEED: {symbol} last tick {age_ms:.0f}ms ago. "
-                            f"Triggering socket reset..."
-                        )
-                        await self._force_socket_reset(symbol)
-                        
-                        # ALERT: If market hours and NOT simulating, this is a real data flow issue
-                        # Wave 3.9: Throttle to 30s and only alert for NIFTY50 to avoid alert fatigue
-                        if is_market_hours() and not os.getenv("SIMULATION_MODE", "false").lower() == "true":
-                            if symbol == "NIFTY50" and (now - self._last_stale_alert_ts) > 30:
-                                asyncio.create_task(send_cloud_alert(
-                                    f"⚠️ DATA GATEWAY: Live feed for {symbol} is stale (>{age_ms:.0f}ms). Attempting reset.", 
-                                    alert_type="WARNING"
-                                ))
+                        # Wave 3.9 Fix: Only log/reset for primary index to prevent alert/reset storm
+                        if symbol == "NIFTY50":
+                            if (now - self._last_stale_alert_ts) > 30:
+                                logger.warning(f"STALE FEED: {symbol} last tick {age_ms:.0f}ms ago. Triggering socket reset...")
+                                await self._force_socket_reset(symbol)
+                                
+                                if is_market_hours() and not os.getenv("SIMULATION_MODE", "false").lower() == "true":
+                                    asyncio.create_task(send_cloud_alert(
+                                        f"⚠️ DATA GATEWAY: Live feed for {symbol} is stale (>{age_ms:.0f}ms). Attempting reset.", 
+                                        alert_type="WARNING"
+                                    ))
                                 self._last_stale_alert_ts = now
+                        else:
+                            # Silent reset for others, no logging
+                            await self._force_socket_reset(symbol)
             except Exception as e:
                 logger.error(f"Watchdog error: {e}")
             await asyncio.sleep(0.5)

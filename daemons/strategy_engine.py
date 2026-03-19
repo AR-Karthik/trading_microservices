@@ -777,9 +777,9 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
  
 async def start_engine():
     mq = MQManager()
-    redis_host = os.getenv("REDIS_HOST", "localhost")
-    # [Audit 14.4] Use from_url for true async context manager compatibility
-    redis_client = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
+    from core.auth import get_redis_url
+    redis_url = get_redis_url()
+    redis_client = redis.from_url(redis_url, decode_responses=True)
     
     # v5.5: Zero-latency Risk & Alpha via SHM (Per Asset) [Audit Fix]
     from core.shm import ShmManager

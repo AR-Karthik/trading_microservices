@@ -25,8 +25,9 @@ logger = setup_logger("OrderReconciler", log_file="logs/order_reconciler.log")
 class OrderReconciler:
     def __init__(self):
         self.mq = MQManager()
-        redis_host = os.getenv("REDIS_HOST", "localhost")
-        self.r = redis.Redis(host=redis_host, port=6379, db=0, decode_responses=True)
+        from core.auth import get_redis_url
+        redis_url = get_redis_url()
+        self.r = redis.from_url(redis_url, decode_responses=True)
         
         # In-flight baskets: {parent_uuid: {start_time, legs: []}}
         self.inflight_baskets = {}

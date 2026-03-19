@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 import psutil
 import shutil
 from core.logger import setup_logger
+from core.auth import get_redis_url, get_db_dsn
 
 logger = setup_logger("DashboardAPI", log_file="logs/dashboard_api.log")
 
@@ -61,22 +62,13 @@ class AuditLogger:
         r.ltrim("audit_trail", 0, 9999)
         logger.warning(f"AUDIT EVENT: {event_type} by {user} - {details}")
 
-# Database and cache connection managers
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-
 def get_redis():
-    return redis.Redis(host=REDIS_HOST, port=6379, db=0, decode_responses=True)
+    from core.auth import get_redis_url
+    return redis.Redis.from_url(get_redis_url(), decode_responses=True)
 
 def get_db():
     try:
-        conn = psycopg2.connect(
-            dbname="trading_db",
-            user="trading_user",
-            password="trading_pass",
-            host=DB_HOST,
-            port="5432"
-        )
+        conn = psycopg2.connect(get_db_dsn())
         return conn
     except Exception:
         return None

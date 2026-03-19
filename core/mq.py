@@ -251,10 +251,8 @@ class RedisLogger:
     """Streams logs to Redis for dashboard visibility."""
     def __init__(self, redis_url=None, key="live_logs", max_len=100):
         if redis_url is None:
-            host = os.getenv("REDIS_HOST", "localhost")
-            redis_pass = os.getenv("REDIS_PASSWORD", "")
-            auth_str = f":{redis_pass}@" if redis_pass else ""
-            redis_url = f"redis://{auth_str}{host}:6379"
+            from core.auth import get_redis_url
+            redis_url = get_redis_url()
         self.redis = redis.from_url(redis_url)
         self.key = key
         self.max_len = max_len

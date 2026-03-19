@@ -190,8 +190,9 @@ class MetaRouter:
         if not test_mode:
             # [Audit 2.1] MetaRouter is the primary binder for SYSTEM_CMD (PUB)
             self.cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD, bind=True)
-            redis_host = os.getenv("REDIS_HOST", "localhost")
-            self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
+            from core.auth import get_redis_url
+            redis_url = get_redis_url()
+            self._redis = redis.from_url(redis_url, decode_responses=True)
             self.shm = ShmManager(mode='r')
             # [Audit-Fix] Register LUA script
             self._lua_reserve = self._redis.register_script(LUA_RESERVE_SCRIPT)

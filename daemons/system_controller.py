@@ -100,7 +100,10 @@ EXPIRY_MATRIX = {
 
 
 class SystemController:
-    def __init__(self, redis_url: str = "redis://localhost:6379"):
+    def __init__(self, redis_url: str = None):
+        if redis_url is None:
+            from core.auth import get_redis_url
+            redis_url = get_redis_url()
         self.redis_url = redis_url
         self.redis: redis.Redis | None = None
         self._macro_events: list[dict] = []
@@ -122,9 +125,11 @@ class SystemController:
         self.redis = redis.from_url(self.redis_url, decode_responses=True)
         # [F10-01] Add DB connection retry loop
         retry_count = 0
+        from core.auth import get_db_dsn
+        dsn = get_db_dsn()
         while True:
             try:
-                self.pool = await asyncpg.create_pool(os.getenv("DB_DSN", "postgresql://user:pass@localhost/trading"), min_size=1, max_size=5, timeout=5.0)
+                self.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5, timeout=5.0)
                 break
             except Exception as e:
                 retry_count += 1

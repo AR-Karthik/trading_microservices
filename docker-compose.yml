@@ -95,7 +95,6 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     ipc: host
     cpuset: "1"
     volumes:
@@ -117,7 +116,6 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     ipc: host
     cpuset: "1"
     volumes:
@@ -139,7 +137,6 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     ipc: host
     cpuset: "1"
     volumes:
@@ -166,7 +163,6 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     ipc: host
     cpuset: "1"
     volumes:
@@ -189,7 +185,6 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -209,7 +204,6 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -234,7 +228,6 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     ipc: host
     cpuset: "2"
     volumes:
@@ -257,7 +250,6 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     ipc: host
     cpuset: "3"
     volumes:
@@ -279,7 +271,6 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -299,7 +290,6 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -317,7 +307,6 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     cpuset: "3"
     volumes:
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -336,7 +325,6 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     ipc: host
     cpuset: "3"
     volumes:
@@ -376,7 +364,6 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro

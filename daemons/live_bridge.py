@@ -29,9 +29,8 @@ except ImportError:
 
 logger = setup_logger("LiveBridge", log_file="logs/live_bridge.log")
 
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_DSN = f"postgres://trading_user:trading_pass@{DB_HOST}:5432/trading_db"
+from core.auth import get_db_dsn
+DB_DSN = get_db_dsn()
 SEBI_BATCH_SIZE = 10
 INTER_BATCH_WAIT = 1.01
 
@@ -659,7 +658,9 @@ async def main():
     # [Audit 4.2] Fix pull socket bind
     pull_socket = mq.create_pull(Ports.ORDERS, bind=True)
     # [Audit 14.1] Better async Redis config
-    redis_client = redis.from_url(f"redis://{REDIS_HOST}:6379", decode_responses=True, socket_timeout=5.0)
+    from core.auth import get_redis_url
+    redis_url = get_redis_url()
+    redis_client = redis.from_url(redis_url, decode_responses=True, socket_timeout=5.0)
     
     # [R2-14] DB pool with retry
     pool = None

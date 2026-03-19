@@ -1,0 +1,33 @@
+import os
+
+def get_redis_url():
+    """Returns a fully authenticated Redis URL based on .env variables."""
+    host = os.getenv("REDIS_HOST", "redis")
+    password = os.getenv("REDIS_PASSWORD", "").strip()
+    
+    # If password is empty, don't include the auth part
+    if not password:
+        return f"redis://{host}:6379"
+    
+    # URL format: redis://:password@host:port
+    return f"redis://:{password}@{host}:6379"
+
+def get_db_dsn():
+    """Returns a fully authenticated Postgres DSN based on .env variables."""
+    user = os.getenv("DB_USER", "trading_user")
+    password = os.getenv("DB_PASS", "trading_pass")
+    host = os.getenv("DB_HOST", "timescaledb")
+    name = os.getenv("DB_NAME", "trading_db")
+    
+    # URL format: postgres://user:password@host:5432/dbname
+    return f"postgres://{user}:{password}@{host}:5432/{name}"
+
+def get_db_config():
+    """Returns a dictionary for asyncpg.connect() or pool.acquire()."""
+    return {
+        "user": os.getenv("DB_USER", "trading_user"),
+        "password": os.getenv("DB_PASS", "trading_pass"),
+        "host": os.getenv("DB_HOST", "timescaledb"),
+        "database": os.getenv("DB_NAME", "trading_db"),
+        "port": 5432
+    }

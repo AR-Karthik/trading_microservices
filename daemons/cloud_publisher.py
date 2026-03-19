@@ -31,11 +31,9 @@ HEARTBEAT_INTERVAL_S = 5  # Wave 2: Standardizing on High-Frequency Heartbeats
 
 class CloudPublisher:
     def __init__(self):
-        redis_host = os.getenv('REDIS_HOST', 'localhost')
-        redis_pass = os.getenv('REDIS_PASSWORD', '')
-        auth_str = f":{redis_pass}@" if redis_pass else ""
+        from core.auth import get_redis_url
         self.redis = aioredis.from_url(
-            f"redis://{auth_str}{redis_host}:6379",
+            get_redis_url(),
             decode_responses=True
         )
         self.gcs_bucket = os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models")

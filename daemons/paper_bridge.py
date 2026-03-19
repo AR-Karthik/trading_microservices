@@ -38,11 +38,8 @@ except ImportError:
 
 logger = setup_logger("PaperBridge", log_file="logs/paper_bridge.log")
 
-db_user = os.getenv("DB_USER", "trading_user")
-db_pass = os.getenv("DB_PASS", "trading_pass")
-db_host = os.getenv("DB_HOST", "localhost")
-db_name = os.getenv("DB_NAME", "trading_db")
-DB_DSN = f"postgres://{db_user}:{db_pass}@{db_host}:5432/{db_name}"
+from core.auth import get_db_dsn
+DB_DSN = get_db_dsn()
 
 async def init_db(pool):
     """Initializes the TimescaleDB schema."""
@@ -455,7 +452,9 @@ async def main():
     # [Audit 2.2] Pull socket should bind, allowing strategies to connect (push) to it.
     pull_socket = mq.create_pull(Ports.ORDERS, bind=True)
     
-    r = redis.from_url(f"redis://{os.getenv('REDIS_HOST', 'localhost')}:6379", decode_responses=True)
+    from core.auth import get_redis_url
+    redis_url = get_redis_url()
+    r = redis.from_url(redis_url, decode_responses=True)
     
     # [Audit 10.1] Connection retry mapping for Database pool creation
     pool = None

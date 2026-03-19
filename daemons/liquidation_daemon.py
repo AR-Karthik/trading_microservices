@@ -83,9 +83,8 @@ class LiquidationDaemon:
         try:
             if self.pool:
                 await self.pool.close()
-            dsn = os.getenv("DB_DSN")
-            if dsn and ("localhost" in dsn or "127.0.0.1" in dsn) and os.path.exists("/.dockerenv"):
-                dsn = dsn.replace("localhost", "trading_timescaledb").replace("127.0.0.1", "trading_timescaledb")
+            from core.auth import get_db_dsn
+            dsn = get_db_dsn()
             self.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
             logger.info("✅ Liquidation DB Pool reconnected.")
         except Exception as e:
@@ -95,8 +94,9 @@ class LiquidationDaemon:
     # ── Startup ──────────────────────────────────────────────────────────────
 
     async def run(self):
-        redis_host = os.getenv("REDIS_HOST", "localhost")
-        self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
+        from core.auth import get_redis_url
+        redis_url = get_redis_url()
+        self._redis = redis.from_url(redis_url, decode_responses=True)
         
         # [Audit] Robust DSN construction
         db_host = os.getenv("DB_HOST", "timescaledb")
