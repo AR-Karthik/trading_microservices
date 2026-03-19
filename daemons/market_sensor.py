@@ -550,7 +550,7 @@ class MarketSensor:
 
         # ASTO Indicators (SRS Part 1)
         self.atr_buffer: collections.deque[float] = collections.deque(maxlen=10)
-        self.asto_engine = AdaptiveSuperTrendOscillator(base_multiplier=3.0, phi=0.5)
+        self.asto_engine = AdaptiveSuperTrendOscillator(base_multiplier=3.0, sensitivity=0.5)
 
         # Compute subprocess setup
         self._compute_in: mp.Queue = mp.Queue(maxsize=50)

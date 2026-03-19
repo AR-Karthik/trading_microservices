@@ -374,8 +374,8 @@ class DataGateway:
             try:
                 # 1. Manage WebSocket Connection
                 if not self.sim_mode:
-                    # If we should be live but aren't
-                    if ws_thread is None or not ws_thread.is_alive() or ws_stopped.is_set():
+                    # If we should be live but aren't (either first run or stopped by on_close)
+                    if ws_thread is None or ws_stopped.is_set():
                         logger.info("Initializing/Restarting Shoonya WebSocket...")
                         try:
                             # Re-initialize API object to clear internal library state
