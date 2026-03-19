@@ -90,6 +90,12 @@ ENV_VARS = {
     "SIMULATION_MODE":    os.getenv("SIMULATION_MODE", "false"),
     "REDIS_HOST":         "redis",
     "DB_HOST":            "timescaledb",
+    "DB_USER":            os.getenv("DB_USER", "trading_user"),
+    "DB_PASS":            os.getenv("DB_PASS", "trading_pass"),
+    "DB_NAME":            os.getenv("DB_NAME", "trading_db"),
+    "POSTGRES_USER":      os.getenv("POSTGRES_USER", "trading_user"),
+    "POSTGRES_PASSWORD":  os.getenv("POSTGRES_PASSWORD", "trading_pass"),
+    "POSTGRES_DB":        os.getenv("POSTGRES_DB", "trading_db"),
     "ENABLE_OFF_HOUR_SIMULATOR": os.getenv("ENABLE_OFF_HOUR_SIMULATOR", "true"),
 }
 ENV_CONTENT = "\n".join(f"{k}={v}" for k, v in ENV_VARS.items())

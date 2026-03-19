@@ -481,6 +481,7 @@ class CompositeAlphaScorer:
 
 class MarketSensor:
     def __init__(self, test_mode: bool = False):
+        self.all_indices = ["NIFTY50", "BANKNIFTY", "SENSEX"]
         self.mq = MQManager()
         self.test_mode = test_mode
         self.scorer = CompositeAlphaScorer()
