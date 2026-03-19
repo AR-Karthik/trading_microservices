@@ -40,7 +40,9 @@ class DataLogger:
         self.batch_lock = asyncio.Lock()
         
         redis_host = os.getenv("REDIS_HOST", "localhost")
-        self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
+        redis_pass = os.getenv("REDIS_PASSWORD", "")
+        auth_str = f":{redis_pass}@" if redis_pass else ""
+        self._redis = redis.from_url(f"redis://{auth_str}{redis_host}:6379", decode_responses=True)
         self.pool = None
 
     async def start(self):

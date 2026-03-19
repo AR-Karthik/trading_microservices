@@ -88,6 +88,7 @@ ENV_VARS = {
     "GCP_PROJECT_ID":     PROJECT_ID,
     "DASHBOARD_ACCESS_KEY": os.getenv("DASHBOARD_ACCESS_KEY", "K_A_R_T_H_I_K_2026_PRO"),
     "SIMULATION_MODE":    os.getenv("SIMULATION_MODE", "false"),
+    "REDIS_PASSWORD":     os.getenv("REDIS_PASSWORD", "trading_redis"),
     "REDIS_HOST":         "redis",
     "DB_HOST":            "timescaledb",
     "DB_USER":            os.getenv("DB_USER", "trading_user"),

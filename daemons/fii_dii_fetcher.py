@@ -13,7 +13,8 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 
 class FIIDIIFetcher:
     def __init__(self):
-        self.redis = redis.Redis(host=REDIS_HOST, port=6379, db=0, decode_responses=True)
+        REDIS_PASS = os.getenv("REDIS_PASSWORD", "")
+        self.redis = redis.Redis(host=REDIS_HOST, port=6379, db=0, password=REDIS_PASS, decode_responses=True)
         self.url = "https://www.nseindia.com/api/fiidiiTradeDetails"
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",

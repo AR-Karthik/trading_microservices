@@ -53,7 +53,8 @@ class HeuristicEngine:
         
         # Redis connection
         redis_host = os.getenv("REDIS_HOST", "localhost")
-        self.r = redis.Redis(host=redis_host, port=6379, db=0, decode_responses=True)
+        redis_pass = os.getenv("REDIS_PASSWORD", "")
+        self.r = redis.Redis(host=redis_host, port=6379, db=0, password=redis_pass, decode_responses=True)
         
         # Heuristic state
         self.history_14d = [] # Fixed daily closes

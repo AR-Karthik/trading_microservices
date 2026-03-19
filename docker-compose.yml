@@ -5,15 +5,16 @@ services:
     container_name: trading_redis
     environment:
       - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
     ports:
       - "6379:6379"
     volumes:
       - /opt/trading/data/redis:/data
-    command: redis-server --appendonly yes --save 900 1 --save 300 10
+    command: redis-server --appendonly yes --save 900 1 --save 300 10 --requirepass ${REDIS_PASSWORD:-trading_redis}
     restart: always
     healthcheck:
-      test: [ "CMD", "redis-cli", "ping" ]
-      interval: 10s
+      test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-trading_redis}", "ping" ]
+      interval: 5s
       timeout: 5s
       retries: 5
     cpuset: "3"
@@ -21,22 +22,23 @@ services:
   timescaledb:
     image: timescale/timescaledb:latest-pg14
     container_name: trading_timescaledb
-    env_file: .env # [Audit 8.3] Load secrets from env file, expecting POSTGRES_USER/PASSWORD/DB
+    env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - SIMULATION_MODE=false
     ports:
       - "5432:5432"
     volumes:
-      - /opt/trading/data/db:/var/lib/postgresql/data # [Audit 7.4] Map to host path for NVMe
+      - /opt/trading/data/db:/var/lib/postgresql/data
     restart: always
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U trading_user -d trading_db" ]
-      interval: 10s
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trading_user} -d ${POSTGRES_DB:-trading_db}" ]
+      interval: 5s
       timeout: 5s
       retries: 10
     cpuset: "3"
 
-  # 2. Data Ingestion (writes to Redis/SHM)
+  # 2. Data Ingestion
   data_gateway:
     image: trading-app:latest
     build:
@@ -51,13 +53,13 @@ services:
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-    cpuset: "0"
+    ipc: host
     volumes:
       - /ram_disk:/ram_disk
 
-  # 3. Market State (Depends on data_gateway ticks)
+  # 3. Market State
   market_sensor:
     image: trading-app:latest
     container_name: market_sensor
@@ -65,17 +67,19 @@ services:
     depends_on:
       data_gateway:
         condition: service_started
+      redis:
+        condition: service_healthy
     restart: always
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
-    cpuset: "1"
+    ipc: host
     volumes:
       - /ram_disk:/ram_disk
 
-  # 4. HMM Engines (Depends on market_sensor state)
+  # 4. HMM Engines
   hmm_engine_nifty:
     image: trading-app:latest
     container_name: hmm_engine_nifty
@@ -83,15 +87,20 @@ services:
     depends_on:
       market_sensor:
         condition: service_started
+      redis:
+        condition: service_healthy
     restart: always
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
+    ipc: host
     cpuset: "1"
     volumes:
       - /ram_disk:/ram_disk
+      - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
   hmm_engine_banknifty:
     image: trading-app:latest
@@ -100,15 +109,20 @@ services:
     depends_on:
       market_sensor:
         condition: service_started
+      redis:
+        condition: service_healthy
     restart: always
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
+    ipc: host
     cpuset: "1"
     volumes:
       - /ram_disk:/ram_disk
+      - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
   hmm_engine_sensex:
     image: trading-app:latest
@@ -117,17 +131,22 @@ services:
     depends_on:
       market_sensor:
         condition: service_started
+      redis:
+        condition: service_healthy
     restart: always
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
+    ipc: host
     cpuset: "1"
     volumes:
       - /ram_disk:/ram_disk
+      - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
-  # 5. Meta Router (Depends on HMM regime)
+  # 5. Meta Router
   meta_router:
     image: trading-app:latest
     container_name: meta_router
@@ -139,17 +158,22 @@ services:
         condition: service_started
       hmm_engine_sensex:
         condition: service_started
+      redis:
+        condition: service_healthy
     restart: always
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
+    ipc: host
     cpuset: "1"
     volumes:
       - /ram_disk:/ram_disk
+      - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
-  # 6. Trading Bridges: Paper (Schema Creation First)
+  # 6. Trading Bridges
   paper_bridge:
     image: trading-app:latest
     container_name: paper_bridge
@@ -157,16 +181,19 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: always
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     volumes:
       - /ram_disk:/ram_disk
+      - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
-  # 7. Trading Bridges: Live (Depends on paper_bridge for schema)
   live_bridge:
     image: trading-app:latest
     container_name: live_bridge
@@ -174,17 +201,20 @@ services:
     depends_on:
       paper_bridge:
         condition: service_started
+      redis:
+        condition: service_healthy
     restart: always
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
-  # 8. Strategy Engine (Depends on all above)
+  # 7. Strategy Engine
   strategy_engine:
     image: trading-app:latest
     container_name: strategy_engine
@@ -196,17 +226,22 @@ services:
         condition: service_started
       data_gateway:
         condition: service_started
+      redis:
+        condition: service_healthy
     restart: always
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
+    ipc: host
     cpuset: "2"
     volumes:
       - /ram_disk:/ram_disk
+      - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
-  # 9. Liquidation Daemon (Depends on position data)
+  # 8. Support Daemons
   liquidation_daemon:
     image: trading-app:latest
     container_name: liquidation_daemon
@@ -214,17 +249,21 @@ services:
     depends_on:
       strategy_engine:
         condition: service_started
+      timescaledb:
+        condition: service_healthy
     restart: always
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
+    ipc: host
     cpuset: "3"
     volumes:
       - /ram_disk:/ram_disk
+      - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
-  # 10. Order Reconciler (Depends on order data)
   order_reconciler:
     image: trading-app:latest
     container_name: order_reconciler
@@ -232,16 +271,19 @@ services:
     depends_on:
       strategy_engine:
         condition: service_started
+      timescaledb:
+        condition: service_healthy
     restart: always
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     volumes:
       - /ram_disk:/ram_disk
+      - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
-  # 11. System Controller (Lifecycle management)
   system_controller:
     image: trading-app:latest
     container_name: system_controller
@@ -249,17 +291,19 @@ services:
     depends_on:
       strategy_engine:
         condition: service_started
+      timescaledb:
+        condition: service_healthy
     restart: always
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     volumes:
       - /ram_disk:/ram_disk
-      - /var/run/google/gcp_creds.json:/var/run/google/gcp_creds.json:ro
+      - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
-  # 12. Telegram Alerter (Monitoring)
   telegram_alerter:
     image: trading-app:latest
     container_name: telegram_alerter
@@ -271,8 +315,12 @@ services:
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
+      - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     cpuset: "3"
+    volumes:
+      - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
   # 13. Cloud Publisher (Sync to cloud)
   cloud_publisher:
@@ -286,8 +334,10 @@ services:
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
+    ipc: host
     cpuset: "3"
     volumes:
       - /ram_disk:/ram_disk
@@ -304,6 +354,8 @@ services:
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
+      - SIMULATION_MODE=false
     cpuset: "3"
 
   # 14. Dashboard API & Frontend (UI - depends on all data sources)
@@ -322,6 +374,7 @@ services:
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
       - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
     volumes:
@@ -335,9 +388,9 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - dashboard_api
+      dashboard_api:
+        condition: service_started
     restart: always
     environment:
       - TZ=Asia/Kolkata
-      - GOOGLE_APPLICATION_CREDENTIALS=/var/run/google/gcp_creds.json
       - SIMULATION_MODE=false

@@ -31,8 +31,11 @@ HEARTBEAT_INTERVAL_S = 5  # Wave 2: Standardizing on High-Frequency Heartbeats
 
 class CloudPublisher:
     def __init__(self):
+        redis_host = os.getenv('REDIS_HOST', 'localhost')
+        redis_pass = os.getenv('REDIS_PASSWORD', '')
+        auth_str = f":{redis_pass}@" if redis_pass else ""
         self.redis = aioredis.from_url(
-            f"redis://{os.getenv('REDIS_HOST', 'localhost')}:6379",
+            f"redis://{auth_str}{redis_host}:6379",
             decode_responses=True
         )
         self.gcs_bucket = os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models")
@@ -56,9 +59,17 @@ class CloudPublisher:
             
             from google.cloud import firestore, storage
             self._firestore_module = firestore
-            self.firestore_db = firestore.AsyncClient()
-            self.gcs_client = storage.Client()
-            logger.info("Google Cloud clients (Firestore + GCS) initialized.")
+            
+            # [Audit 3.8] Final hardening: If Metadata server returns 404, AsyncClient() can raise RefreshError.
+            # We catch it here to stay in local-only mode.
+            try:
+                self.firestore_db = firestore.AsyncClient()
+                self.gcs_client = storage.Client()
+                logger.info("✅ Google Cloud clients (Firestore + GCS) initialized successfully.")
+            except Exception as auth_err:
+                logger.warning(f"⚠️ GCP Authentication failed (Check SA attachment): {auth_err}")
+                self.firestore_db = None
+                self.gcs_client = None
             
             # Fetch External IP for Hybrid Proxy logic
             self.external_ip = await self._fetch_external_ip()
