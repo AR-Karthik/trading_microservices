@@ -11,10 +11,12 @@ import json
 import argparse
 import sys
 from datetime import date
-from google.cloud import compute_v1
-from dotenv import load_dotenv
 
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # Add project root to path so we can import our own utils
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -300,6 +302,7 @@ def ensure_firewall_rule():
 
 def create_spot_instance():
     """Creates a GCP Spot VM instance with all trading services."""
+    from google.cloud import compute_v1
     ensure_firewall_rule()
     instance_client = compute_v1.InstancesClient()
 
@@ -412,6 +415,12 @@ def create_spot_instance():
 
 def delete_instance():
     """Tear down the Spot VM."""
+    try:
+        from google.cloud import compute_v1
+    except ImportError:
+        print("❌ Error: google-cloud-compute not installed. Required for 'delete' action.")
+        return
+        
     instance_client = compute_v1.InstancesClient()
     try:
         op = instance_client.delete(project=PROJECT_ID, zone=ZONE, instance=INSTANCE_NAME)
@@ -419,11 +428,18 @@ def delete_instance():
     except Exception as e:
         print(f"Failed to delete: {e}")
 
+def generate_local_env():
+    """Generates a local .env file based on current ENVIRONMENT variables or defaults."""
+    env_lines = [f"{k}={v}" for k, v in ENV_VARS.items()]
+    with open(".env", "w") as f:
+        f.write("\n".join(env_lines) + "\n")
+    print("✅ Local .env file generated successfully.")
+
 if __name__ == "__main__":
     print(f"DEBUG: Active Project ID: {PROJECT_ID}")
     print(f"DEBUG: Active Zone: {ZONE}")
     parser = argparse.ArgumentParser(description="GCP Trading Engine Provisioner")
-    parser.add_argument("--action", choices=["create", "delete"], default="create")
+    parser.add_argument("--action", choices=["create", "delete", "gen-env"], default="create")
     parser.add_argument("--skip-holiday-check", action="store_true",
                         help="Override NSE holiday guard")
     parser.add_argument("--skip-macro-fetch", action="store_true",
@@ -439,3 +455,6 @@ if __name__ == "__main__":
 
     elif args.action == "delete":
         delete_instance()
+    
+    elif args.action == "gen-env":
+        generate_local_env()
