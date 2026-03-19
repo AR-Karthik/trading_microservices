@@ -39,3 +39,23 @@ def with_db_retry(max_retries=3, backoff=0.5):
             raise last_err
         return wrapper
     return decorator
+
+async def robust_db_connect(dsn, max_retries=10, timeout=5.0):
+    """
+    Attempt to create an asyncpg pool with retries and backoff.
+    Essential for Docker environments where services might start out of order.
+    """
+    retry_count = 0
+    while True:
+        try:
+            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5, timeout=timeout)
+            logger.info(f"Successfully connected to DB at {dsn}")
+            return pool
+        except Exception as e:
+            retry_count += 1
+            if retry_count > max_retries:
+                logger.critical(f"Failed to connect to DB after {max_retries} attempts: {e}")
+                raise
+            wait_time = min(2 * retry_count, 30)
+            logger.warning(f"DB Connect Attempt {retry_count} failed: {e}. Retrying in {wait_time}s...")
+            await asyncio.sleep(wait_time)

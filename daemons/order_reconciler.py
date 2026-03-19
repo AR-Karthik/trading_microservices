@@ -42,7 +42,8 @@ class OrderReconciler:
         if _HAS_SHOONYA:
             try:
                 host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
-                self.api = NorenApi(host=host)
+                ws_host = host.replace("https", "wss").replace("NorenWClientTP", "NorenWSTP/")
+                self.api = NorenApi(host=host, websocket=ws_host)
                 # Note: Login usually happens in a dedicated method or on first need
             except Exception as e:
                 logger.error(f"Failed to init Shoonya API: {e}")
@@ -286,6 +287,8 @@ class OrderReconciler:
                     
                     logger.info(f"📥 Tracking new basket: {p_uuid}")
             except zmq.Again:
+                # No messages available, expected in async loop. Sleep briefly to avoid busy loop.
+                await asyncio.sleep(0.01)
                 continue
             except Exception as e:
                 logger.error(f"Recv error: {e}")

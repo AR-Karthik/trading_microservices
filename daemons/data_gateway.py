@@ -145,7 +145,7 @@ class DataGateway:
         # Shoonya API Setup
         host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
         ws_host = host.replace("https", "wss").replace("NorenWClientTP", "NorenWSTP/")
-        self.api = NorenApi(host, ws_host)
+        self.api = NorenApi(host=host, websocket=ws_host)
         self.tick_queue = asyncio.Queue()
         self.active_option_tokens = {} # token -> symbol (e.g. "12345" -> "NIFTY26MAR22350CE")
         self.last_expiry_sync: float = 0.0
@@ -381,7 +381,13 @@ class DataGateway:
                             # Re-initialize API object to clear internal library state
                             host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
                             ws_host = host.replace("https", "wss").replace("NorenWClientTP", "NorenWSTP/")
-                            self.api = NorenApi(host, ws_host)
+                            # Clear old API instance to prevent "socket already opened"
+                            if self.api:
+                                try:
+                                    self.api.close_websocket()
+                                except:
+                                    pass
+                            self.api = NorenApi(host=host, websocket=ws_host)
                             
                             await self._ensure_login()
                             feed_opened.clear()
@@ -400,7 +406,7 @@ class DataGateway:
                             ws_thread.start()
                             
                             # Wait for connection success
-                            success = await asyncio.to_thread(lambda: feed_opened.wait(20.0))
+                            success = await asyncio.to_thread(feed_opened.wait, 20.0)
                             if not success:
                                 logger.error("WebSocket failed to connect within timeout.")
                         except Exception as e:
@@ -410,7 +416,7 @@ class DataGateway:
                             except:
                                 pass
                             # Re-initialize to clear internal library state
-                            self.api = NorenApi(os.getenv("SHOONYA_HOST"), ws_host)
+                            self.api = NorenApi(host=os.getenv("SHOONYA_HOST"), websocket=ws_host)
                             await asyncio.sleep(5)
                             continue
 

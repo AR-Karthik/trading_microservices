@@ -49,8 +49,8 @@ class CloudPublisher:
             # [Audit-Fix] Detect if GOOGLE_APPLICATION_CREDENTIALS is a directory (Docker mount glitch)
             creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
             if creds_path and os.path.isdir(creds_path):
-                logger.error(f"❌ GCP Credentials Error: {creds_path} is a directory! Falling back to ADC.")
-                # We don't raise here, let the Client initialization try ADC or fail gracefully
+                logger.error(f"❌ GCP Credentials Error: {creds_path} is a directory! Unsetting and falling back to ADC.")
+                del os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
             
             self._firestore_module = firestore
             self.firestore_db = firestore.AsyncClient()

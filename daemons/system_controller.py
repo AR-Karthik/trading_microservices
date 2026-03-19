@@ -112,7 +112,7 @@ class SystemController:
         from NorenRestApiPy.NorenApi import NorenApi
         host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
         ws_host = host.replace("https", "wss").replace("NorenWClientTP", "NorenWSTP/")
-        self.api = NorenApi(host, ws_host)
+        self.api = NorenApi(host=host, websocket=ws_host)
         self.pool: asyncpg.Pool | None = None
         self._boot_time = time.time()
 
