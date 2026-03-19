@@ -27,6 +27,7 @@ class FIIDIIFetcher:
         try:
             # Prime session state before attempting authenticated target URLs natively
             await self.session.get("https://www.nseindia.com", follow_redirects=True)
+            await asyncio.sleep(1) # NSE needs a moment to set cookies
             
             response = await self.session.get(self.url)
             if response.status_code == 200:

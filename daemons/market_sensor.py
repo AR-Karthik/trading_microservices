@@ -30,8 +30,6 @@ except ImportError:
     uvloop = None
 
 import os
-import zmq
-import zmq.asyncio
 from core.logger import setup_logger # type: ignore
 from core.shm import ShmManager, SignalVector # type: ignore
 from core.greeks import BlackScholes # type: ignore
@@ -869,9 +867,8 @@ class MarketSensor:
                     await asyncio.sleep(1)
                     continue
                 except Exception as e:
-                    logger.error(f"Market Sensor outer loop error: {e}")
+                    logger.error(f"Market Sensor outer loop catastrophic error: {e}")
                     await asyncio.sleep(5)
-            # The _stop_compute_process is now handled by the new `stop` method
             sub.close()
 
     async def _publish_market_state(self, symbol: str, price: float):
