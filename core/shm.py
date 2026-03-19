@@ -46,7 +46,11 @@ class ShmManager:
         
         base_name = f"trading_alpha_{asset_id}"
         if os.name != 'nt':
-            self.shm_path = f"/dev/shm/{base_name}"
+            # Use /ram_disk for inter-container shared memory if available
+            if os.path.exists("/ram_disk"):
+                self.shm_path = f"/ram_disk/{base_name}"
+            else:
+                self.shm_path = f"/dev/shm/{base_name}"
         else:
             self.shm_path = base_name
 

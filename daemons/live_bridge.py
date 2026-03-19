@@ -10,6 +10,7 @@ from collections import deque
 from datetime import datetime, timezone
 from redis import asyncio as redis
 from functools import partial
+import zmq
 
 from typing import Optional, Any
 import asyncpg
@@ -506,6 +507,8 @@ class LiveExecutionEngine:
                 else:
                     asyncio.create_task(self.handle_order(order, trade_pub_socket))
                 
+            except zmq.Again:
+                continue
             except asyncio.CancelledError:
                 break
             except Exception as e:

@@ -28,6 +28,8 @@ except ImportError:
     uvloop = None
 
 import os
+import zmq
+import zmq.asyncio
 from core.logger import setup_logger # type: ignore
 from core.shm import ShmManager, SignalVector # type: ignore
 from core.greeks import BlackScholes # type: ignore
@@ -858,11 +860,12 @@ class MarketSensor:
 
                     await asyncio.sleep(0)  # yield to event loop
 
+                except zmq.Again:
+                    continue
                 except Exception as e:
-                    logger.error(f"Market Sensor Data Sync Error: {e}")
-                    await asyncio.sleep(0.1)
-
-        finally:
+                    logger.error(f"Market Sensor loop error: {e}")
+                    await asyncio.sleep(1)
+                    continue
             # The _stop_compute_process is now handled by the new `stop` method
             sub.close()
 

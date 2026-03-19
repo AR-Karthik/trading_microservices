@@ -16,13 +16,15 @@ import time
 import json
 import logging
 import os
+import zmq
+import zmq.asyncio
 import sys
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 import redis.asyncio as redis
 from core.alerts import send_cloud_alert
-from core.mq import MQManager, Ports, NumpyEncoder
+from core.mq import MQManager, Ports
 
 try:
     import asyncpg
@@ -553,8 +555,11 @@ class SystemController:
                     await self.redis.set("SYSTEM_HALT", "True")
                     await send_cloud_alert("🏛️ SEBI Quarterly Settlement detected. Trading halted for manual fund reconciliation.", alert_type="SYSTEM")
                     await asyncio.sleep(60) # Avoid repeat
+            except zmq.Again:
+                continue
             except Exception as e:
-                logger.error(f"Settlement guard error: {e}")
+                logger.error(f"System Controller loop error: {e}")
+                await asyncio.sleep(1)
             await asyncio.sleep(3600)
 
     async def _t1_calendar_sweep_watcher(self):

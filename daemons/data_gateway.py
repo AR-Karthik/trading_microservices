@@ -15,6 +15,9 @@ import json
 import logging
 import random
 import sys
+import os
+import zmq
+import zmq.asyncio
 from datetime import datetime, timezone, time as dt_time
 from zoneinfo import ZoneInfo
 import os
@@ -365,6 +368,11 @@ class DataGateway:
                     if ws_thread is None or not ws_thread.is_alive() or ws_stopped.is_set():
                         logger.info("Initializing/Restarting Shoonya WebSocket...")
                         try:
+                            # Re-initialize API object to clear internal library state
+                            host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
+                            ws_host = host.replace("https", "wss").replace("NorenWClientTP", "NorenWSTP/")
+                            self.api = NorenApi(host, ws_host)
+                            
                             await self._ensure_login()
                             feed_opened.clear()
                             ws_stopped.clear()
@@ -485,9 +493,11 @@ class DataGateway:
 
             except asyncio.CancelledError:
                 break
+            except zmq.Again:
+                continue
             except Exception as e:
-                logger.error(f"Tick processing error: {e}")
-                await asyncio.sleep(0.1)
+                logger.error(f"Data Gateway command error: {e}")
+                await asyncio.sleep(1)
 
     # ── Dynamic Option Subscriptions ──────────────────────────────────────────
 

@@ -9,6 +9,8 @@ import asyncio
 import json
 import logging
 import os
+import zmq
+import zmq.asyncio
 import sys
 import time
 from datetime import datetime
@@ -323,6 +325,8 @@ class HeuristicEngine:
                 if self.asset_id == "NIFTY50":
                     await self.r.set("hmm_regime", legacy_regime)
                 
+            except zmq.Again:
+                continue
             except Exception as e:
                 logger.error(f"Heuristic Engine [{self.asset_id}] loop error: {e}")
                 await asyncio.sleep(1)

@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import uuid
+import zmq
+import numpy as np # type: ignore
 import collections
 import json
 import random
@@ -541,6 +543,8 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                         strategy_states[target]["active"] = (command == "ACTIVATE")
                         strategy_states[target]["lots"] = lots
                         
+            except zmq.Again:
+                continue
             except Exception as e:
                 logger.error(f"Command Handler Error: {e}")
                 await asyncio.sleep(0.1)
@@ -765,9 +769,9 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                     
                     logger.info(f"DISPATCHED {action} {qty} {symbol} @ {price} | Lifecycle: {order['lifecycle_class']}")
                     
+        except zmq.Again:
+            continue
         except Exception as e:
-            if "Resource temporarily unavailable" in str(e):
-                continue
             logger.error(f"Engine Loop Error: {e}")
             await asyncio.sleep(0.1)
  

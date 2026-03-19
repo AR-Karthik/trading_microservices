@@ -18,6 +18,8 @@ import asyncpg # type: ignore
 import json
 import time
 import os
+import zmq
+import zmq.asyncio
 import sys
 import collections
 from collections import deque
@@ -286,8 +288,10 @@ class PaperBridge:
                 await self.mq.send_json(self.trade_pub_socket, f"EXEC.{execution['symbol']}", {"type": "EXECUTION", "symbol": execution['symbol'], "price": execution['price']})
                 logger.info(f"Executed {execution['action']} {execution['symbol']} @ {execution['price']}")
 
+            except zmq.Again:
+                continue
             except Exception as e:
-                logger.error(f"Execution error: {e}")
+                logger.error(f"Paper Bridge loop error: {e}")
                 await asyncio.sleep(1)
 
     async def _handle_basket_rollback(self, parent_uuid: str):

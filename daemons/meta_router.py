@@ -45,6 +45,7 @@ try:
 except ImportError:
     uvloop = None
 
+import zmq
 import redis.asyncio as redis
 from core.logger import setup_logger
 from core.mq import MQManager, Ports, Topics
@@ -765,6 +766,8 @@ class MetaRouter:
                 else:
                     logger.error(f"🛑 HEDGE RESERVATION FAIL: ₹{cost} rejected by LUA.")
 
+            except zmq.Again:
+                continue
             except Exception as e:
                 logger.error(f"Hedge listener error: {e}")
                 await asyncio.sleep(1)
