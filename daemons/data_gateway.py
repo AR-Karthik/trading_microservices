@@ -140,7 +140,7 @@ class DataGateway:
         # Shoonya API Setup
         host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
         ws_host = host.replace("https", "wss").replace("NorenWClientTP", "NorenWSTP/")
-        self.api = NorenApi(host=host)
+        self.api = NorenApi(host, ws_host)
         self.tick_queue = asyncio.Queue()
         self.active_option_tokens = {} # token -> symbol (e.g. "12345" -> "NIFTY26MAR22350CE")
         self.last_expiry_sync: float = 0.0

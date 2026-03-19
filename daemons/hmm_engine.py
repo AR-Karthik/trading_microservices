@@ -70,7 +70,7 @@ class HeuristicEngine:
         self.api = None
         if _HAS_SHOONYA:
             host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
-            self.api = NorenApi(host=host)
+            self.api = NorenApi(host, "")
 
     def _pin_core(self):
         if sys.platform != "win32":
