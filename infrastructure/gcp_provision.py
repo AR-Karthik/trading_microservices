@@ -178,9 +178,21 @@ mount_disk() {{
             mkfs.ext4 -F -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$dev"
         fi
         
-        # Mount
+        # Mount with retry
+        MAX_MOUNT_RETRIES=5
+        MOUNT_COUNT=0
+        while [ $MOUNT_COUNT -lt $MAX_MOUNT_RETRIES ]; do
+            if mountpoint -q "$mount_point"; then
+                break
+            fi
+            echo "Mounting $dev to $mount_point (Attempt $((MOUNT_COUNT+1)))..."
+            mount -o discard,defaults "$dev" "$mount_point" && break
+            MOUNT_COUNT=$((MOUNT_COUNT+1))
+            sleep 2
+        done
+
         if ! mountpoint -q "$mount_point"; then
-            mount -o discard,defaults "$dev" "$mount_point" || echo "⚠️ Mount failed for $dev"
+            echo "⚠️ Mount failed for $dev after $MAX_MOUNT_RETRIES attempts"
         fi
         
         # Persist across reboots

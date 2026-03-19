@@ -49,6 +49,8 @@ RUN apt-get update && apt-get install -y \
     libprotobuf32 \
     libpq-dev \
     libssl3 \
+    dos2unix \
+    rsync \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy compiled libraries from builder
