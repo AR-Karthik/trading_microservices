@@ -61,7 +61,8 @@ def prefetch_macro_events():
     print("Fetching macro calendar (ForexFactory + FMP)...")
     try:
         from utils.macro_event_fetcher import fetch_and_write
-        events = fetch_and_write(write_to_disk=True, write_to_redis=False)
+        import asyncio
+        events = asyncio.run(fetch_and_write(write_to_disk=True, write_to_redis=False))
         print(f"[SUCCESS] Macro calendar: {len(events)} events written.")
     except Exception as e:
         print(f"[WARNING] Macro event fetch failed ({e}). System controller will use cached calendar.")
@@ -446,15 +447,23 @@ if __name__ == "__main__":
                         help="Skip macro calendar fetch")
     args = parser.parse_args()
 
-    if args.action == "create":
-        if not args.skip_holiday_check:
-            abort_if_holiday()
-        if not args.skip_macro_fetch:
-            prefetch_macro_events()
-        create_spot_instance()
+    try:
+        if args.action == "create":
+            if not args.skip_holiday_check:
+                abort_if_holiday()
+            if not args.skip_macro_fetch:
+                prefetch_macro_events()
+            create_spot_instance()
 
-    elif args.action == "delete":
-        delete_instance()
-    
-    elif args.action == "gen-env":
-        generate_local_env()
+        elif args.action == "delete":
+            delete_instance()
+        
+        elif args.action == "gen-env":
+            generate_local_env()
+    except ModuleNotFoundError as e:
+        if "google" in str(e):
+            print(f"\n❌ Error: '{e.name}' not found on this host.")
+            print(f"👉 Since you are already on the VM, use: python3 {sys.argv[0]} --action gen-env")
+            print(f"👉 This will refresh your .env file without needing GCP libraries.")
+        else:
+            raise e
