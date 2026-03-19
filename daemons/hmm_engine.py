@@ -330,12 +330,19 @@ class HeuristicEngine:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # [Audit 3.1] Standardize on NIFTY50 everywhere
-    parser.add_argument("--asset", required=True, choices=["NIFTY50", "BANKNIFTY", "SENSEX"])
+    parser.add_argument("--asset", required=True)
     parser.add_argument("--core", type=int, required=True)
     args = parser.parse_args()
+
+    # Robust normalization
+    asset = args.asset.strip().upper()
+    valid_assets = ["NIFTY50", "BANKNIFTY", "SENSEX"]
+    if asset not in valid_assets:
+        print(f"Error: Invalid asset {asset}. Choose from {valid_assets}")
+        sys.exit(1)
 
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    engine = HeuristicEngine(args.asset, args.core)
+    engine = HeuristicEngine(asset, args.core)
     asyncio.run(engine.run())

@@ -207,7 +207,7 @@ chmod -R 777 /mnt/hot_nvme
 
 # Remove existing symlinks if they exist
 mkdir -p {REPO_DIR}/data
-rm -f {REPO_DIR}/data/redis {REPO_DIR}/data/db
+rm -rf {REPO_DIR}/data/redis {REPO_DIR}/data/db
 ln -sv /mnt/hot_nvme/redis_data {REPO_DIR}/data/redis || echo "⚠️ redis symlink failed"
 ln -sv /mnt/hot_nvme/db_data {REPO_DIR}/data/db || echo "⚠️ db symlink failed"
 
