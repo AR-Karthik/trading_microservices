@@ -198,9 +198,7 @@ class DataGateway:
             try:
                 self.redis_client = redis.from_url(
                     self.redis_url, 
-                    decode_responses=True,
-                    socket_timeout=5.0,
-                    socket_connect_timeout=5.0
+                    decode_responses=True
                 )
                 await self.redis_client.ping()
                 break
