@@ -245,10 +245,18 @@ class CloudPublisher:
                 "max_risk_live": float(risk_live),
                 "updated_at": self._firestore_module.SERVER_TIMESTAMP
             }
-            self.firestore_db.collection("system").document("config").set(config_data, merge=True)
+            # Hardened Wave 4.2: Catch auth failures during config sync
+            try:
+                self.firestore_db.collection("system").document("config").set(config_data, merge=True)
+            except Exception as e:
+                if "RefreshError" in str(e) or "404" in str(e):
+                    logger.error(f"❌ config_sync: GCP Auth Refresh Failed (Metadata 404): Disabling Firestore. Error: {e}")
+                    self.firestore_db = None
+                else:
+                    logger.error(f"Firestore config sync error: {e}")
             # logger.info("Config synced to Firestore.")
         except Exception as e:
-            logger.error(f"Config sync failed: {e}")
+            logger.error(f"Config sync preparation error: {e}")
 
     async def _command_watcher(self):
         """

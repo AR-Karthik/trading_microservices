@@ -219,6 +219,7 @@ class MetaRouter:
             "KOTAKBANK": BaseStrategyLogic("KOTAKBANK", self._redis if not test_mode else None),
             "LT": BaseStrategyLogic("LT", self._redis if not test_mode else None),
         }
+        self.all_indices = ["NIFTY50", "BANKNIFTY", "SENSEX"]
 
         # Initialize attributes to defaults
         self.heat_limit = DEFAULT_MAX_PORTFOLIO_HEAT
@@ -804,9 +805,10 @@ class MetaRouter:
                     st_raw = await self._redis.get(f"latest_market_state:{asset}")
                     multi_market_state[asset] = json.loads(st_raw) if st_raw else {}
 
-                # Orchestrate if we have any data
+                # Orchestrate if we have any data - [Wave 4.2] Filter to indices only for broadcast
                 if any(multi_market_state.values()) or self.test_mode:
-                    await self.broadcast_decisions(multi_market_state, regimes)
+                    filtered_state = {k: v for k, v in multi_market_state.items() if k in self.all_indices}
+                    await self.broadcast_decisions(filtered_state, regimes)
                 
                 # --- [IPC Health Audit] Check SHM Fallback ---
                 if not self.test_mode:

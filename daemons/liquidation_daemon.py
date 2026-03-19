@@ -94,22 +94,12 @@ class LiquidationDaemon:
     # ── Startup ──────────────────────────────────────────────────────────────
 
     async def run(self):
-        from core.auth import get_redis_url
+        from core.auth import get_redis_url, get_db_dsn
         redis_url = get_redis_url()
         self._redis = redis.from_url(redis_url, decode_responses=True)
         
         # [Audit] Robust DSN construction
-        db_host = os.getenv("DB_HOST", "timescaledb")
-        db_user = os.getenv("DB_USER", "trading_user")
-        db_pass = os.getenv("DB_PASS", "trading_pass")
-        db_name = os.getenv("DB_NAME", "trading_db")
-        dsn = os.getenv("DB_DSN")
-        
-        if not dsn:
-            dsn = f"postgres://{db_user}:{db_pass}@{db_host}:5432/{db_name}"
-        elif ("localhost" in dsn or "127.0.0.1" in dsn) and os.path.exists("/.dockerenv"):
-            dsn = dsn.replace("localhost", db_host).replace("127.0.0.1", db_host)
-            
+        dsn = get_db_dsn()
         self.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
         logger.info("LiquidationDaemon active. Three-barrier system armed.")
 

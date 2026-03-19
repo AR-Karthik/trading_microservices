@@ -529,18 +529,18 @@ class MarketSensor:
             sym: collections.deque(maxlen=500) for sym in all_assets
         }
         self.ofi_series: dict[str, collections.deque[float]] = {
-            idx: collections.deque(maxlen=200) for idx in self.all_indices
+            sym: collections.deque(maxlen=200) for sym in all_assets
         }
         self.vix_series: collections.deque[float] = collections.deque(maxlen=300) # 5m @ 1s pub - Keep global as VIX is cross-asset
         self.cvd: dict[str, float] = collections.defaultdict(float)
         self.cvd_series: dict[str, collections.deque[float]] = {
-            idx: collections.deque(maxlen=200) for idx in self.all_indices
+            sym: collections.deque(maxlen=200) for sym in all_assets
         }
         self.basis_series: dict[str, collections.deque[float]] = {
-            idx: collections.deque(maxlen=500) for idx in self.all_indices
+            sym: collections.deque(maxlen=500) for sym in all_assets
         }
         self.spot_15m_series: dict[str, collections.deque[float]] = {
-            idx: collections.deque(maxlen=900) for idx in self.all_indices
+            sym: collections.deque(maxlen=900) for sym in all_assets
         }
 
         # VPIN State (SRS Phase 2) - Asset Scoped
@@ -549,7 +549,7 @@ class MarketSensor:
         self.vpin_buy_vol: dict[str, int] = collections.defaultdict(int)
         self.vpin_sell_vol: dict[str, int] = collections.defaultdict(int)
         self.vpin_series: dict[str, collections.deque[float]] = {
-            idx: collections.deque(maxlen=50) for idx in self.all_indices
+            sym: collections.deque(maxlen=50) for sym in all_assets
         }
 
         # ASTO Indicators (SRS Part 1)
@@ -1086,8 +1086,8 @@ class MarketSensor:
                 if symbol in self.shm_managers:
                     self.shm_managers[symbol].write(signals)
                 
-                # Also write to global if NIFTY50 for legacy
-                if symbol == "NIFTY50" and self.shm_global:
+                # Also write to global if it's a primary index for MetaRouter/StrategyEngine
+                if symbol in self.all_indices and self.shm_global:
                     self.shm_global.write(signals)
             
             # 3. Publish over ZeroMQ [Audit 2.2: Fix parameter order]
