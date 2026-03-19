@@ -21,6 +21,8 @@ from typing import Any  # [R2-20] Removed duplicate 'import sys'
 import numpy as np # type: ignore
 import polars as pl # type: ignore
 import redis.asyncio as redis # type: ignore
+import zmq
+import zmq.asyncio
 
 try:
     import uvloop
@@ -866,6 +868,9 @@ class MarketSensor:
                     logger.error(f"Market Sensor loop error: {e}")
                     await asyncio.sleep(1)
                     continue
+                except Exception as e:
+                    logger.error(f"Market Sensor outer loop error: {e}")
+                    await asyncio.sleep(5)
             # The _stop_compute_process is now handled by the new `stop` method
             sub.close()
 

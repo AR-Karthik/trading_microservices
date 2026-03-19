@@ -18,6 +18,8 @@ import uuid
 from datetime import datetime, timezone
 import os
 import math
+import zmq
+import zmq.asyncio
 
 import redis.asyncio as redis
 import asyncpg
@@ -82,6 +84,8 @@ class LiquidationDaemon:
             if self.pool:
                 await self.pool.close()
             dsn = os.getenv("DB_DSN")
+            if dsn and ("localhost" in dsn or "127.0.0.1" in dsn) and os.path.exists("/.dockerenv"):
+                dsn = dsn.replace("localhost", "trading_timescaledb").replace("127.0.0.1", "trading_timescaledb")
             self.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
             logger.info("✅ Liquidation DB Pool reconnected.")
         except Exception as e:
@@ -94,6 +98,8 @@ class LiquidationDaemon:
         redis_host = os.getenv("REDIS_HOST", "localhost")
         self._redis = redis.from_url(f"redis://{redis_host}:6379", decode_responses=True)
         dsn = os.getenv("DB_DSN")
+        if dsn and ("localhost" in dsn or "127.0.0.1" in dsn) and os.path.exists("/.dockerenv"):
+            dsn = dsn.replace("localhost", "trading_timescaledb").replace("127.0.0.1", "trading_timescaledb")
         self.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
         logger.info("LiquidationDaemon active. Three-barrier system armed.")
 
@@ -286,6 +292,8 @@ class LiquidationDaemon:
                     _, state = await self.mq.recv_json(state_sub)
                     if state:
                         latest_state = state
+                except zmq.Again:
+                    pass
                 except Exception:
                     pass
                 await asyncio.sleep(0.1)
@@ -295,6 +303,9 @@ class LiquidationDaemon:
         while True:
             try:
                 topic, tick = await self.mq.recv_json(market_sub)
+            except zmq.Again:
+                await asyncio.sleep(0.01)
+                continue
                 if topic and tick and self.orphaned_positions:
                     incoming_symbol = str(topic).split(".")[-1]
                     

@@ -20,6 +20,8 @@ import zmq
 import zmq.asyncio
 from datetime import datetime, timezone, time as dt_time
 from zoneinfo import ZoneInfo
+from core.shm import ShmManager
+from core.shared_memory import TickSharedMemory
 import os
 import threading
 
@@ -147,6 +149,14 @@ class DataGateway:
         self.tick_queue = asyncio.Queue()
         self.active_option_tokens = {} # token -> symbol (e.g. "12345" -> "NIFTY26MAR22350CE")
         self.last_expiry_sync: float = 0.0
+        
+        # [Audit] Create the Tick SHM segment once on startup
+        try:
+            self.shm_ticks = TickSharedMemory(create=True)
+            logger.info("✅ Tick Shared Memory segment created.")
+        except Exception as e:
+            logger.error(f"❌ Failed to create Tick Shared Memory: {e}")
+            self.shm_ticks = None
 
     # ── Authentication ───────────────────────────────────────────────────────
 
@@ -394,7 +404,13 @@ class DataGateway:
                             if not success:
                                 logger.error("WebSocket failed to connect within timeout.")
                         except Exception as e:
-                            logger.error(f"Failed to start WebSocket: {e}")
+                            logger.error(f"WebSocket run_forever error: {e}. Restarting...")
+                            try:
+                                self.api.close_websocket()
+                            except:
+                                pass
+                            # Re-initialize to clear internal library state
+                            self.api = NorenApi(os.getenv("SHOONYA_HOST"), ws_host)
                             await asyncio.sleep(5)
                             continue
 

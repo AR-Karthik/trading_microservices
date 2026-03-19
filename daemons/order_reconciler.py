@@ -6,6 +6,8 @@ import sys
 import time
 from datetime import datetime
 import redis.asyncio as redis
+import zmq
+import zmq.asyncio
 from core.mq import MQManager, Ports, Topics
 from core.logger import setup_logger
 from core.health import HeartbeatProvider
@@ -283,6 +285,8 @@ class OrderReconciler:
                             if oid: self._memory_pending_orders[oid] = json.dumps(leg)
                     
                     logger.info(f"📥 Tracking new basket: {p_uuid}")
+            except zmq.Again:
+                continue
             except Exception as e:
                 logger.error(f"Recv error: {e}")
                 await asyncio.sleep(1)

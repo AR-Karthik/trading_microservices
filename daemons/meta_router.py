@@ -1,12 +1,12 @@
-"""
-daemons/meta_router.py
-======================
-Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)
-
-Architecture:
-  Main asyncio loop   → Orchestrates NIFTY, BANKNIFTY, SENSEX parallel flows.
-  RegimeOrchestrator  → Dispatches commands via ZMQ.
-"""
+import asyncio
+import json
+import logging
+import os
+import sys
+import time
+import uuid
+import zmq
+import zmq.asyncio
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 DEFAULT_MAX_PORTFOLIO_HEAT = 0.25  # [C2-01] Maximum combined fractional Kelly — spec says 25%, was 50%
