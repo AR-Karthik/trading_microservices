@@ -10,7 +10,7 @@ import time
 import json
 import argparse
 import sys
-from datetime import date
+from datetime import date, datetime
 
 try:
     from dotenv import load_dotenv
@@ -430,11 +430,56 @@ def delete_instance():
         print(f"Failed to delete: {e}")
 
 def generate_local_env():
-    """Generates a local .env file based on current ENVIRONMENT variables or defaults."""
-    env_lines = [f"{k}={v}" for k, v in ENV_VARS.items()]
-    with open(".env", "w") as f:
-        f.write("\n".join(env_lines) + "\n")
-    print("✅ Local .env file generated successfully.")
+    """
+    Generates/Refreshes a local .env file.
+    Hardens the process by MERGING instead of wiping existing values for sensitive keys.
+    """
+    # 1. Load existing .env into a dictionary
+    env_dict = {}
+    if os.path.exists(".env"):
+        try:
+            with open(".env", "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        env_dict[k.strip()] = v.strip()
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to read existing .env: {e}")
+
+    # 2. Update with values from ENV_VARS (only if not empty or if it's a critical infrastructure update)
+    # This prevents overwriting existing Shoonya creds with empty strings if they aren't in the shell env.
+    for k, v in ENV_VARS.items():
+        # If the key is NEW, or the current value is empty/placeholder, use the one from ENV_VARS
+        # BUT if ENV_VARS itself has a placeholder/empty, and we HAVE an existing value, keep the existing one.
+        is_placeholder = v in ["", "abc1234", "trading_redis", "trading_pass", "trading_user", "trading_db"]
+        
+        if k not in env_dict:
+            env_dict[k] = v
+        else:
+            # Key exists in .env. Only overwrite if the new value is NOT a placeholder.
+            if not is_placeholder:
+                env_dict[k] = v
+
+    # 3. Write back to .env
+    try:
+        with open(".env", "w") as f:
+            f.write("# Trading System Environment Config\n")
+            f.write(f"# Updated: {datetime.now().isoformat()}\n\n")
+            for k in sorted(env_dict.keys()):
+                f.write(f"{k}={env_dict[k]}\n")
+        print("✅ Local .env generated/updated (merged existing secrets).")
+    except Exception as e:
+        print(f"❌ Error: Failed to write .env: {e}")
+
+    # 4. Final Verification Warning
+    missing = [k for k in ["SHOONYA_USER", "SHOONYA_PWD", "SHOONYA_FACTOR2"] if not env_dict.get(k)]
+    if missing:
+        print(f"\n[CRITICAL] Shoonya credentials still missing in .env: {missing}")
+        print("Please edit .env manually before starting the system.")
+        print("👉 Please manually edit .env to add them before starting the system.")
+
+    print("✅ Local .env file refreshed successfully.")
 
 if __name__ == "__main__":
     print(f"DEBUG: Active Project ID: {PROJECT_ID}")

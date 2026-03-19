@@ -17,16 +17,16 @@ class CloudAlerts:
         return cls._instance
 
     def __init__(self):
-        redis_host = os.environ.get("REDIS_HOST", "localhost")
-        self.redis_url = f"redis://{redis_host}:6379"
+        from core.auth import get_redis_url
+        self.redis_url = get_redis_url()
         # Redis connection is deferred to _ensure_redis to prevent blocking the synchronous constructor.
-        pass
+        self._redis = None
 
     async def _ensure_redis(self):
         if self._redis is None:
             try:
                 self._redis = redis.from_url(self.redis_url, decode_responses=True)
-                logger.info(f"CloudAlerts initialized using Redis queue at {self.redis_url}")
+                logger.info("CloudAlerts initialized with authenticated Redis.")
             except Exception as e:
                 logger.error(f"Failed to initialize Redis for alerts: {e}")
 

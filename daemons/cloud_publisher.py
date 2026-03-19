@@ -203,15 +203,23 @@ class CloudPublisher:
                     }
                 }
 
-                # Push to Firestore Metadata (Discovery)
-                doc_ref = self.firestore_db.collection("system").document("metadata")
-                await doc_ref.set(state, merge=True)
+                # Wave 4.1: Catch RefreshError during runtime publishing
+                try:
+                    doc_ref = self.firestore_db.collection("system").document("metadata")
+                    await doc_ref.set(state, merge=True)
+                except Exception as e:
+                    # Catch google.auth.exceptions.RefreshError or similar 404s from metadata
+                    if "RefreshError" in str(e) or "404" in str(e):
+                        logger.error(f"❌ GCP Auth Refresh Failed (Metadata 404): Disabling Firestore publishing. Error: {e}")
+                        self.firestore_db = None
+                    else:
+                        logger.error(f"Firestore metadata update error: {e}")
                 
                 # Also sync current operating config for visibility when VM is OFF
                 await self._sync_config_to_firestore()
 
             except Exception as e:
-                logger.error(f"Heartbeat error: {e}")
+                logger.error(f"Heartbeat loop error: {e}")
 
             await asyncio.sleep(HEARTBEAT_INTERVAL_S)
 

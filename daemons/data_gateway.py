@@ -709,11 +709,12 @@ class DataGateway:
                 for symbol, last_ts in list(self._last_tick_ts.items()):
                     age_ms = (now - last_ts) * 1000
                     if age_ms > STALENESS_THRESHOLD_MS:
-                        # Wave 3.9 Fix: Only log/reset for primary index to prevent alert/reset storm
-                        if symbol == "NIFTY50":
+                        # Wave 4.1 Fix: Strictly filter alerts to Indices only (NIFTY50, BANKNIFTY, SENSEX)
+                        # And enforce a 30s global alert throttle.
+                        if symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
                             if (now - self._last_stale_alert_ts) > 30:
                                 logger.warning(f"STALE FEED: {symbol} last tick {age_ms:.0f}ms ago. Triggering socket reset...")
-                                await self._force_socket_reset(symbol)
+                                await self._force_socket_reset(symbol, silent=False)
                                 
                                 if is_market_hours() and not os.getenv("SIMULATION_MODE", "false").lower() == "true":
                                     asyncio.create_task(send_cloud_alert(
@@ -722,25 +723,28 @@ class DataGateway:
                                     ))
                                 self._last_stale_alert_ts = now
                         else:
-                            # Silent reset for others, no logging
-                            await self._force_socket_reset(symbol)
+                            # Silent reset for individual stocks, no logging, no alerts.
+                            await self._force_socket_reset(symbol, silent=True)
             except Exception as e:
                 logger.error(f"Watchdog error: {e}")
             await asyncio.sleep(0.5)
 
-    async def _force_socket_reset(self, symbol: str):
+    async def _force_socket_reset(self, symbol: str, silent: bool = False):
         """
         Simulates a TCP socket reset for a stale feed.
         In production: disconnect/reconnect the Shoonya WebSocket.
         """
-        logger.warning(f"Socket reset triggered for {symbol}.")
+        if not silent:
+            logger.warning(f"Socket reset triggered for {symbol}.")
+            
         # Reset the last tick timestamp to avoid repeated triggers
         self._last_tick_ts[symbol] = datetime.now(timezone.utc).timestamp()
 
         await self.redis_client.publish("system_events", json.dumps({
             "event": "FEED_RESET",
             "symbol": symbol,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "silent": silent
         }))
 
     # ── PCR Heuristic Ingestion (Phase 0) ────────────────────────────────────

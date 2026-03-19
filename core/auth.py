@@ -1,4 +1,6 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
 def get_redis_url():
     """Returns a fully authenticated Redis URL based on .env variables."""
