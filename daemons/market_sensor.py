@@ -869,7 +869,10 @@ class MarketSensor:
                 except Exception as e:
                     logger.error(f"Market Sensor outer loop catastrophic error: {e}")
                     await asyncio.sleep(5)
-            sub.close()
+            except Exception as e:
+                logger.error(f"Market Sensor run initialization error: {e}")
+            finally:
+                sub.close()
 
     async def _publish_market_state(self, symbol: str, price: float):
         """Assembles and publishes the full market state vector."""

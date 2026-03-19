@@ -40,6 +40,7 @@ class CloudPublisher:
         self.gcs_client = None
         self.external_ip = None
         self._eod_done_today = False
+        self._firestore_module = None
 
     async def _init_cloud_clients(self):
         """Lazily initialize Google Cloud clients."""
@@ -48,10 +49,12 @@ class CloudPublisher:
             
             # [Audit-Fix] Detect if GOOGLE_APPLICATION_CREDENTIALS is a directory (Docker mount glitch)
             creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-            if creds_path and os.path.isdir(creds_path):
-                logger.error(f"❌ GCP Credentials Error: {creds_path} is a directory! Unsetting and falling back to ADC.")
-                del os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+            if creds_path:
+                if os.path.isdir(creds_path) or (os.path.isfile(creds_path) and os.path.getsize(creds_path) == 0):
+                    logger.error(f"❌ GCP Credentials Error: {creds_path} is invalid (dir or empty)! Unsetting to prevent metadata-service hang.")
+                    os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
             
+            from google.cloud import firestore, storage
             self._firestore_module = firestore
             self.firestore_db = firestore.AsyncClient()
             self.gcs_client = storage.Client()
