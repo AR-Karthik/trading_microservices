@@ -28,7 +28,7 @@ def get_dashboard_access_key():
         return response.payload.data.decode("UTF-8")
     except Exception as e:
         print(f"Secret Manager fetch failed: {e}. Using default.")
-        return "K_A_R_T_H_I_K_2026_PRO"
+        return "bA#w#3iW=Q4w"
 
 ACCESS_KEY = get_dashboard_access_key()
 

@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import multiprocessing as mp
+from queue import Empty
 import sys
 import time
 import queue
@@ -420,7 +421,7 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
                 break  # Sentinel → shutdown
             signals = compute_signals(snapshot)
             out_queue.put(signals)
-        except mp.queues.Empty:
+        except Empty:
             continue
         except Exception as e:
             logger.error(f"ComputeWorker error: {e}")
@@ -475,7 +476,6 @@ class CompositeAlphaScorer:
         if d.get("price_slope", 0) < 0 and d.get("cvd_slope", 0) > 0:
             score += 50
         return score
-
 
 # ── Main Market Sensor ────────────────────────────────────────────────────────
 
@@ -569,6 +569,12 @@ class MarketSensor:
         self.market_states: dict[str, str] = collections.defaultdict(lambda: "NEUTRAL")
         self.vwap_cum_pv: dict[str, float] = collections.defaultdict(float)
         self.vwap_cum_vol: dict[str, float] = collections.defaultdict(float)
+        
+        # [Audit-Fix] Option OI Store for Walls Calculation
+        self.option_oi: dict[str, dict[str, dict[int, float]]] = collections.defaultdict(
+            lambda: {"CE": {}, "PE": {}}
+        )
+        self._last_wall_pub = 0.0
 
     # Removed redundant compute process methods
 
@@ -589,10 +595,10 @@ class MarketSensor:
             logger.info(f"🚀 Compute Process started. PID: {self._compute_proc.pid}")
             
             # [Audit 11.1] Heartbeat integration
-            self.hb = HeartbeatProvider("MarketSensor", self.mq)
-            await self.hb.start()
+            self.hb = HeartbeatProvider("MarketSensor", self._redis)
+            asyncio.create_task(self.hb.run_heartbeat())
 
-            self.main_task = asyncio.create_task(self.run())
+            await self.run()
         except Exception as e:
             logger.error(f"❌ Failed to start Market Sensor: {e}")
             self.stop()
@@ -607,7 +613,7 @@ class MarketSensor:
             except Exception:
                 pass
         if self.hb:
-            asyncio.create_task(self.hb.stop())
+            self.hb.stop_heartbeat()
         if self._compute_proc:
             if self._compute_proc.is_alive():
                 logger.info("Waiting for compute process to finish...")
@@ -803,6 +809,20 @@ class MarketSensor:
                     if symbol in self.all_indices:
                         self.spot_15m_series[symbol].append(float(price))
 
+                    # [Audit-Fix] Option OI Tracking for Walls
+                    if " " in symbol and (symbol.endswith(" CE") or symbol.endswith(" PE")):
+                        try:
+                            parts = symbol.split()
+                            # Format: "NIFTY 26MAR 22000 CE"
+                            base = parts[0]
+                            strike = int(parts[2])
+                            otype = parts[3]
+                            oi = float(tick.get("oi", 0))
+                            if oi > 0:
+                                self.option_oi[base][otype][strike] = oi
+                        except (IndexError, ValueError):
+                            pass
+
                     tick_count = int(tick_count + 1)
 
                     # Drain compute results every tick (non-blocking)
@@ -913,6 +933,7 @@ class MarketSensor:
         state = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol,
+            "price": price,
             "s_total": s_total,
             "s_env": s_env,
             "s_str": s_str,
@@ -973,7 +994,10 @@ class MarketSensor:
             s22 = 1.0
         elif price < vwap and slope_15m < 0:
             s22 = -1.0
-        state["whale_pivot"] = s22
+        
+        # [Audit-Fix] Naming alignment with Dashboard (Plural)
+        state["whales_pivot"] = s22 # Plural for main.py
+        state["whale_pivot"] = s22  # Singular for SignalVector SHM
 
         # 4. Update MARKET_STATE with Hysteresis - Asset Scoped [Audit Fix]
         current_state = str(await self._redis.get(f"MARKET_STATE:{symbol}") or "NEUTRAL")
@@ -1026,7 +1050,6 @@ class MarketSensor:
         # ── Multi-Index Signal Publication ──────────────────────────
         if symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
             # Target 1 = entry + 1.5 * ATR, Target 2 = entry + 3 * ATR
-            # For simplicity, we assume 'entry' is tracked in session or we use a baseline
             atr = float(state.get("atr", 20.0))
             entry_val = await self._redis.get(f"entry_price:{symbol}")
             entry = float(entry_val) if entry_val else price
@@ -1091,12 +1114,30 @@ class MarketSensor:
                     self.shm_global.write(signals)
             
             # 3. Publish over ZeroMQ [Audit 2.2: Fix parameter order]
-            await self.mq.send_json(self.pub, Topics.MARKET_STATE, state)
+            await self.mq.send_json(self.pub, f"{Topics.MARKET_STATE}.{symbol}", state)
             
             # Persist state by symbol
             await self._redis.set(f"latest_market_state:{symbol}", json.dumps(state, cls=NumpyEncoder))
             if symbol == "NIFTY50":
                 await self._redis.set("latest_market_state", json.dumps(state, cls=NumpyEncoder))
+
+            # [Audit-Fix] Periodic Walls Publication
+            now_ts = time.time()
+            if now_ts - self._last_wall_pub > 30 and symbol in self.all_indices:
+                self._last_wall_pub = now_ts
+                base = symbol.replace("50", "") if "NIFTY" in symbol else symbol
+                
+                # Calculate Call Wall
+                ce_dict = self.option_oi.get(base, {}).get("CE", {})
+                if ce_dict:
+                    call_wall = max(ce_dict, key=ce_dict.get)
+                    await self._redis.set(f"CALL_WALL:{symbol}", str(call_wall))
+                
+                # Calculate Put Wall
+                pe_dict = self.option_oi.get(base, {}).get("PE", {})
+                if pe_dict:
+                    put_wall = max(pe_dict, key=pe_dict.get)
+                    await self._redis.set(f"PUT_WALL:{symbol}", str(put_wall))
 
             # Persist history for UI charts
             await self._persist_signal_history(state)
@@ -1148,8 +1189,6 @@ class MarketSensor:
                 await self._redis.set(f"HMM_REGIME:{symbol}", "WAITING")
 
         if not self.test_mode:
-            # ... existing publication logic ...
-            
             # GAP FIX: Store individual heavyweight Z-scores for API / Power Five
             if symbol in TOP_10_HEAVYWEIGHTS:
                 hw_z = state.get("log_ofi_zscore", 0.0)
@@ -1187,4 +1226,4 @@ if __name__ == "__main__":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     sensor = MarketSensor()
-    asyncio.run(sensor.run())
+    asyncio.run(sensor.start())

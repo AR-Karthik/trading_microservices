@@ -69,11 +69,8 @@ class HeuristicEngine:
         # Tick buffer for intraday vol
         self.tick_buffer = deque(maxlen=300)
 
-        # Direct Rest API instantiation for critical historical data gaps
+        # Direct Rest API removed [Audit 14.1: Centralized in DataGateway]
         self.api = None
-        if _HAS_SHOONYA:
-            host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
-            self.api = NorenApi(host, "")
 
     def _pin_core(self):
         if sys.platform != "win32":
@@ -93,13 +90,11 @@ class HeuristicEngine:
             history_raw = await self.r.get(f"history_14d:{self.asset_id}")
             
             # [Audit-Fix] If Redis is empty, attempt direct API fallback
-            if not history_raw and self.api:
-                now = datetime.now()
-                # Trigger fallback if between 09:15 and 09:30 or if strictly needed on first boot
-                if (now.hour == 9 and 15 <= now.minute <= 30) or not self.history_14d:
-                    await self._load_lookback_shoonya()
-                    # Re-check Redis after fallback
-                    history_raw = await self.r.get(f"history_14d:{self.asset_id}")
+            # Failsafe: if history missing, it's a fatal config error in this model
+            if not self.history_14d:
+                logger.error(f"[{self.asset_id}] FATAL: 14D history missing in Redis! DataGateway sync must run first.")
+                # Re-check Redis after fallback
+                history_raw = await self.r.get(f"history_14d:{self.asset_id}")
 
             if history_raw:
                 self.history_14d = json.loads(history_raw)
@@ -135,56 +130,7 @@ class HeuristicEngine:
         except Exception as e:
             logger.error(f"[{self.asset_id}] Parameter fetch error: {e}")
 
-    async def _load_lookback_shoonya(self):
-        """Restores missing 14-day trailing historical data via direct brokerage fetch."""
-        if not self.api: return
-        
-        logger.info(f"[{self.asset_id}] Triggering Fallback Lookback Fetch from Shoonya API...")
-        try:
-            # Credentials from env
-            user = os.getenv("SHOONYA_USER")
-            pwd = os.getenv("SHOONYA_PWD")
-            factor2 = os.getenv("SHOONYA_FACTOR2")
-            vc = os.getenv("SHOONYA_VC")
-            app_key = os.getenv("SHOONYA_APP_KEY")
-            imei = os.getenv("SHOONYA_IMEI")
-            
-            if not all([user, pwd, factor2, vc, app_key, imei]):
-                logger.error(f"[{self.asset_id}] Missing Shoonya credentials for fallback.")
-                return
-
-            totp = pyotp.TOTP(factor2).now()
-            login_ret = self.api.login(userid=user, password=pwd, twoFA=totp, vendor_code=vc, api_secret=app_key, imei=imei)
-            
-            if not login_ret:
-                logger.error(f"[{self.asset_id}] Shoonya login failed during fallback.")
-                return
-
-            # Map asset to Shoonya token
-            token_map = {
-                "NIFTY50": ("NSE", "26000"),
-                "BANKNIFTY": ("NSE", "26001"),
-                "SENSEX": ("BSE", "1")
-            }
-            if self.asset_id not in token_map: return
-            exchange, token = token_map[self.asset_id]
-            
-            end_time = datetime.now().timestamp()
-            start_time = end_time - (20 * 86400) # 20 days
-            
-            # Fetch daily candles
-            ret = self.api.get_time_price_series(exchange=exchange, token=token, starttime=start_time, endtime=end_time, interval=None)
-            
-            if ret and isinstance(ret, list):
-                # 'ss0' is the field for close price in daily series
-                closes = [float(day['ss0']) for day in ret if 'ss0' in day]
-                if closes:
-                    self.history_14d = closes[-14:]
-                    # Update Redis for other components
-                    await self.r.set(f"history_14d:{self.asset_id}", json.dumps(self.history_14d))
-                    logger.info(f"[{self.asset_id}] Successfully hydrated 14D history via API Fallback ({len(self.history_14d)} days).")
-        except Exception as e:
-            logger.error(f"[{self.asset_id}] Shoonya fallback fetch failed: {e}")
+    # _load_lookback_shoonya REMOVED (Centralized in DataGateway)
 
     def _calculate_realized_vol(self, closes: list[float]) -> float:
         """Calculates 14-day Annualized Realized Volatility."""
@@ -265,7 +211,7 @@ class HeuristicEngine:
         while True:
             try:
                 msg_topic, state = await self.mq.recv_json(sub)
-                if not state or state.get("asset") != self.asset_id:
+                if not state or state.get("symbol") != self.asset_id:
                     continue
                 
                 # Sync parameters (PCR/History) every 300 market state ticks (~5 mins)

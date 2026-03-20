@@ -24,6 +24,7 @@ from core.shm import ShmManager
 from core.shared_memory import TickSharedMemory
 import os
 import threading
+import time
 
 import pyotp
 from dotenv import load_dotenv
@@ -58,7 +59,9 @@ MARKET_CLOSE = dt_time(15, 30)
 def is_market_hours():
     now_dt = datetime.now(IST)
     now = now_dt.time()
-    res = MARKET_OPEN <= now <= MARKET_CLOSE
+    # Market is open from 09:15 to 15:30 IST on weekdays
+    is_weekday = now_dt.weekday() < 5
+    res = is_weekday and (MARKET_OPEN <= now <= MARKET_CLOSE)
     
     # Extra logging to debug why we might be in simulated mode
     if random.random() < 0.01: # Sample logging to avoid spam
@@ -152,10 +155,21 @@ class DataGateway:
         self.active_option_tokens = {} # token -> symbol (e.g. "12345" -> "NIFTY26MAR22350CE")
         self.last_expiry_sync: float = 0.0
         
+        # [Audit] WebSocket state management
+        self._ws_stopped = threading.Event()
+        self._ws_reconnect_flag = False 
+        
+        # Simulation Settings
+        self.sim_mode = os.getenv("SIMULATION_MODE", "false").lower() == "true"
+        self.off_hour_sim = os.getenv("ENABLE_OFF_HOUR_SIMULATOR", "false").lower() == "true"
+        
         # [Audit] Create the Tick SHM segment once on startup
         try:
             self.shm_ticks = TickSharedMemory(create=True)
-            logger.info("✅ Tick Shared Memory segment created.")
+            
+            # [Audit-Fix] Initialize history fetch flag
+            self._history_synced = False
+            logger.info(f"✅ Tick Shared Memory segment created. SimMode: {self.sim_mode}, OffHourSim: {self.off_hour_sim}")
         except Exception as e:
             logger.error(f"❌ Failed to create Tick Shared Memory: {e}")
             self.shm_ticks = None
@@ -169,9 +183,8 @@ class DataGateway:
         vc = os.getenv("SHOONYA_VC")
         app_key = os.getenv("SHOONYA_APP_KEY")
         imei = os.getenv("SHOONYA_IMEI")
-        sim_mode = os.getenv("SIMULATION_MODE", "false").lower() == "true"
 
-        if sim_mode:
+        if self.sim_mode:
             logger.warning("⚠️ SIMULATION_MODE active. Skipping Shoonya login.")
             return True
 
@@ -228,17 +241,22 @@ class DataGateway:
         self._data_flow_alert_sent = False
 
         try:
-            await asyncio.gather(
-                self._mode_controller(),  # New: Dynamic mode manager
+            # Concurrent Tasks [Audit 14.1: Centralized History Sync]
+            tasks = [
                 self._tick_stream(),
+                self._mode_controller(),
                 self._lot_size_scheduler(),
+                self._config_update_listener(),
                 self._staleness_watchdog(),
-                self._circuit_breaker_monitor(),
                 self._dynamic_subscription_manager(),
                 self._dynamic_subscription_listener(), # Phase 6
-                self._pcr_ingestion_loop(), # Phase 0: Heuristic PCR ingestion
-                self._run_heartbeat(),      # Phase 9: UI & Observability
-            )
+                self._pcr_ingestion_loop(),
+                self._circuit_breaker_monitor(),
+                self._history_sync_scheduler(),
+                self._run_simulator(),
+                self._run_heartbeat(),
+            ]
+            await asyncio.gather(*tasks)
         except Exception as e:
             logger.critical(f"🛑 FATAL: DataGateway sub-task failed: {e}", exc_info=True)
             raise
@@ -345,29 +363,37 @@ class DataGateway:
     async def _tick_stream(self):
         """
         Processes ticks from either the Shoonya WebSocket or a simulator.
-        Designed to switch dynamically based on self.sim_mode.
         """
         logger.info("Starting tick stream manager...")
         loop = asyncio.get_running_loop()
         ws_thread = None
-        ws_stopped = threading.Event()
         feed_opened = threading.Event()
 
         def on_tick(tick_msg):
-            loop.call_soon_threadsafe(self.tick_queue.put_nowait, tick_msg)
+            # Final heartbeat log to confirm flow
+            if tick_msg.get('tk') == '26000': 
+                logger.debug(f"Nifty 50 Tick Ingested: {tick_msg.get('lp')}")
+            # [Audit-Fix] MUST copy tick_msg as NorenApi reuses the same object
+            loop.call_soon_threadsafe(self.tick_queue.put_nowait, tick_msg.copy())
 
         def on_open():
             logger.info("✅ Shoonya WebSocket Connected")
+            try:
+                limits = self.api.get_limits()
+                logger.info(f"Shoonya Session Limits: {limits.get('stat') if isinstance(limits, dict) else 'Unknown'}")
+            except Exception as e:
+                logger.error(f"Error getting limits: {e}")
+                
             feed_opened.set()
             for sub in SHOONYA_SUBSCRIPTIONS:
                 self.api.subscribe(sub)
 
         def on_error(err):
-            logger.error(f"Shoonya WS Error: {err}")
+            logger.error(f"❌ Shoonya WS Error: {err}")
 
         def on_close():
             logger.warning("Shoonya WS Closed.")
-            ws_stopped.set()
+            self._ws_stopped.set()
 
         while True:
             if self._system_halted:
@@ -375,93 +401,102 @@ class DataGateway:
                 continue
 
             try:
-                # 1. Manage WebSocket Connection
-                if not self.sim_mode:
-                    # If we should be live but aren't (either first run or stopped by on_close)
-                    if ws_thread is None or ws_stopped.is_set():
-                        logger.info("Initializing/Restarting Shoonya WebSocket...")
-                        try:
-                            # Re-initialize API object to clear internal library state
-                            host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
-                            ws_host = host.replace("https", "wss").replace("NorenWClientTP", "NorenWSTP/")
-                            # Clear old API instance to prevent "socket already opened"
-                            if self.api:
-                                try:
-                                    self.api.close_websocket()
-                                except:
-                                    pass
-                            self.api = NorenApi(host=host, websocket=ws_host)
-                            
-                            await self._ensure_login()
+                # 1. Manage WebSocket Connection (Live Mode Only)
+                # Skip if in hard SIMULATION_MODE or if OFF_HOUR_SIM is active
+                if not self.sim_mode and not self.off_hour_sim:
+                    if ws_thread is None or self._ws_stopped.is_set() or self._ws_reconnect_flag:
+                        self._ws_reconnect_flag = False
+                        host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
+                        ws_host = os.getenv("SHOONYA_WEBSOCKET_HOST") or host.replace("https", "wss").replace("NorenWClientTP", "NorenWSTP")
+                        
+                        logger.info(f"DEBUG: Attempting Shoonya Login for {os.getenv('SHOONYA_USER')}...")
+                        logger.info(f"Connecting to WS: {ws_host}")
+                        self.api = NorenApi(host=host, websocket=ws_host)
+                        totp = pyotp.TOTP(os.getenv("SHOONYA_FACTOR2"))
+                        twofa = totp.now()
+                        
+                        ret = await asyncio.to_thread(self.api.login, 
+                            userid=os.getenv("SHOONYA_USER"), password=os.getenv("SHOONYA_PWD"),
+                            twoFA=twofa, vendor_code=os.getenv("SHOONYA_VC"),
+                            api_secret=os.getenv("SHOONYA_APP_KEY"), imei=os.getenv("SHOONYA_IMEI")
+                        )
+                        logger.info(f"DEBUG: Shoonya Login Response: {ret}")
+                        
+                        if ret and ret.get('stat') == 'Ok':
+                            logger.info("✅ Shoonya Login Successful")
                             feed_opened.clear()
-                            ws_stopped.clear()
+                            self._ws_stopped.clear()
                             ws_thread = threading.Thread(
                                 target=self.api.start_websocket,
-                                kwargs={
-                                    "subscribe_callback": on_tick,
-                                    "order_update_callback": lambda o: None,
-                                    "socket_open_callback": on_open,
-                                    "socket_error_callback": on_error,
-                                    "socket_close_callback": on_close
-                                },
+                                kwargs={"subscribe_callback": on_tick, "socket_open_callback": on_open},
                                 daemon=True
                             )
                             ws_thread.start()
-                            
-                            # Wait for connection success
-                            success = await asyncio.to_thread(feed_opened.wait, 20.0)
-                            if not success:
-                                logger.error("WebSocket failed to connect within timeout.")
-                        except Exception as e:
-                            logger.error(f"WebSocket run_forever error: {e}. Restarting...")
-                            try:
-                                self.api.close_websocket()
-                            except:
-                                pass
-                            # Re-initialize to clear internal library state
-                            self.api = NorenApi(host=os.getenv("SHOONYA_HOST"), websocket=ws_host)
-                            await asyncio.sleep(5)
+                            await asyncio.to_thread(feed_opened.wait, 20.0)
+                        else:
+                            logger.error(f"❌ Shoonya Login Failed: {ret}")
+                            await asyncio.sleep(10)
                             continue
 
-                # 2. Get next tick (Simulated or Real)
-                if self.sim_mode:
-                    await asyncio.sleep(random.uniform(0.1, 0.5))
-                    choices = SYMBOLS_UNDERLYING + list(self.active_option_tokens.values())
-                    symbol = random.choice(choices)
-                    base_price = self._prices.get(symbol, 1000.0)
-                    price = base_price * (1 + random.uniform(-0.0002, 0.0002))
-                    
-                    token = "FAKE_TOKEN"
-                    mapping = {**TOKEN_TO_SYMBOL, **self.active_option_tokens}
-                    for t, s in mapping.items():
-                        if s == symbol:
-                            token = t
-                            break
-                    raw_tick = {'t': 'tk', 'tk': token, 'lp': str(price), 'v': str(random.randint(1, 10))}
-                else:
-                    try:
-                        raw_tick = await asyncio.wait_for(self.tick_queue.get(), timeout=1.0)
-                    except asyncio.TimeoutError:
-                        continue
+                # 2. Ingest Next Tick
+                try:
+                    raw_tick = await asyncio.wait_for(self.tick_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
 
-                # 3. Process raw_tick
+                # 3. Validation & Parsing
                 if raw_tick.get('t') not in ('tk', 'tf'):
                     continue
 
-                if not getattr(self, '_data_flow_alert_sent', False):
-                    source = "SIMULATED" if self.sim_mode else "LIVE"
-                    asyncio.create_task(send_cloud_alert(f"✅ DATA INGESTION {source}: Market ticks active.", alert_type="INFO"))
-                    self._data_flow_alert_sent = True
-
-                token = raw_tick.get('tk')
+                token = str(raw_tick.get('tk'))
                 symbol = TOKEN_TO_SYMBOL.get(token) or self.active_option_tokens.get(token)
-                if not symbol: continue
+                if not symbol:
+                    # logger.debug(f"Unknown token: {token}")
+                    continue
+                
+                # logger.info(f"DEBUG: Processing tick for {symbol} (Token: {token}) ID: {hex(id(symbol))}")
 
+                # 4. Standardize Internal Tick Format
                 price = float(raw_tick.get('lp', self._prices.get(symbol, 0.0)))
                 prev_price = self._prices.get(symbol, price)
                 self._prices[symbol] = price
+                
+                curr_oi = int(raw_tick.get('oi', self._oi.get(symbol, 0)))
+                prev_oi = self._oi.get(symbol, curr_oi)
+                self._oi[symbol] = curr_oi
 
-                # [D-38] Store DAY_OPEN for Change% calculation if not already set
+                if not getattr(self, '_data_flow_alert_sent', False):
+                    from core.alerts import send_cloud_alert
+                    source = "SIMULATED" if (self.sim_mode or self.off_hour_sim) else "LIVE"
+                    asyncio.create_task(send_cloud_alert(f"✅ DATA INGESTION {source}: Market ticks active.", alert_type="INFO"))
+                    self._data_flow_alert_sent = True
+
+                tick = {
+                    "symbol": symbol,
+                    "price": price,
+                    "prev_price": prev_price,
+                    "volume": int(raw_tick.get('v', 1)),
+                    "last_volume": int(raw_tick.get('v', 1)),
+                    "oi": curr_oi,
+                    "prev_oi": prev_oi,
+                    "bid": float(raw_tick.get('bp1', price - 0.05)),
+                    "ask": float(raw_tick.get('sp1', price + 0.05)),
+                    "bid_vol": int(raw_tick.get('bq1', 100)),
+                    "ask_vol": int(raw_tick.get('sq1', 100)),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "type": "TICK"
+                }
+
+                # 5. Enrichment & Storage
+                # [OF-01] Pressure Gauge (OI Accel)
+                oi_diff = tick["oi"] - tick["prev_oi"]
+                if abs(oi_diff) > 500: # Consistent with original threshold
+                    tick["oi_accel"] = float(oi_diff)
+                    await self.redis_client.set(f"OI_ACCEL:{symbol}", str(oi_diff))
+                else:
+                    tick["oi_accel"] = 0.0
+                
+                # Persistence & Publication
                 await self.redis_client.setnx(f"DAY_OPEN:{symbol}", str(price))
 
                 # [D-39] Identify Option Type and Store OI for PCR calculation
@@ -472,31 +507,6 @@ class DataGateway:
                     base_asset = symbol.split()[0]
                     await self.redis_client.set(f"OI:PE:{base_asset}", str(raw_tick.get('oi', 0)))
 
-                tick = {
-                    "symbol": symbol,
-                    "price": price,
-                    "prev_price": prev_price,
-                    "volume": int(raw_tick.get('v', 1)),
-                    "last_volume": int(raw_tick.get('v', 1)),
-                    "oi": int(raw_tick.get('oi', self._oi.get(symbol, 0))),
-                    "prev_oi": self._oi.get(symbol, 0),
-                    "bid": float(raw_tick.get('bp1', price - 0.05)),
-                    "ask": float(raw_tick.get('sp1', price + 0.05)),
-                    "bid_vol": int(raw_tick.get('bq1', 100)),
-                    "ask_vol": int(raw_tick.get('sq1', 100)),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "type": "TICK"
-                }
-
-                # [OF-01] Pressure Gauge (OI Accel)
-                oi_diff = tick["oi"] - tick["prev_oi"]
-                if abs(oi_diff) > 500: # Threshold for 'Acceleration'
-                    tick["oi_accel"] = float(oi_diff)
-                    await self.redis_client.set(f"OI_ACCEL:{symbol}", str(oi_diff))
-                else:
-                    tick["oi_accel"] = 0.0
-
-                # Save to Redis
                 async with self.redis_client.pipeline(transaction=True) as pipe:
                     pipe.set(f"latest_tick:{symbol}", json.dumps(tick, cls=NumpyEncoder))
                     history_key = f"tick_history:{symbol}"
@@ -504,25 +514,28 @@ class DataGateway:
                     pipe.ltrim(history_key, -2000, -1)
                     await pipe.execute()
                 
-                self._last_tick_ts[symbol] = datetime.now(timezone.utc).timestamp()
+                # ZMQ Publication to both Raw and TICK topics
+                await self.mq.send_json(self.pub_socket, Topics.TICK_DATA, tick)
+                await self.mq.send_json(self.pub_socket, f"TICK.{symbol}", tick)
+                
+                self._last_tick_ts[symbol] = time.time()
 
                 # Optimized Strike Sync (Multi-Index)
-                if symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"] and random.random() < 0.1:
+                if symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"] and random.random() < 0.05:
                     ce = await self.get_optimal_strike(price, "call")
                     pe = await self.get_optimal_strike(price, "put")
                     base = "NIFTY" if symbol == "NIFTY50" else symbol
                     await self.redis_client.hset("optimal_strikes", mapping={f"{base}_CE": ce, f"{base}_PE": pe})
-
-                # Publish
-                await self.mq.send_json(self.pub_socket, f"TICK.{symbol}", tick)
 
             except asyncio.CancelledError:
                 break
             except zmq.Again:
                 continue
             except Exception as e:
-                logger.error(f"Data Gateway command error: {e}")
+                logger.error(f"Tick Stream Loop Error: {e}")
                 await asyncio.sleep(1)
+                if not self.sim_mode and not self.off_hour_sim:
+                    self._ws_stopped.set()
 
     # ── Dynamic Option Subscriptions ──────────────────────────────────────────
 
@@ -731,13 +744,24 @@ class DataGateway:
 
     async def _force_socket_reset(self, symbol: str, silent: bool = False):
         """
-        Simulates a TCP socket reset for a stale feed.
-        In production: disconnect/reconnect the Shoonya WebSocket.
+        Forces a full WebSocket reconnection for a stale feed.
         """
         if not silent:
-            logger.warning(f"Socket reset triggered for {symbol}.")
+            logger.warning(f"🔄 Socket reset triggered for {symbol}. Forcing WebSocket restart...")
             
-        # Reset the last tick timestamp to avoid repeated triggers
+        # 1. Signal the main tick_stream loop to reconnect
+        self._ws_reconnect_flag = True
+        
+        # 2. Explicitly close the current websocket (if it's hung)
+        try:
+            # We use to_thread because close_websocket might block
+            await asyncio.to_thread(self.api.close_websocket)
+            logger.info("Successfully requested Shoonya WS closure.")
+        except Exception as e:
+            if not silent:
+                logger.error(f"Error during close_websocket: {e}")
+                
+        # 3. Reset the last tick timestamp to avoid repeated triggers
         self._last_tick_ts[symbol] = datetime.now(timezone.utc).timestamp()
 
         await self.redis_client.publish("system_events", json.dumps({
@@ -901,6 +925,170 @@ class DataGateway:
             alert_type="CRITICAL"
         ))
 
+    # ── History Sync Scheduler (Centralized) ──────────────────────────────────
+    
+    async def _history_sync_scheduler(self):
+        """Schedules and executes the 14-day daily close fetch (Moved from SystemController)."""
+        logger.info("History sync scheduler active.")
+        while True:
+            try:
+                # 1. Boot-time check
+                if not self._history_synced:
+                    if not await self.redis_client.exists("history_14d:NIFTY50"):
+                        logger.info("🚀 Data missing on boot. Triggering 14-day historical fetch...")
+                        await self._fetch_14d_history()
+                    self._history_synced = True
+
+                # 2. Daily schedule at 09:00 IST
+                now = datetime.now(tz=IST)
+                if now.hour == 9 and now.minute == 0:
+                    logger.info("🕒 Scheduled 09:00 IST 14-day history sync...")
+                    await self._fetch_14d_history()
+                    await asyncio.sleep(65) # Avoid double trigger
+                
+            except Exception as e:
+                logger.error(f"History sync scheduler error: {e}")
+            
+            await asyncio.sleep(30)
+
+    async def _fetch_14d_history(self):
+        """Fetches 14 days of history for major indices (NIFTY, BANKNIFTY, SENSEX)."""
+        if self.sim_mode:
+            logger.info("🧪 Generating comprehensive mock 14D history for indices...")
+            for asset in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
+                base = 22000.0 if asset == "NIFTY50" else (47500.0 if asset == "BANKNIFTY" else 72000.0)
+                mock_closes = [base + random.uniform(-200, 200) for _ in range(14)]
+                await self.redis_client.set(f"history_14d:{asset}", json.dumps(mock_closes))
+            self._history_synced = True
+            return
+
+        try:
+            # Note: self.api is already logged in by _tick_stream
+            indices = [
+                {"id": "NIFTY50", "exch": "NSE", "token": "26000"},
+                {"id": "BANKNIFTY", "exch": "NSE", "token": "26001"},
+                {"id": "SENSEX", "exch": "BSE", "token": "1"}
+            ]
+
+            for idx in indices:
+                end_time = datetime.now().timestamp()
+                start_time = end_time - (20 * 86400) # 20 days buffer
+                
+                ret = await asyncio.to_thread(self.api.get_time_price_series,
+                    exchange=idx['exch'], token=idx['token'], 
+                    starttime=start_time, endtime=end_time, interval=None
+                )
+                
+                if ret and isinstance(ret, list):
+                    # 'into' or 'c' field for close
+                    closes = [float(c.get('into', c.get('c', 0))) for c in ret[-14:]]
+                    await self.redis_client.set(f"history_14d:{idx['id']}", json.dumps(closes))
+                    logger.info(f"✅ Centralized Sync: Stored 14D history for {idx['id']}")
+            
+        except Exception as e:
+            logger.error(f"Centralized history fetch failed: {e}")
+
+    # ── Standalone Post-Market Simulator ──────────────────────────────────────
+
+    async def _run_simulator(self):
+        """
+        Broadcasting simulator that cycles through ALL assets to fill all dashboard slots.
+        Starts if SIMULATION_MODE=true or ENABLE_OFF_HOUR_SIMULATOR=true.
+        """
+        logger.info("🚀 High-Fidelity Simulator task initialized.")
+        while True:
+            # Active if hard simulation is on OR if off-hour sim is enabled
+            if not self.sim_mode and not self.off_hour_sim:
+                await asyncio.sleep(10)
+                continue
+            
+            # Additional check: only run off-hour sim if real market is closed
+            # (To avoid overlapping with real ticks if some are still coming)
+            now = datetime.now(tz=IST)
+            if self.off_hour_sim and not self.sim_mode:
+                is_market_hours = (9, 15) <= (now.hour, now.minute) <= (15, 30)
+                if is_market_hours:
+                    await asyncio.sleep(60)
+                    continue
+            try:
+                # [Audit-Fix] Enhanced Simulator: Generate multi-strike options for indices
+                current_indices = ["NIFTY50", "BANKNIFTY", "SENSEX"]
+                for asset in current_indices:
+                    spot = self._prices.get(asset, 22000.0 if asset == "NIFTY50" else (47500.0 if asset == "BANKNIFTY" else 72000.0))
+                    step = 50 if asset == "NIFTY50" else (100 if asset == "BANKNIFTY" else 100)
+                    atm_strike = round(spot / step) * step
+                    expiry = await self.redis_client.get(f"EXPIRY:{asset}") or "26MAR"
+                    base_sym = "NIFTY" if asset == "NIFTY50" else asset
+                    
+                    # Simulate 5 OTM strikes for both sides to create walls/pivots
+                    for i in range(-5, 6):
+                        strike = atm_strike + (i * step)
+                        for otype in ["CE", "PE"]:
+                            opt_sym = f"{base_sym} {expiry} {int(strike)} {otype}"
+                            token = f"SIM_{base_sym}_{int(strike)}_{otype}"
+                            self.active_option_tokens[token] = opt_sym
+                            
+                            # Initial price heuristic (simple Intrinsic + Time value)
+                            dist = abs(spot - strike)
+                            intrinsic = max(0, (spot - strike) if otype == "CE" else (strike - spot))
+                            opt_price = intrinsic + max(5, 50 - dist * 0.1)
+                            
+                            # WALL Simulation: Pick a strike for high OI
+                            # Nifty Call Wall at +200, Put Wall at -200
+                            is_wall = (i == 4 and otype == "CE") or (i == -4 and otype == "PE")
+                            oi = random.randint(5000000, 8000000) if is_wall else random.randint(500000, 2000000)
+                            
+                            raw_tick = {
+                                't': 'tk', 'tk': token, 'lp': str(round(opt_price, 2)), 
+                                'v': str(random.randint(50, 200)), 'oi': str(oi),
+                                'bp1': str(round(opt_price - 0.1, 2)), 'sp1': str(round(opt_price + 0.1, 2)),
+                                'bq1': "500", 'sq1': "500"
+                            }
+                            await self.tick_queue.put(raw_tick)
+
+                # Cycle through existing watched symbols
+                for symbol in SYMBOLS_UNDERLYING:
+                    base_price = self._prices.get(symbol)
+                    if not base_price:
+                        if symbol == "NIFTY50": base_price = 22000.0
+                        elif symbol == "BANKNIFTY": base_price = 47500.0
+                        elif symbol == "SENSEX": base_price = 72000.0
+                        elif symbol == "RELIANCE": base_price = 2950.0
+                        elif symbol == "HDFCBANK": base_price = 1450.0
+                        else: base_price = 1000.0 + random.uniform(500, 2000)
+                        self._prices[symbol] = base_price
+                        
+                    price = base_price * (1 + random.uniform(-0.0002, 0.0002))
+                    self._prices[symbol] = price
+                    
+                    token = "FAKE_TOKEN"
+                    for t, s in TOKEN_TO_SYMBOL.items():
+                        if s == symbol: token = t; break
+                    
+                    raw_tick = {
+                        't': 'tk', 'tk': token, 'lp': str(round(price, 2)), 
+                        'v': str(random.randint(10, 500)), 'oi': str(random.randint(1000000, 5000000)),
+                        'bp1': str(round(price - 0.05, 2)), 'sp1': str(round(price + 0.05, 2)),
+                        'bq1': str(random.randint(1000, 5000)), 'sq1': str(random.randint(1000, 5000))
+                    }
+                    await self.tick_queue.put(raw_tick)
+                
+                await asyncio.sleep(1.0)
+            except Exception as e:
+                logger.error(f"Simulator cycle error: {e}")
+                await asyncio.sleep(1)
+
+    async def _config_update_listener(self):
+        """Listens for dynamic configuration changes from Redis."""
+        pubsub = self.redis_client.pubsub()
+        try:
+            await pubsub.subscribe("config_updates")
+            logger.info("Config update listener active.")
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    pass
+        except Exception as e:
+            logger.error(f"Config listener error: {e}")
 
 async def start_gateway():
     gw = DataGateway()
@@ -909,18 +1097,12 @@ async def start_gateway():
     except KeyboardInterrupt:
         logger.info("DataGateway shutting down.")
     finally:
-        gw.pub_socket.close()
+        if gw.pub_socket: gw.pub_socket.close()
         gw.mq.context.term()
-        if gw.redis_client:
-            await gw.redis_client.aclose()
-
+        if gw.redis_client: await gw.redis_client.aclose()
 
 if __name__ == "__main__":
-    try:
-        if uvloop:
-            uvloop.install()
-        elif hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        asyncio.run(start_gateway())
-    except KeyboardInterrupt:
-        pass
+    if uvloop: uvloop.install()
+    elif hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.run(start_gateway())

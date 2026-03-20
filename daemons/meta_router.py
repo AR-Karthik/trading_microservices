@@ -234,6 +234,10 @@ class MetaRouter:
         self.collateral_component: float = 1000000.0 # Default 10L collateral
         self.hedge_reserve: float = 0.0 # [C2-01] Explicit 15% tranche
         self.quarantine_premium: float = 0.0
+        
+        # Throttling for "Portfolio Heat Map" alerts
+        self.last_heat_alert_val: float = 0.0
+        self.last_heat_alert_ts: float = 0.0
     
     async def _sync_settings(self):
         """Syncs engine mode and parameters from Redis (upstream Firestore)."""
@@ -533,14 +537,35 @@ class MetaRouter:
                     f"🔥 PORTFOLIO HEAT CAP: total_f={total_heat:.3f} > limit={self.heat_limit:.3f}. "
                     f"Scaling all weights by {scale:.3f}."
                 )
-                asyncio.create_task(send_cloud_alert(
-                    f"🔥 PORTFOLIO HEAT CAP TRIGGERED\n"
-                    f"Total Heat: {total_heat:.3f} | Limit: {self.heat_limit:.3f}\n"
-                    f"Scaling factor: {scale:.3f} applied to all positions.",
-                    alert_type="RISK"
-                ))
+                
+                # --- CHANGE-BASED THROTTLE (SRS §10.2 / User Request) ---
+                now = time.time()
+                heat_change = abs(total_heat - self.last_heat_alert_val)
+                time_since_last = now - self.last_heat_alert_ts
+                
+                # Alert if:
+                # 1. First time triggering (val was 0)
+                # 2. Significant change in heat (> 0.05)
+                # 3. Minimum 5-minute interval even if heat is high
+                if self.last_heat_alert_val == 0 or (heat_change > 0.05 and time_since_last > 60) or time_since_last > 300:
+                    asyncio.create_task(send_cloud_alert(
+                        f"🔥 PORTFOLIO HEAT MAP TRIGGERED\n"
+                        f"Total Heat: {total_heat:.3f} | Limit: {self.heat_limit:.3f}\n"
+                        f"Scaling factor: {scale:.3f} applied to all positions.",
+                        alert_type="RISK"
+                    ))
+                    self.last_heat_alert_val = total_heat
+                    self.last_heat_alert_ts = now
+                else:
+                    if int(now) % 10 == 0: # Log every ~10s to avoid log spam
+                        logger.info(f"🔇 Throttling Portfolio Heat Alert: change={heat_change:.4f}, elapsed={time_since_last:.1f}s")
+                
                 await self._redis.set("PORTFOLIO_HEAT_CAPPED", "True", ex=60)
             else:
+                if self.last_heat_alert_val > 0:
+                    # Reset when heat drops below limit
+                    logger.info("🟢 Portfolio heat returned below limit.")
+                    self.last_heat_alert_val = 0.0
                 await self._redis.set("PORTFOLIO_HEAT_CAPPED", "False", ex=60)
 
             for cmd in all_commands:

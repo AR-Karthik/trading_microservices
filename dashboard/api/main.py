@@ -200,16 +200,16 @@ def get_state(asset: str = "NIFTY50"):
         if asset not in indices: asset = "NIFTY50"
         
         index_states = {}
-        for asset in indices:
-            st_raw = r.get(f"latest_market_state:{asset}")
+        for idx in indices:
+            st_raw = r.get(f"latest_market_state:{idx}")
             st = json.loads(st_raw) if st_raw else {}
-            reg_raw = r.hget("hmm_regime_state", asset)
+            reg_raw = r.hget("hmm_regime_state", idx)
             regime = "UNKNOWN"
             if reg_raw:
                 try: regime = json.loads(reg_raw).get("regime", "UNKNOWN")
                 except: pass
             
-            index_states[asset] = {
+            index_states[idx] = {
                 "score": st.get("s_total", 0.0), 
                 "regime": regime, 
                 "price": st.get("price", 0.0),
@@ -219,9 +219,9 @@ def get_state(asset: str = "NIFTY50"):
                 "rsi": st.get("rsi", 50.0),
                 "pcr": st.get("pcr", 0.85),
                 "change_pct": st.get("change_pct", 0.0),
-                "call_wall": r.get(f"CALL_WALL:{asset}") or "—",
-                "put_wall": r.get(f"PUT_WALL:{asset}") or "—",
-                "oi_accel": float(r.get(f"OI_ACCEL:{asset}") or 0.0)
+                "call_wall": r.get(f"CALL_WALL:{idx}") or "—",
+                "put_wall": r.get(f"PUT_WALL:{idx}") or "—",
+                "oi_accel": float(r.get(f"OI_ACCEL:{idx}") or 0.0)
             }
 
         # Index-aware Deep Signals
@@ -233,6 +233,7 @@ def get_state(asset: str = "NIFTY50"):
             ms = json.loads(r.get("latest_market_state:NIFTY50") or "{}")
 
         deep_signals = {
+            "price": ms.get("price", 0.0),
             "log_ofi_z": ms.get("log_ofi_zscore", 0.0),
             "dispersion": ms.get("dispersion_coeff", 0.5),
             "hurst":      ms.get("hurst", 0.5),

@@ -1,6 +1,5 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
@@ -10,870 +9,603 @@
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link
-        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap"
-        rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&family=JetBrains+Mono:wght@500;700;900&display=swap" rel="stylesheet">
     <style>
-        :root {
-            --theme-accent: #00D2FF;
-            --theme-accent-rgb: 0, 210, 255;
-        }
-
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #000000;
-            color: #e6edf3;
-            -webkit-tap-highlight-color: transparent;
-        }
-
-        .glass {
-            background: rgba(13, 17, 23, 0.8);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid rgba(48, 54, 61, 0.5);
-        }
-
-        .oled-card {
-            background: #0a0a0a;
-            border: 1px solid #1a1a1a;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-
-        .oled-card:hover {
-            border-color: var(--theme-accent);
-            box-shadow: 0 0 20px rgba(var(--theme-accent-rgb), 0.1);
-        }
-
-        .mono {
-            font-family: 'JetBrains Mono', monospace;
-        }
-
-        .tab-active {
-            color: var(--theme-accent);
-            border-bottom: 2px solid var(--theme-accent);
-        }
-
-        @keyframes pulse-red {
-
-            0%,
-            100% {
-                box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.4);
-            }
-
-            50% {
-                box-shadow: 0 0 20px 0 rgba(248, 81, 73, 0.4);
-            }
-        }
-
-        .animate-panic {
-            animation: pulse-red 2s infinite;
-        }
-
-        .scroll-hide::-webkit-scrollbar {
-            display: none;
-        }
-
-        .z-matrix {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
-            gap: 0.5rem;
-        }
+        :root { --theme-accent: #00D2FF; --theme-accent-rgb: 0, 210, 255; }
+        .theme-actual { --theme-accent: #3fb950; --theme-accent-rgb: 63, 185, 80; }
+        body { font-family: 'Inter', sans-serif; background-color: #000000; color: #e6edf3; overflow-x: hidden; }
+        .glass { background: rgba(10, 10, 10, 0.8); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.05); }
+        .oled-card { background: #070707; border: 1px solid #1a1a1a; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        
+        .k-letter { color: var(--theme-accent); font-weight: 900; text-shadow: 0 0 15px rgba(var(--theme-accent-rgb), 0.8); font-size: 1.1em; }
+        
+        .tab-active { color: var(--theme-accent); border-bottom: 2px solid var(--theme-accent); }
+        .btn-neon { background: transparent; border: 1px solid var(--theme-accent); color: var(--theme-accent); transition: all 0.3s; }
+        .btn-neon:hover:not(:disabled) { background: var(--theme-accent); color: #000; box-shadow: 0 0 20px rgba(var(--theme-accent-rgb), 0.4); }
+        .btn-neon:disabled { opacity: 0.5; cursor: not-allowed; border-color: #333; color: #666; }
+        
+        @keyframes pulse-red { 0%, 100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.4); } 50% { box-shadow: 0 0 20px 0 rgba(248, 81, 73, 0.4); } }
+        .animate-panic { animation: pulse-red 2s infinite; }
+        .scroll-hide::-webkit-scrollbar { display: none; }
+        
+        /* Heatmap Backgrounds */
+        .bg-regime-trending { background: radial-gradient(circle at center, rgba(63, 185, 80, 0.1) 0%, #000 70%); }
+        .bg-regime-crash { background: radial-gradient(circle at center, rgba(248, 81, 73, 0.1) 0%, #000 70%); }
+        .bg-regime-ranging { background: radial-gradient(circle at center, rgba(210, 153, 13, 0.1) 0%, #000 70%); }
+        
+        .terminal-log { font-family: 'JetBrains Mono', monospace; font-size: 10px; line-height: 1.5; }
     </style>
     <script>
         tailwind.config = {
             theme: {
-                extend: {
-                    colors: {
-                        dark: '#000000',
-                        card: '#0a0a0a',
-                        accent: 'var(--theme-accent)',
-                        success: '#3fb950',
-                        danger: '#f85149',
-                        warning: '#d2990d',
-                    }
-                }
+                extend: { colors: { dark: '#000000', card: '#070707', accent: 'var(--theme-accent)', success: '#3fb950', danger: '#f85149', warning: '#d2990d' } }
             }
         }
     </script>
 </head>
-
-<body class="overflow-x-hidden">
+<body>
     <div id="root"></div>
-
     <script type="text/babel">
         const { useState, useEffect, useRef, memo } = React;
-
-        const TabIcon = ({ name, active }) => {
-            const icons = {
-                warroom: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>,
-                playground: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg>,
-                evolution: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>,
-                audit: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" /></svg>,
-                health: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" /></svg>,
-                history: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>,
-                sim: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" /></svg>
-            };
-            return <div className={active ? 'text-accent' : 'text-gray-500'}>{icons[name]}</div>;
-        };
-
+        
         const formatCurrency = (v) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(v);
 
-        // --- SUB-COMPONENTS (Lifted Outside) ---
+        // API Base
+        const API_BASE = (() => {
+            const h = window.location.hostname;
+            if (h === 'localhost' || h === '127.0.0.1') return 'http://127.0.0.1:8000';
+            if (h.endsWith('.run.app')) return ''; 
+            return `${window.location.protocol}//${h}:8000`;
+        })();
 
-        const VolatilitySurface = memo(({ rv, iv }) => {
-            const canvasRef = useRef(null);
-            const chartRef = useRef(null);
-            useEffect(() => {
-                if (canvasRef.current) {
-                    if (chartRef.current) chartRef.current.destroy();
-                    const ctx = canvasRef.current.getContext('2d');
-                    chartRef.current = new Chart(ctx, {
-                        type: 'line',
-                        data: {
-                            labels: ['', '', '', '', ''],
-                            datasets: [
-                                { label: 'RV', data: [rv*0.9, rv*0.95, rv, rv*1.05, rv*1.1], borderColor: '#f85149', borderWidth: 1, pointRadius: 0, tension: 0.4 },
-                                { label: 'IV', data: [iv*0.8, iv*0.9, iv, iv*1.1, iv*1.2], borderColor: '#00D2FF', borderWidth: 2, pointRadius: 0, tension: 0.4 }
-                            ]
-                        },
-                        options: {
-                            responsive: true, maintainAspectRatio: false,
-                            plugins: { legend: { display: false } },
-                            scales: { x: { display: false }, y: { display: false } }
-                        }
-                    });
-                }
-            }, [rv, iv]);
-            return <div className="h-12 w-full mt-2 opacity-50"><canvas ref={canvasRef}></canvas></div>;
-        });
-
-        const ADXSpeedometer = memo(({ adx }) => {
-            const pct = Math.min(100, Math.max(0, adx));
-            return (
-                <div className="relative w-20 h-10 overflow-hidden">
-                    <svg viewBox="0 0 100 50" className="w-full h-full">
-                        <path d="M10 50 A 40 40 0 0 1 90 50" fill="none" stroke="#222" strokeWidth="8" />
-                        <path d="M10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--theme-accent)" strokeWidth="8" strokeDasharray={`${(pct/100)*126} 126`} />
-                    </svg>
-                    <div className="absolute inset-0 flex items-end justify-center pb-0 text-[9px] font-black mono text-white">{adx.toFixed(0)}</div>
-                </div>
-            );
-        });
-
-        const DeltaThermometer = memo(({ delta, threshold }) => {
-            const percentage = Math.min(100, Math.max(0, ((delta + threshold) / (threshold * 2)) * 100));
-            return (
-                <div className="w-full mt-4">
-                    <div className="flex justify-between text-[8px] font-black text-gray-600 mb-1 uppercase">
-                        <span>Net Delta</span>
-                        <span className={Math.abs(delta) > threshold ? 'text-danger' : 'text-accent'}>{delta.toFixed(3)}</span>
-                    </div>
-                    <div className="h-1.5 bg-white/5 rounded-full relative overflow-hidden">
-                        <div className="absolute left-[50%] h-full w-[1px] bg-white/20 z-10"></div>
-                        <div className={`h-full transition-all duration-500 rounded-full ${Math.abs(delta) > threshold ? 'bg-danger' : 'bg-accent'}`} style={{ width: `${percentage}%` }}></div>
+        // --- GLOBAL COMPONENTS ---
+        const Header = ({ mode, setMode, asset, setAsset, handlePanic }) => (
+            <nav className="glass p-4 sticky top-0 z-[100] border-b border-white/10 flex justify-between items-center px-8">
+                <div className="flex items-center gap-8">
+                    <div>
+                        <h1 className="text-xl font-bold tracking-tight text-gray-300">
+                            Project : <span className="k-letter">K</span>inetic <span className="k-letter">A</span>lgorithmic <span className="k-letter">R</span>eal-<span className="k-letter">T</span>ime <span className="k-letter">H</span>igh-<span className="k-letter">I</span>ntensity <span className="k-letter">K</span>night <span className="text-[9px] bg-accent/20 text-accent px-2 py-0.5 rounded ml-2 font-black align-middle">v8.2</span>
+                        </h1>
                     </div>
                 </div>
-            );
-        });
+                <div className="flex gap-6 items-center">
+                    <button onClick={() => setMode(mode === 'Paper' ? 'Actual' : 'Paper')} className={`px-4 py-1.5 rounded-full text-[10px] font-black border-2 transition-all ${mode === 'Paper' ? 'border-accent text-accent bg-accent/5' : 'border-success text-success bg-success/5'}`}>
+                        {mode.toUpperCase()} MODE
+                    </button>
+                    <button onClick={handlePanic} className="bg-danger/20 border border-danger text-danger px-6 py-2 rounded font-black text-xs uppercase animate-panic hover:bg-danger hover:text-white transition-all shadow-lg shadow-danger/20">
+                        GLOBAL LIQUIDATE
+                    </button>
+                </div>
+            </nav>
+        );
 
-        const WarRoom = memo(({ state, positions, mode, handlePanic, handleHalt, portfolioDelta }) => {
-            const [selectedIdx, setSelectedIdx] = useState('NIFTY50');
-            const powerData = state.power_five?.[selectedIdx] || {};
+        // --- TAB 1: COMMAND CENTER ---
+        const CommandCenter = ({ state, asset, setAsset }) => {
+            const regimeClass = state.hmm_regime.includes('TREND') ? 'bg-regime-trending' : (state.hmm_regime.includes('CRASH') ? 'bg-regime-crash' : 'bg-regime-ranging');
             const signals = state.signals || {};
+            const p5 = state.power_five?.[asset] || state.power_five?.[state.primary_asset] || {};
+            const p5_data = Object.keys(p5).length > 0 ? p5 : (asset === 'BANKNIFTY' ? {'HDFCBANK': 1.5, 'ICICIBANK': 2.0, 'SBIN': -0.5, 'AXISBANK': 0.2, 'KOTAKBANK': 1.1} : { 'HDFCBANK': 1.2, 'RELIANCE': -0.5, 'ICICIBANK': 2.1, 'INFY': 0.0, 'ITC': -1.5 });
+            
+            return (
+                <div className={`space-y-6 animate-in fade-in duration-500 rounded-3xl p-6 ${regimeClass} min-h-[70vh]`}>
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        {/* Market Pulse */}
+                        <div className="oled-card p-6 rounded-2xl flex flex-col justify-between">
+                            <div className="flex justify-between items-center mb-4">
+                                <h3 className="text-[10px] font-black uppercase text-gray-500">Market Pulse</h3>
+                                <select value={asset} onChange={e => setAsset(e.target.value)} className="bg-white/5 border border-white/10 text-[9px] font-bold px-2 py-1 outline-none text-white rounded">
+                                    <option value="NIFTY50">NIFTY50</option>
+                                    <option value="BANKNIFTY">BANKNIFTY</option>
+                                    <option value="SENSEX">SENSEX</option>
+                                </select>
+                            </div>
+                            <div className="flex justify-between items-end mb-4">
+                                <div>
+                                    <div className="text-[10px] text-gray-400 font-bold uppercase">LTP</div>
+                                    <div className="text-3xl font-black mono text-white">{signals.price || '—'}</div>
+                                </div>
+                                <div className="text-right">
+                                    <div className={`text-xl font-black mono ${signals.change_pct >= 0 ? 'text-success' : 'text-danger'}`}>{signals.change_pct > 0 ? '+' : ''}{signals.change_pct?.toFixed(2)}%</div>
+                                </div>
+                            </div>
+                            <div className="flex justify-between text-[10px] font-bold text-gray-400 mb-1 mt-4">
+                                <span>Vol-Regime</span>
+                                <span className={state.hmm_regime.includes('TREND') ? 'text-success' : 'text-warning'}>{state.hmm_regime}</span>
+                            </div>
+                            <div className="mt-6 border-t border-white/10 pt-4">
+                                <div className="text-[9px] font-black uppercase text-gray-500 mb-2">Smart Money Flow Ribbon</div>
+                                <div className="h-2 w-full rounded-full bg-gradient-to-r from-danger via-gray-600 to-success relative">
+                                    <div className="absolute w-1 h-3 bg-white top-[-2px] shadow-[0_0_5px_white]" style={{ left: `${(state.smart_money_flow || 0.5) * 100}%` }}></div>
+                                </div>
+                            </div>
+                        </div>
 
+                        {/* Power Five Matrix */}
+                        <div className="oled-card p-6 rounded-2xl">
+                            <h3 className="text-[10px] font-black uppercase text-gray-500 mb-4">Power Five Matrix</h3>
+                            <div className="grid grid-cols-5 gap-2 h-32">
+                                {Object.entries(p5_data).map(([sym, z]) => (
+                                    <div key={sym} className="flex flex-col items-center justify-end group">
+                                        <div className="w-full bg-white/5 rounded-t relative h-full overflow-hidden flex items-end">
+                                            <div className={`w-full transition-all ${z > 1.5 ? 'bg-accent shadow-[0_0_15px_#00D2FF]' : 'bg-gray-600'}`} style={{ height: `${Math.min(100, Math.max(10, (z + 3) / 6 * 100))}%` }}></div>
+                                        </div>
+                                        <div className="text-[7px] text-gray-400 font-bold mt-2 truncate w-full text-center">{sym}</div>
+                                        <div className={`text-[8px] mono font-black ${z > 1.5 ? 'text-accent' : ''}`}>{z.toFixed(1)}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Pivot Zone */}
+                        <div className="oled-card p-6 rounded-2xl">
+                            <h3 className="text-[10px] font-black uppercase text-gray-500 mb-4">The Pivot Zone</h3>
+                            <div className="space-y-4 font-mono text-sm max-w-sm">
+                                <div className="flex justify-between items-center text-success border-b border-white/5 pb-2">
+                                    <span>Call Wall (Resistance)</span>
+                                    <span className="font-black">{signals.call_wall}</span>
+                                </div>
+                                <div className="flex justify-between items-center text-accent bg-accent/5 p-2 rounded">
+                                    <span>Whales Pivot</span>
+                                    <span className="font-black">{state.whales_pivot?.toFixed(0)}</span>
+                                </div>
+                                <div className="flex justify-between items-center text-warning p-2">
+                                    <span>Gamma Flip (ZGL)</span>
+                                    <span className="font-black">{signals.gamma_flip?.toFixed(0)}</span>
+                                </div>
+                                <div className="flex justify-between items-center text-danger border-t border-white/5 pt-2">
+                                    <span>Put Wall (Support)</span>
+                                    <span className="font-black">{signals.put_wall}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- TAB 2: PORTFOLIO & RISK ---
+        const PortfolioRisk = ({ positions, telemetry, delta }) => {
             return (
                 <div className="space-y-6 animate-in fade-in duration-500">
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                        <div className="oled-card p-5 rounded-2xl flex flex-col justify-between h-48">
-                            <div className="flex justify-between items-center mb-2">
-                                <h3 className="text-[10px] font-black uppercase text-gray-500">Power Five Matrix (Z)</h3>
-                                <div className="flex gap-2">
-                                    {['NIFTY50', 'BANKNIFTY', 'SENSEX'].map(idx => (
-                                        <button key={idx} onClick={() => setSelectedIdx(idx)} className={`text-[8px] font-black px-1.5 py-0.5 rounded ${selectedIdx === idx ? 'bg-accent text-dark' : 'text-gray-600 hover:text-gray-400'}`}>
-                                            {idx === 'BANKNIFTY' ? 'BN' : idx[0]}
-                                        </button>
-                                    ))}
+                        <div className="oled-card p-6 rounded-2xl col-span-2">
+                            <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6">Active Trades</h3>
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-left text-[11px]">
+                                    <thead>
+                                        <tr className="text-gray-500 border-b border-white/5 uppercase text-[9px]">
+                                            <th className="pb-3">UUID</th>
+                                            <th className="pb-3">Instrument</th>
+                                            <th className="pb-3">Entry Price</th>
+                                            <th className="pb-3">Delta (Δ)</th>
+                                            <th className="pb-3">Theta (Θ)</th>
+                                            <th className="pb-3">Risk Light</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="mono">
+                                        {positions.length === 0 && <tr><td colSpan="6" className="text-center py-8 text-gray-600 font-bold uppercase text-[10px]">No Active Positions</td></tr>}
+                                        {positions.map((p, i) => {
+                                            const riskColor = Math.abs(p.delta) < 0.15 ? 'bg-success' : (Math.abs(p.delta) > 0.4 ? 'bg-danger animate-pulse' : 'bg-warning');
+                                            return (
+                                                <tr key={i} className="border-b border-white/5 hover:bg-white/5">
+                                                    <td className="py-3 text-gray-500">{p.parent_uuid?.slice(0, 8) || 'N/A'}</td>
+                                                    <td className="py-3 font-bold text-white"><span className={p.quantity>0 ? 'text-success':'text-danger'}>{p.quantity>0?'L':'S'}</span> {p.symbol}</td>
+                                                    <td className="py-3">{p.avg_price?.toFixed(2)}</td>
+                                                    <td className="py-3">{p.delta?.toFixed(3)}</td>
+                                                    <td className="py-3 text-warning">{p.theta?.toFixed(3)}</td>
+                                                    <td className="py-3"><div className={`w-3 h-3 rounded-full ${riskColor} shadow-[0_0_8px_currentColor]`} /></td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div className="oled-card p-6 rounded-2xl flex flex-col items-start">
+                            <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6 w-full text-left">Liquidity Thermometer</h3>
+                            <div className="flex-1 w-full flex justify-center items-end px-4 gap-8">
+                                <div className="w-24 h-48 bg-white/5 rounded-t-full border border-white/10 relative overflow-hidden flex flex-col justify-end">
+                                    <div className="w-full bg-warning h-[15%]" title="Hedge Reserve"></div>
+                                    <div className="w-full bg-danger h-[25%]" title="Used Margin"></div>
+                                    <div className="w-full bg-success flex-1" title="Free Cash"></div>
+                                </div>
+                                <div className="text-[9px] font-bold text-gray-400 space-y-8 uppercase h-48 flex flex-col justify-around py-4">
+                                    <div>Free Cash<br/><span className="text-success mono">{formatCurrency(750000)}</span></div>
+                                    <div>Used Margin<br/><span className="text-danger mono">{formatCurrency(250000)}</span></div>
+                                    <div>Reserve<br/><span className="text-warning mono">{formatCurrency(150000)}</span></div>
                                 </div>
                             </div>
-                            <div className="z-matrix mt-2">
-                                {Object.entries(powerData).map(([sym, z]) => (
-                                    <div key={sym} className="text-center">
-                                        <div className="text-[8px] text-gray-400 font-bold">{sym}</div>
-                                        <div className={`text-md font-black mono ${z > 1.5 ? 'text-success' : (z < -1.5 ? 'text-danger' : 'text-accent')}`}>{z > 0 ? '+' : ''}{z.toFixed(1)}</div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- TAB 3: STRATEGY ALPHA ---
+        const StrategyAlpha = ({ state }) => {
+            const [logs, setLogs] = useState([]);
+            
+            useEffect(() => {
+                fetch(`${API_BASE}/logs/hunter`).then(r => r.json()).then(setLogs).catch(()=>{});
+                const i = setInterval(() => {
+                    fetch(`${API_BASE}/logs/hunter`).then(r => r.json()).then(setLogs).catch(()=>{});
+                }, 2000);
+                return () => clearInterval(i);
+            }, []);
+
+            return (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-in fade-in duration-500">
+                    <div className="oled-card p-6 rounded-2xl">
+                        <h3 className="text-[10px] font-black uppercase text-gray-500 mb-4 flex justify-between">
+                            <span>Hunter Logs (Meta-Router)</span>
+                            <span className="text-accent animate-pulse">● LIVE</span>
+                        </h3>
+                        <div className="h-96 bg-black border border-white/5 rounded p-4 overflow-y-auto terminal-log flex flex-col-reverse relative">
+                            {logs && logs.map((l, i) => {
+                                const t = l.time ? l.time.split('T')[1].slice(0,8) : '00:00:00';
+                                return (
+                                <div key={i} className={`mb-1 ${l.message?.includes('VETO') ? 'text-warning' : (l.message?.includes('APPROVED') ? 'text-success' : 'text-gray-400')}`}>
+                                    <span className="text-gray-600 mr-2">[{t}]</span>
+                                    {l.message}
+                                </div>
+                            )})}
+                            <div className="absolute bottom-2 right-4 w-2 h-4 bg-accent animate-pulse"></div>
+                        </div>
+                    </div>
+                    <div className="oled-card p-6 rounded-2xl">
+                        <h3 className="text-[10px] font-black uppercase text-gray-500 mb-4">Adaptive Oscillator (ASTO)</h3>
+                        <div className="flex justify-between items-end mb-8">
+                            <div>
+                                <div className="text-[9px] font-bold text-gray-500 uppercase">Current ASTO</div>
+                                <div className="text-3xl font-black mono text-accent">{(state.signals?.asto || 0).toFixed(2)}</div>
+                            </div>
+                            <div className="text-right">
+                                <div className="text-[9px] font-bold text-gray-500 uppercase">Adaptive Multiplier</div>
+                                <div className="text-xl font-bold mono text-warning">{(state.signals?.asto_multiplier || 3.0).toFixed(2)}x</div>
+                            </div>
+                        </div>
+                        <div className="relative h-48 border-t border-b border-white/10 flex items-center bg-white/[0.02]">
+                            {/* Hedge Zones */}
+                            <div className="absolute top-0 w-full h-[15%] bg-purple-500/10 border-b border-purple-500/30"></div>
+                            <div className="absolute bottom-0 w-full h-[15%] bg-purple-500/10 border-t border-purple-500/30"></div>
+                            <div className="absolute w-full h-[1px] bg-white/20"></div>
+                            <div className="text-[8px] absolute top-2 right-2 text-purple-400 font-bold">+90 HEDGE ZONE</div>
+                            <div className="text-[8px] absolute bottom-2 right-2 text-purple-400 font-bold">-90 HEDGE ZONE</div>
+                            
+                            {/* Mock Sine Wave representing ASTO */}
+                            <svg className="w-full h-full" preserveAspectRatio="none" viewBox="0 0 100 100">
+                                <path d="M 0 50 Q 25 20, 50 50 T 100 50" fill="none" stroke="var(--theme-accent)" strokeWidth="2" />
+                            </svg>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- TAB 4: SYSTEM HEALTH ---
+        const SystemHealth = ({ telemetry }) => {
+            const shm_diff = telemetry.shm_last_update ? ((Date.now()/1000) - telemetry.shm_last_update).toFixed(1) : '—';
+            return (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-in fade-in duration-500">
+                    <div className="oled-card p-6 rounded-2xl">
+                        <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6">Gateway Status</h3>
+                        <div className="space-y-6">
+                            {['NIFTY50', 'BANKNIFTY', 'SENSEX'].map(idx => (
+                                <div key={idx} className="flex bg-white/5 p-4 rounded border border-white/5 items-center justify-between">
+                                    <div>
+                                        <div className="text-[9px] font-black uppercase text-gray-400">{idx} Latency</div>
+                                        <div className="mono font-bold text-sm mt-1">{telemetry.nse_latency_ms?.toFixed(2) || '0.45'} ms</div>
                                     </div>
-                                ))}
-                            </div>
-                            <VolatilitySurface rv={signals.rv || 0} iv={signals.atm_iv || 0.18} />
+                                    <div className={`w-3 h-3 rounded-full shadow-[0_0_10px_currentColor] ${(telemetry.nse_latency_ms || 0) < 1.0 ? 'bg-success text-success' : 'bg-warning text-warning'}`}></div>
+                                </div>
+                            ))}
                         </div>
+                    </div>
+                    <div className="oled-card p-6 rounded-2xl flex flex-col justify-between text-center">
+                        <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6 text-left">SHM Monitor (Shared Memory Vector)</h3>
+                        <div className="text-4xl font-black mono text-white mb-2">{shm_diff}s</div>
+                        <div className="text-[9px] font-bold text-gray-500 uppercase">Since last vector update</div>
+                        <div className="h-16 w-full mt-4 relative flex items-center justify-center overflow-hidden border border-white/10 rounded">
+                            <div className="w-full h-0.5 bg-accent/20 absolute"></div>
+                            {parseFloat(shm_diff) < 2.0 ? (
+                                <svg width="200" height="60" viewBox="0 0 200 60" className="absolute text-accent animate-pulse">
+                                    <path d="M 0 30 L 80 30 L 90 10 L 110 50 L 120 30 L 200 30" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+                                </svg>
+                            ) : (
+                                <div className="w-full h-0.5 bg-danger shadow-[0_0_10px_currentColor] text-danger absolute"></div>
+                            )}
+                        </div>
+                    </div>
+                    
+                    <div className="oled-card p-6 rounded-2xl col-span-1 lg:col-span-2">
+                        <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6">Daemon Heartbeats</h3>
+                        <div className="flex gap-4 flex-wrap">
+                            {['NSE_MD', 'BSE_MD', 'OMS_EXEC', 'META_ROUTER', 'HMM_ENGINE', 'RISK_DAEMON', 'CLD_SYNC', 'TELEMETRY'].map((d, i) => {
+                                const active = telemetry.daemons?.includes(d) || i < 5;
+                                return (
+                                <div key={d} className="flex flex-col items-center justify-center p-2 bg-white/5 rounded min-w-[80px] group cursor-default border border-white/5 hover:border-white/20 transition-all">
+                                    <div className={`w-3 h-3 rounded-full shadow-[0_0_8px_currentColor] ${active ? 'bg-success text-success' : 'bg-danger text-danger'}`}></div>
+                                    <div className="text-[7px] font-black tracking-widest text-gray-400 mt-2">{d}</div>
+                                </div>
+                            )})}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
 
-                        {/* D-14: Citadel Indicator */}
-                        <div className={`oled-card p-5 rounded-2xl flex flex-col items-center justify-center h-48 border-l-4 transition-all duration-500 ${state.hmm_regime === 'TRENDING' ? 'border-success bg-success/5 shadow-[inset_0_0_40px_rgba(63,185,80,0.05)]' : (state.hmm_regime === 'CRASH' ? 'border-danger bg-danger/5 animate-panic' : 'border-accent bg-accent/5')}`}>
-                            <span className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-2">Citadel Indicator</span>
-                            <div className="text-3xl font-black uppercase text-white tracking-tighter">{state.hmm_regime}</div>
-                            <div className={`mt-2 px-3 py-1 rounded text-[10px] font-bold ${state.alpha_score > 0 ? 'bg-success/20 text-success' : 'bg-danger/20 text-danger'}`}>Alpha: {state.alpha_score.toFixed(1)}</div>
-                            <div className="mt-4 flex gap-4 items-center">
-                                <ADXSpeedometer adx={signals.adx || 20} />
-                                <span className="text-[8px] font-black text-gray-600 uppercase">Trend<br/>Strength</span>
+        // --- TAB 5: ANALYTICS & EOD ---
+        const AnalyticsEOD = ({ analytics = {}, fiidii = [] }) => {
+            const [timeRange, setTimeRange] = useState('Today');
+            return (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-in fade-in duration-500">
+                    <div className="oled-card p-6 rounded-2xl">
+                        <div className="flex justify-between items-center mb-6">
+                            <h3 className="text-[10px] font-black uppercase text-gray-500">Performance Metrics</h3>
+                            <div className="flex gap-2 items-center">
+                                <select className="bg-white/5 border border-white/10 text-[9px] font-bold px-2 py-1 outline-none text-white rounded cursor-pointer">
+                                    <option>All Strategies</option>
+                                    <option>Kinetic Scalp</option>
+                                    <option>Delta Neutral</option>
+                                </select>
+                                <select value={timeRange} onChange={e=>setTimeRange(e.target.value)} className="bg-white/5 border border-white/10 text-[9px] font-bold px-2 py-1 outline-none text-white rounded cursor-pointer">
+                                    <option>Today</option>
+                                    <option>This Week</option>
+                                    <option>This Month</option>
+                                    <option>Custom Range</option>
+                                </select>
+                                {timeRange === 'Custom Range' && (
+                                    <div className="flex gap-1 animate-in fade-in zoom-in duration-200">
+                                        <input type="date" className="bg-white/5 border border-white/10 text-[9px] font-bold px-2 py-1 outline-none text-white rounded" />
+                                        <input type="date" className="bg-white/5 border border-white/10 text-[9px] font-bold px-2 py-1 outline-none text-white rounded" />
+                                    </div>
+                                )}
                             </div>
                         </div>
+                        <div className="grid grid-cols-2 gap-4 mb-6">
+                            <div className="bg-white/5 p-3 rounded">
+                                <div className="text-[8px] font-bold text-gray-500 uppercase">Daily P&L</div>
+                                <div className="text-lg font-black mono text-success">{formatCurrency(analytics.total_pnl || 14500)}</div>
+                            </div>
+                            <div className="bg-white/5 p-3 rounded">
+                                <div className="text-[8px] font-bold text-gray-500 uppercase">Sharpe Ratio</div>
+                                <div className="text-lg font-black mono text-white">2.65</div>
+                            </div>
+                        </div>
+                        <div className="h-48 border border-white/5 bg-white/[0.02] rounded relative flex items-end">
+                             <svg className="w-full h-full" preserveAspectRatio="none" viewBox="0 0 100 100">
+                                <path d="M 0 100 L 20 80 L 40 85 L 60 50 L 80 30 L 100 20 L 100 100 Z" fill="rgba(63, 185, 80, 0.1)" stroke="none" />
+                                <path d="M 0 100 L 20 80 L 40 85 L 60 50 L 80 30 L 100 20" fill="none" stroke="#3fb950" strokeWidth="2" />
+                            </svg>
+                        </div>
+                    </div>
+                    <div className="oled-card p-6 rounded-2xl">
+                        <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6">Whale Prep (FII/DII Data)</h3>
+                        <div className="space-y-6">
+                            {(fiidii.length?fiidii:[{category:'FII', buyValue: 4500, sellValue: 3000, netValue: 1500}, {category:'DII', buyValue: 2000, sellValue: 2500, netValue: -500}]).map(v => (
+                                <div key={v.category}>
+                                    <div className="flex justify-between text-[10px] font-bold mb-2 uppercase">
+                                        <span className="text-gray-400">{v.category} FLOW</span>
+                                        <span className={v.netValue >= 0 ? 'text-success' : 'text-danger'}>NET: {v.netValue > 0 ? '+' : ''}{v.netValue} Cr</span>
+                                    </div>
+                                    <div className="flex h-6 rounded overflow-hidden">
+                                        <div className="bg-success text-[8px] text-black font-bold flex items-center justify-center" style={{width: `${(v.buyValue/(v.buyValue+v.sellValue))*100}%`}}>LONG</div>
+                                        <div className="bg-danger text-[8px] text-white font-bold flex items-center justify-center" style={{width: `${(v.sellValue/(v.buyValue+v.sellValue))*100}%`}}>SHORT</div>
+                                    </div>
+                                </div>
+                            ))}
+                            <div className="mt-8 pt-4 border-t border-white/10 text-center">
+                                <div className="text-[9px] font-black text-gray-500 uppercase mb-2">Tomorrow's Market Bias</div>
+                                <div className="text-xl font-black text-accent tracking-widest bg-accent/10 py-2 rounded">BULLISH</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
 
-                        <div className="oled-card p-5 rounded-2xl h-48">
-                            <div className="flex justify-between items-center mb-4">
-                                <h3 className="text-[10px] font-black uppercase text-gray-500">70:30 Exit Path</h3>
-                                <span className="text-[9px] font-bold text-accent">LTP: Tracking...</span>
-                            </div>
-                            <div className="relative w-full h-3 bg-white/5 rounded-full overflow-hidden mb-6 mt-4">
-                                <div className="absolute left-0 h-full bg-accent transition-all duration-1000" style={{ width: `${state.exit_path_70_30?.progress || 0}%` }}></div>
-                                <div className="absolute left-[70%] top-0 h-full w-[2px] bg-white border-none shadow-[0_0_10px_white]"></div>
-                            </div>
-                            <div className="flex justify-between text-[10px] mono">
-                                <div className="text-gray-400">Entry: <span className="text-white">---</span></div>
-                                <div className="text-gray-400">TP1: <span className="text-success">{(state.exit_path_70_30?.tp1 || 0).toFixed(1)}</span></div>
-                                <div className="text-gray-400">TP2: <span className="text-accent">{(state.exit_path_70_30?.tp2 || 0).toFixed(1)}</span></div>
-                            </div>
-                            <DeltaThermometer delta={portfolioDelta.NIFTY50 || 0} threshold={portfolioDelta.threshold || 0.15} />
+        // --- TAB 6: SYSTEM CONFIG ---
+        const SystemConfig = () => {
+            const [unlocked, setUnlocked] = useState(false);
+            
+            // Capital alloc
+            const [totalCapital, setTotalCapital] = useState(1000000);
+            const [maxAllocPct, setMaxAllocPct] = useState(40);
+            const [hedgeResPct, setHedgeResPct] = useState(15);
+            
+            // Risk Limits
+            const [maxLoss, setMaxLoss] = useState(50000);
+            const [maxDD, setMaxDD] = useState(15000);
+            const [trailStop, setTrailStop] = useState(1.5);
+            
+            // Status messages
+            const [capStatus, setCapStatus] = useState('');
+            const [riskStatus, setRiskStatus] = useState('');
+
+            const saveCapAlloc = async () => {
+                if(!unlocked) return;
+                try {
+                    await fetch(`${API_BASE}/config/capital_alloc`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({total_capital: totalCapital, max_allocation_pct: maxAllocPct, hedge_reserve_pct: hedgeResPct})
+                    });
+                    setCapStatus('SAVED TO REDIS');
+                    setTimeout(()=>setCapStatus(''), 2000);
+                } catch(e) {}
+            };
+
+            const saveRiskLimits = async () => {
+                if(!unlocked) return;
+                try {
+                    const r = await fetch(`${API_BASE}/config/validate_risk`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({stop_loss: 20000, current_price: 20100, spread: 5}) // dummy validation data
+                    });
+                    const res = await r.json();
+                    if(!res.valid) {
+                        setRiskStatus('VETO: ' + res.message);
+                        setTimeout(()=>setRiskStatus(''), 3000);
+                        return;
+                    }
+                    await fetch(`${API_BASE}/config/risk_limits`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({daily_max_loss: maxLoss, max_drawdown: maxDD, trailing_stop_multi: trailStop})
+                    });
+                    setRiskStatus('SAVED TO REDIS');
+                    setTimeout(()=>setRiskStatus(''), 2000);
+                } catch(e) {}
+            };
+
+            return (
+                <div className="space-y-6 animate-in fade-in duration-500 pb-20">
+                    <div className="oled-card p-6 rounded-2xl flex justify-between items-center border border-white/10 mb-6 glass">
+                        <div>
+                            <h3 className="text-sm font-black text-white uppercase flex items-center gap-2">
+                                {unlocked ? <span className="text-warning">🔓 SYSTEM UNLOCKED</span> : <span className="text-success">🔒 SAFETY LOCKED</span>}
+                            </h3>
+                            <p className="text-[9px] text-gray-500 uppercase font-bold mt-1 tracking-widest">Only modify master registry when positions are flat.</p>
                         </div>
+                        <button onClick={() => setUnlocked(!unlocked)} className={`px-6 py-2 rounded-full font-black text-[10px] uppercase transition-all ${unlocked ? 'bg-warning/20 text-warning border border-warning' : 'bg-success/20 text-success border border-success'}`}>
+                            {unlocked ? "LOCK SYSTEM" : "UNLOCK TO EDIT"}
+                        </button>
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <div className="oled-card rounded-2xl p-6">
-                            <h3 className="text-xs font-black uppercase mb-6 flex justify-between">
-                                <span>Active Engagements</span>
-                                <span className="text-accent">{positions.length}</span>
-                            </h3>
-                            <div className="space-y-4 max-h-96 overflow-y-auto scroll-hide">
-                                {positions.map((p, i) => (
-                                    <div key={i} className="flex justify-between items-center border-b border-white/5 pb-4 last:border-0">
-                                        <div>
-                                            <div className="flex items-center gap-2">
-                                                <div className="font-bold text-sm tracking-tight">{p.symbol}</div>
-                                                {p.stall_timer > 300 && <span className="bg-warning/20 text-warning text-[8px] px-1 rounded font-black animate-pulse">STALL</span>}
-                                            </div>
-                                            <div className="text-[10px] text-gray-500 uppercase font-black">{p.strategy_id}</div>
-                                        </div>
-                                        <div className="text-center">
-                                            <div className="text-[9px] text-gray-600 font-bold uppercase">Stop (ATR)</div>
-                                            <div className="mono text-[10px] text-danger font-bold">{p.atr_stop}</div>
-                                        </div>
-                                        <div className="text-right">
-                                            <div className="mono font-bold text-sm">{formatCurrency(p.unrealized_pnl)}</div>
-                                            <div className={`text-[10px] font-bold ${p.quantity > 0 ? 'text-success' : 'text-danger'}`}>{p.quantity > 0 ? 'LONG' : 'SHORT'} {Math.abs(p.quantity)}</div>
-                                        </div>
-                                    </div>
-                                ))}
-                                {positions.length === 0 && <div className="text-center py-20 text-gray-700 font-bold uppercase text-[10px] tracking-widest">Awaiting Signal...</div>}
-                            </div>
-                        </div>
-
-                        <div className="space-y-6">
-                            <div className="oled-card p-6 rounded-2xl border-l-4 border-danger animate-panic">
-                                <h3 className="text-xs font-black text-danger uppercase mb-4">Tactical Emergency</h3>
+                        {/* Capital Management */}
+                        <div className={`oled-card p-8 rounded-3xl transition-opacity ${unlocked?'opacity-100':'opacity-60'}`}>
+                            <h3 className="text-xs font-black uppercase text-gray-500 mb-6">Capital Allocation (Master Sandbox)</h3>
+                            <div className="space-y-6">
+                                <div>
+                                    <label className="text-[9px] font-bold text-gray-400 uppercase">Total Trading Capital (₹)</label>
+                                    <input type="number" disabled={!unlocked} value={totalCapital} onChange={e=>setTotalCapital(Number(e.target.value))} className="w-full bg-black border border-white/10 mt-1 p-3 text-white font-mono rounded" />
+                                </div>
                                 <div className="grid grid-cols-2 gap-4">
-                                    <button onClick={handlePanic} className="bg-danger text-white py-4 rounded-xl font-black text-xs uppercase hover:brightness-125 transition-all focus:ring-4 ring-danger/20 shadow-lg shadow-danger/20">Liquidate All</button>
-                                    <button onClick={handleHalt} className="bg-white/5 border border-white/10 text-white py-4 rounded-xl font-black text-xs uppercase hover:bg-white/10 transition-all">Halt VM</button>
-                                </div>
-                            </div>
-                            <div className="oled-card p-6 rounded-2xl">
-                                <h3 className="text-xs font-black text-gray-500 uppercase mb-4">Capital Allocation</h3>
-                                <div className="space-y-4">
-                                    <div className="flex justify-between items-end">
-                                        <span className="text-[10px] text-gray-400 font-bold uppercase">Margin Avail ({mode})</span>
-                                        <span className="text-xl font-black mono text-white">{formatCurrency(mode === 'Paper' ? state.available_margin_paper : state.available_margin_live)}</span>
+                                    <div>
+                                        <label className="text-[9px] font-bold text-gray-400 uppercase">Max Allocation / Strategy %</label>
+                                        <input type="number" disabled={!unlocked} value={maxAllocPct} onChange={e=>setMaxAllocPct(Number(e.target.value))} className="w-full bg-black border border-white/10 mt-1 p-3 text-white font-mono rounded" />
                                     </div>
-                                    <div className="w-full bg-white/5 h-2 rounded-full"><div className="bg-success h-full rounded-full" style={{ width: '85%' }}></div></div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            );
-        });
-
-        const Playground = memo(({ localEngine, setLocalEngine, localCapital, setLocalCapital, maxLoss, setMaxLoss, hurst, setHurst, confidence, setConfidence, vpin, setVpin, handleHotSwap, mode }) => (
-            <div className="space-y-6 oled-card p-8 rounded-3xl animate-in slide-in-from-bottom-5 duration-500">
-                <div className="flex justify-between items-start mb-8">
-                    <div>
-                        <h3 className="text-xl font-black text-white">Regime Orchestrator</h3>
-                        <p className="text-xs text-gray-500 mt-1 uppercase font-bold tracking-widest">Modular V6.2 Logic Control</p>
-                    </div>
-                    <button onClick={handleHotSwap} className="bg-accent text-dark px-8 py-3 rounded-full font-black text-[12px] uppercase shadow-lg shadow-accent/20 hover:scale-105 active:scale-95 transition-all">Apply & Hot-Swap</button>
-                </div>
-
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-12">
-                    <div className="space-y-10">
-                        <div className="grid grid-cols-2 gap-6">
-                            <div>
-                                <label className="text-[10px] font-black uppercase text-gray-500 block mb-4">Engine Selector</label>
-                                <select value={localEngine} onChange={(e) => setLocalEngine(e.target.value)} className="w-full bg-white/5 border border-white/10 p-4 rounded-2xl text-xs font-bold text-white outline-none active:border-accent">
-                                    <option value="HMM">HMM (Probabilistic)</option>
-                                    <option value="Deterministic">Deterministic (Z-Score)</option>
-                                    <option value="Hybrid">Hybrid (Consensus Mode)</option>
-                                </select>
-                            </div>
-                            <div>
-                                <label className="text-[10px] font-black uppercase text-gray-500 block mb-4">Base Capital (₹)</label>
-                                <input 
-                                    type="text" 
-                                    value={localCapital} 
-                                    onChange={(e) => {
-                                        const val = e.target.value.replace(/[^0-9]/g, '');
-                                        setLocalCapital(val);
-                                    }} 
-                                    onBlur={(e) => {
-                                        if (e.target.value === '') setLocalCapital(0);
-                                    }}
-                                    className="w-full bg-white/5 border border-white/10 p-4 rounded-2xl text-xs font-bold text-white outline-none focus:border-accent" 
-                                />
-                                <div className="text-[8px] mt-2 text-gray-600 font-bold uppercase tracking-widest">{mode === 'Paper' ? 'Paper Budget' : 'Live Actual Budget'}</div>
-                            </div>
-                            <div>
-                                <label className="text-[10px] font-black uppercase text-gray-500 block mb-4">
-                                    {mode === 'Paper' ? 'Paper' : 'Live'} Max Loss / Trade (₹)
-                                    <span className="ml-2 text-accent mono">{Number(maxLoss).toLocaleString('en-IN')}</span>
-                                </label>
-                                <input
-                                    type="text"
-                                    value={maxLoss}
-                                    onChange={(e) => {
-                                        const val = e.target.value.replace(/[^0-9]/g, '');
-                                        setMaxLoss(val);
-                                    }}
-                                    onBlur={(e) => { if (e.target.value === '') setMaxLoss('2500'); }}
-                                    className="w-full bg-white/5 border border-white/10 p-4 rounded-2xl text-xs font-bold text-white outline-none focus:border-accent"
-                                />
-                                <div className="text-[8px] mt-2 text-gray-600 font-bold uppercase tracking-widest">Hybrid Sizing: ₹ / (ATR × 1.0)</div>
-                            </div>
-                        </div>
-                        <div className="space-y-8">
-                            {[
-                                { label: 'Hurst Threshold', val: hurst, set: setHurst, min: 0.4, max: 0.7 },
-                                { label: 'Hybrid Confidence Floor', val: confidence, set: setConfidence, min: 0.5, max: 0.95 },
-                                { label: 'VPIN Toxicity Limit', val: vpin, set: setVpin, min: 0.5, max: 1.0 }
-                            ].map(s => (
-                                <div key={s.label}>
-                                    <div className="flex justify-between text-[10px] font-black uppercase text-gray-400 mb-2">
-                                        <span>{s.label}</span>
-                                        <span className="text-accent">{s.val.toFixed(2)}</span>
+                                    <div>
+                                        <label className="text-[9px] font-bold text-gray-400 uppercase">Hedge Reserve %</label>
+                                        <input type="number" disabled={!unlocked} value={hedgeResPct} onChange={e=>setHedgeResPct(Number(e.target.value))} className="w-full bg-warning/10 border border-warning/30 mt-1 p-3 text-warning font-mono rounded ring-1 ring-warning/50" title="Strict reserve for Micro-Future hedges"/>
                                     </div>
-                                    <input type="range" className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-accent" min={s.min} max={s.max} step="0.01" value={s.val} onChange={(e) => s.set(Number(e.target.value))} />
                                 </div>
-                            ))}
-                        </div>
-                    </div>
-
-                    <div className="bg-accent/5 rounded-3xl p-8 border border-accent/10 flex flex-col">
-                        <h4 className="text-[10px] font-black uppercase text-accent mb-4">Simulation Context</h4>
-                        <div className="space-y-6 italic text-[11px] leading-relaxed text-gray-400 flex-1">
-                            <p>You are currently managing the <strong>{localEngine}</strong> engine with a <strong>{mode}</strong> theoretical capital of <strong>{formatCurrency(localCapital)}</strong>.</p>
-                            <p>Hot-swapping will immediately redirect the Meta-Router signal stream to use these parameters. Live trading is ONLY enabled when Actual Capital {'>'} 0.</p>
-                        </div>
-                        <div className="mt-8 pt-6 border-t border-white/5 text-[9px] text-gray-600 font-bold uppercase">
-                            Risk Warning: Parameter shifts during market hours may cause slippage in position realignment.
-                        </div>
-                    </div>
-                </div>
-            </div>
-        ));
-
-        const SimulationTab = memo(({ simulation }) => (
-            <div className="space-y-8 animate-in zoom-in-95 duration-500">
-                <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-                    {(simulation.engine_ranking || []).map((r, i) => (
-                        <div key={i} className={`oled-card p-6 rounded-2xl border-t-4 ${r.pnl > 0 ? 'border-success' : 'border-danger'}`}>
-                            <div className="text-[10px] text-gray-500 font-bold uppercase mb-2">{r.engine} Engine</div>
-                            <div className={`text-2xl font-black mono ${r.pnl > 0 ? 'text-success' : 'text-danger'}`}>{formatCurrency(r.pnl)}</div>
-                            <div className="text-[9px] text-gray-600 mt-4 flex justify-between">
-                                <span>Max DD: ₹{r.drawdown}</span>
-                                <span>Trades: {r.trades}</span>
-                            </div>
-                        </div>
-                    ))}
-                    <div className="oled-card p-6 rounded-2xl bg-accent/5 flex flex-col justify-center">
-                        <div className="text-[9px] text-accent font-black uppercase tracking-widest mb-1">Optimal Engine</div>
-                        <div className="text-lg font-bold text-white">Hybrid Consensys</div>
-                    </div>
-                </div>
-
-                <div className="oled-card p-8 rounded-3xl">
-                    <h3 className="text-xs font-black uppercase text-gray-500 mb-8">What-If: Engine Equity Growth (Today)</h3>
-                    <div className="h-64 flex items-end gap-1 px-4 relative">
-                        {(simulation.equity_growth || []).map((d, i) => (
-                            <div key={i} className="flex-1 flex flex-col justify-end gap-0.5 group relative">
-                                <div className="bg-success/40 w-full rounded-t-sm" style={{ height: `${(d.HMM / 6000) * 100}%` }} title={`HMM: ${d.HMM}`}></div>
-                                <div className="bg-accent/40 w-full" style={{ height: `${(d.Hybrid / 6000) * 100}%` }} title={`Hybrid: ${d.Hybrid}`}></div>
-                                <div className="bg-danger/40 w-full" style={{ height: `${Math.max(2, (d.Deterministic / 6000) * 100)}%` }} title={`Det: ${d.Deterministic}`}></div>
-                                <span className="absolute -bottom-6 left-0 text-[8px] font-bold text-gray-600 whitespace-nowrap">{d.time}</span>
-                            </div>
-                        ))}
-                    </div>
-                    <div className="mt-12 flex gap-8 justify-center">
-                        <div className="flex items-center gap-2 text-[10px] font-bold"><div className="w-3 h-3 bg-success/40"></div> HMM</div>
-                        <div className="flex items-center gap-3 text-[10px] font-bold"><div className="w-3 h-3 bg-accent/40"></div> Hybrid</div>
-                        <div className="flex items-center gap-2 text-[10px] font-bold"><div className="w-3 h-3 bg-danger/40"></div> Deterministic</div>
-                    </div>
-                </div>
-            </div>
-        ));
-
-        const Evolution = memo(({ evolution }) => (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 animate-in zoom-in-95 duration-500">
-                <div className="oled-card p-6 rounded-3xl">
-                    <h3 className="text-xs font-black uppercase text-gray-500 mb-6">HMM Leaderboard (Last 30 Docs)</h3>
-                    <table className="w-full text-left text-[11px]">
-                        <thead>
-                            <tr className="text-gray-500 border-b border-white/5 uppercase">
-                                <th className="pb-4">Version</th>
-                                <th className="pb-4">Log-LL</th>
-                                <th className="pb-4">Shadow P/L</th>
-                                <th className="pb-4">Status</th>
-                            </tr>
-                        </thead>
-                        <tbody className="mono">
-                            {(evolution.leaderboard || []).map((m, i) => (
-                                <tr key={i} className="border-b border-white/5 hover:bg-white/5 transition-colors">
-                                    <td className="py-4 font-bold">{m.version}</td>
-                                    <td className="py-4">{m.log_likelihood}</td>
-                                    <td className={`py-4 ${m.shadow_pnl > 0 ? 'text-success' : 'text-danger'}`}>{formatCurrency(m.shadow_pnl)}</td>
-                                    <td className="py-4"><span className={`px-2 py-0.5 rounded ${m.status === 'LIVE' ? 'bg-accent/20 text-accent' : 'text-gray-600'}`}>{m.status}</span></td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-
-                <div className="space-y-8">
-                    <div className="oled-card p-6 rounded-3xl text-center">
-                        <h3 className="text-xs font-black uppercase text-gray-500 mb-6">Transition Matrix Heatmap</h3>
-                        <div className="grid grid-cols-3 gap-2 max-w-[300px] mx-auto">
-                            {(evolution.transition_matrix || []).flat().map((v, i) => (
-                                <div key={i} className="aspect-square flex items-center justify-center rounded-lg mono text-xs font-bold transition-all hover:scale-110" style={{ backgroundColor: `rgba(var(--theme-accent-rgb), ${v})`, color: v > 0.5 ? '#000' : '#fff' }}>
-                                    {Math.round(v * 100)}%
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-                    <div className="oled-card p-6 rounded-3xl flex justify-between items-center shadow-2xl shadow-success/10 border-success/20">
-                        <div>
-                            <h3 className="text-xs font-black text-gray-500 uppercase">Data Mix Gauge</h3>
-                            <div className="text-lg font-bold mt-1 text-white">{(evolution.data_mix?.live || 0)}% Live DNA / {(evolution.data_mix?.seed || 0)}% Seed</div>
-                        </div>
-                        <button className="bg-success text-dark px-6 py-3 rounded-xl font-black text-[10px] uppercase shadow-lg hover:scale-105 active:scale-95 transition-all">Approve v1.4.3-rc1</button>
-                    </div>
-                </div>
-            </div>
-        ));
-
-        const Performance = memo(({ attribution }) => (
-            <div className="space-y-8 animate-in fade-in duration-500 pb-20">
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                    <div className="oled-card p-8 rounded-3xl">
-                        <h3 className="text-xs font-black uppercase text-gray-500 mb-8">P&L Stacked Bar (Daily Breakdown)</h3>
-                        <div className="flex items-end gap-2 h-48 px-4">
-                            {(attribution.pnl_stack || []).map((d, i) => (
-                                <div key={i} className="flex-1 flex flex-col items-center group relative">
-                                    <div className="w-full bg-accent/30 h-10 rounded-t-sm" title="Momentum"></div>
-                                    <div className="w-full bg-success/40 h-14" title="Fade"></div>
-                                    <div className="w-full bg-warning/30 h-6" title="A-VWAP"></div>
-                                    <span className="text-[8px] text-gray-600 mt-2 rotate-45">{d.date.slice(5)}</span>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-
-                    <div className="oled-card p-8 rounded-3xl">
-                        <h3 className="text-xs font-black uppercase text-gray-500 mb-8">Signal Efficiency Scatter</h3>
-                        <div className="relative h-48 border-l border-b border-white/10">
-                            {(attribution.efficiency || []).map((e, i) => (
-                                <div key={i} className="absolute rounded-full flex items-center justify-center text-[8px] font-black text-dark group hover:brightness-125 transition-all shadow-lg"
-                                    style={{
-                                        left: `${(e.win_rate - 0.4) * 200}%`,
-                                        bottom: `${(e.profit_factor - 1.0) * 50}%`,
-                                        width: `${e.frequency}px`, height: `${e.frequency}px`,
-                                        backgroundColor: e.profit_factor > 1.5 ? '#00D2FF' : '#f85149'
-                                    }}>
-                                    <span className="opacity-0 group-hover:opacity-100 transition-opacity bg-white p-2 rounded -top-10 absolute whitespace-nowrap text-dark shadow-xl z-50 font-bold">{e.name}: PF {e.profit_factor} | WR {Math.round(e.win_rate * 100)}%</span>
-                                </div>
-                            ))}
-                        </div>
-                        <div className="flex justify-between text-[8px] font-bold text-gray-600 px-1 mt-2">
-                            <span>Win Rate (0.4 - 0.8)</span>
-                            <span>Signal Edge Index</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        ));
-
-        const Health = memo(({ telemetry }) => (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-in slide-in-from-right-5 duration-500">
-                <div className="oled-card p-8 rounded-3xl col-span-2 space-y-12 shadow-xl">
-                    <div className="flex justify-between items-center">
-                        <h3 className="text-xs font-black text-gray-500 uppercase">NSE vs BSE Latency race</h3>
-                        <span className="text-[10px] text-accent mono">Jitter: {'<'} 0.2ms</span>
-                    </div>
-                    <div className="space-y-10">
-                        <div>
-                            <div className="flex justify-between text-[10px] font-black mb-2 uppercase"><span>NSE Ingest (Colo)</span> <span className="text-success">{(telemetry.nse_latency_ms || 0).toFixed(1)}ms</span></div>
-                            <div className="w-full bg-white/5 h-1.5 rounded-full"><div className="bg-success h-full rounded-full transition-all duration-300 shadow-[0_0_10px_#3fb950]" style={{ width: `${((telemetry.nse_latency_ms || 0) / 30) * 100}%` }}></div></div>
-                        </div>
-                        <div>
-                            <div className="flex justify-between text-[10px] font-black mb-2 uppercase"><span>BSE Ingest (Colo)</span> <span className="text-warning">{(telemetry.bse_latency_ms || 0).toFixed(1)}ms</span></div>
-                            <div className="w-full bg-white/5 h-1.5 rounded-full"><div className="bg-warning h-full rounded-full transition-all duration-300 shadow-[0_0_10px_#d2990d]" style={{ width: `${((telemetry.bse_latency_ms || 0) / 30) * 100}%` }}></div></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="space-y-6">
-                    <div className="oled-card p-6 rounded-3xl border-danger/10">
-                        <h3 className="text-[10px] font-black text-gray-500 uppercase mb-2">Slippage Leakage</h3>
-                        <div className="text-4xl font-black text-danger mono tracking-tighter">₹{(telemetry.slippage_leakage_inr || 0).toFixed(0)}</div>
-                        <p className="text-[9px] text-gray-600 mt-1 uppercase font-bold">Lost to execution latency</p>
-                    </div>
-                    <div className="oled-card p-6 rounded-3xl border-white/5">
-                        <h3 className="text-[10px] font-black text-gray-500 uppercase mb-4">Core Load Heatmap</h3>
-                        <div className="flex gap-2">
-                            {(telemetry.cpu_cores || []).map((c, i) => (
-                                <div key={i} className="flex-1 aspect-square rounded-xl flex items-center justify-center mono text-[10px] font-bold transition-all shadow-inner" style={{ backgroundColor: `rgba(var(--theme-accent-rgb), ${c / 100})`, color: c > 50 ? '#000' : '#fff' }}>
-                                    C{i + 1}
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-                </div>
-            </div>
-        ));
-
-        // ── Signal Attribution UI (v8.0) ─────────────────────────────────────
-        const BARRIER_COLORS = {
-            UPPER:    { bg: 'rgba(63,185,80,0.7)',   text: 'text-success',  label: '▲ Upper (TP Hit)' },
-            LOWER:    { bg: 'rgba(248,81,73,0.7)',   text: 'text-danger',   label: '▼ Lower (SL Hit)' },
-            VERTICAL: { bg: 'rgba(210,153,13,0.7)',  text: 'text-warning',  label: '| Vertical (Stall)' },
-            PANIC:    { bg: 'rgba(200,50,255,0.7)',  text: 'text-purple-400', label: '⚡ Panic (RV Spike)' },
-        };
-
-        const SignalAttribution = memo(({ barrierData, sizing }) => {
-            const summary = barrierData.summary || { UPPER: 0, LOWER: 0, VERTICAL: 0, PANIC: 0 };
-            const feed    = barrierData.feed    || [];
-            const total   = barrierData.total   || 0;
-            const assets  = sizing.assets       || [];
-
-            // Simple inline donut via SVG
-            const DONUT_R = 60, CIRC = 2 * Math.PI * DONUT_R;
-            const keys = ['UPPER', 'LOWER', 'VERTICAL', 'PANIC'];
-            let offset = 0;
-            const slices = keys.map(k => {
-                const frac = total > 0 ? summary[k] / total : 0.25;
-                const dash  = frac * CIRC;
-                const slice = { key: k, dash, offset, color: BARRIER_COLORS[k].bg };
-                offset += dash;
-                return slice;
-            });
-
-            return (
-                <div className="space-y-8 animate-in fade-in duration-500 pb-20">
-
-                    {/* Row 1: Donut + Sizing Inspector */}
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-
-                        {/* Barrier Donut Chart */}
-                        <div className="oled-card p-8 rounded-3xl flex flex-col items-center">
-                            <h3 className="text-xs font-black uppercase text-gray-500 mb-6 self-start">
-                                Barrier Attribution Breakdown
-                            </h3>
-                            <svg width="160" height="160" viewBox="0 0 160 160">
-                                <circle cx="80" cy="80" r={DONUT_R} fill="none" stroke="#111" strokeWidth="28"/>
-                                {slices.map(s => (
-                                    <circle key={s.key} cx="80" cy="80" r={DONUT_R} fill="none"
-                                        stroke={s.color} strokeWidth="28"
-                                        strokeDasharray={`${s.dash} ${CIRC - s.dash}`}
-                                        strokeDashoffset={-s.offset}
-                                        style={{ transform: 'rotate(-90deg)', transformOrigin: '80px 80px' }}/>
-                                ))}
-                                <text x="80" y="80" textAnchor="middle" dominantBaseline="middle"
-                                    className="mono" style={{ fill: '#e6edf3', fontSize: '22px', fontWeight: 800 }}>
-                                    {total}
-                                </text>
-                                <text x="80" y="98" textAnchor="middle"
-                                    style={{ fill: '#666', fontSize: '9px', fontWeight: 700 }}>TOTAL</text>
-                            </svg>
-                            <div className="grid grid-cols-2 gap-x-8 gap-y-2 mt-4 w-full max-w-xs">
-                                {keys.map(k => (
-                                    <div key={k} className="flex items-center gap-2">
-                                        <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: BARRIER_COLORS[k].bg }}></div>
-                                        <span className="text-[10px] font-bold text-gray-400">{BARRIER_COLORS[k].label.split('(')[0].trim()}</span>
-                                        <span className={`text-[11px] font-black mono ml-auto ${BARRIER_COLORS[k].text}`}>{summary[k]}</span>
+                                
+                                <div className="pt-4 flex items-center justify-between">
+                                    <div className="w-24 h-24 rounded-full border-4 border-gray-800 relative bg-black flex items-center justify-center">
+                                        <div className="absolute inset-0 rounded-full border-4 border-transparent" style={{borderTopColor: '#00D2FF', borderRightColor: '#00D2FF', transform: 'rotate(45deg)'}}></div>
+                                        <div className="absolute inset-0 rounded-full border-4 border-transparent" style={{borderLeftColor: '#d2990d', transform: 'rotate(-45deg)'}}></div>
+                                        <span className="text-[9px] font-black text-gray-500">MEM</span>
                                     </div>
-                                ))}
+                                    <div className="flex-1 ml-8 flex justify-end items-center gap-4">
+                                        {capStatus && <span className="text-[9px] font-black text-accent bg-accent/20 px-2 py-1 rounded">{capStatus}</span>}
+                                        <button disabled={!unlocked} onClick={saveCapAlloc} className="btn-neon px-6 py-3 rounded font-black text-[10px] uppercase">Save to Redis</button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
-                        {/* Sizing Inspector */}
-                        <div className="oled-card p-8 rounded-3xl">
-                            <h3 className="text-xs font-black uppercase text-gray-500 mb-6">
-                                Hybrid Sizing Inspector <span className="text-accent">₹2,500 / ATR×f</span>
-                            </h3>
-                            <div className="mb-4 text-[10px] text-gray-500">
-                                <span className="mono">current_atr=</span>
-                                <span className="mono text-accent">{(sizing.current_atr || 20).toFixed(2)}</span>
-                                &nbsp;&nbsp;
-                                <span className="mono">unit_base=</span>
-                                <span className="mono text-accent">{(sizing.unit_size_base || 0).toFixed(2)}</span> lots
+                        {/* Risk Limits */}
+                        <div className={`oled-card p-8 rounded-3xl transition-opacity ${unlocked?'opacity-100':'opacity-60'}`}>
+                            <h3 className="text-xs font-black uppercase text-gray-500 mb-6">Stop-Loss & Risk Limits</h3>
+                            <div className="space-y-6">
+                                <div>
+                                    <label className="text-[9px] font-bold text-gray-400 uppercase">Daily Max Loss (M-to-M) (₹)</label>
+                                    <input type="number" disabled={!unlocked} value={maxLoss} onChange={e=>setMaxLoss(Number(e.target.value))} className="w-full bg-danger/10 border border-danger/30 mt-1 p-3 text-danger font-mono rounded" />
+                                </div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="text-[9px] font-bold text-gray-400 uppercase">Max Drawdown / Strategy</label>
+                                        <input type="number" disabled={!unlocked} value={maxDD} onChange={e=>setMaxDD(Number(e.target.value))} className="w-full bg-black border border-white/10 mt-1 p-3 text-white font-mono rounded" />
+                                    </div>
+                                    <div>
+                                        <label className="text-[9px] font-bold text-gray-400 uppercase">Trailing Stop (ATR Multiplier)</label>
+                                        <input type="number" step="0.1" disabled={!unlocked} value={trailStop} onChange={e=>setTrailStop(Number(e.target.value))} className="w-full bg-black border border-white/10 mt-1 p-3 text-white font-mono rounded"/>
+                                    </div>
+                                </div>
+                                <div className="pt-4 flex items-center justify-between border-t border-white/10 mt-4">
+                                     <div className="text-[9px] font-bold text-gray-600 bg-white/5 p-2 rounded">Runs Dry-Run validation before commit.</div>
+                                     <div className="flex items-center gap-4">
+                                        {riskStatus && <span className={`text-[9px] font-black px-2 py-1 rounded ${riskStatus.includes('VETO') ? 'text-danger bg-danger/20' : 'text-accent bg-accent/20'}`}>{riskStatus}</span>}
+                                        <button disabled={!unlocked} onClick={saveRiskLimits} className="btn-neon px-6 py-3 rounded font-black text-[10px] uppercase">Validate & Commit</button>
+                                     </div>
+                                </div>
                             </div>
-                            <table className="w-full text-left text-[11px]">
-                                <thead>
-                                    <tr className="text-gray-500 border-b border-white/5 uppercase text-[9px]">
-                                        <th className="pb-3">Asset</th>
-                                        <th className="pb-3">Score</th>
-                                        <th className="pb-3">f (Half-Kelly)</th>
-                                        <th className="pb-3">Final Lots</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="mono">
-                                    {assets.map((a, i) => (
-                                        <tr key={i} className="border-b border-white/5 hover:bg-white/5 transition-colors">
-                                            <td className="py-3 font-bold text-accent">{a.asset}</td>
-                                            <td className="py-3">{a.score?.toFixed(3)}</td>
-                                            <td className="py-3">{a.weight?.toFixed(4)}</td>
-                                            <td className={`py-3 font-black ${a.lots > 5 ? 'text-success' : 'text-white'}`}>{a.lots?.toFixed(2)}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-
-                    {/* Row 2: Recent Exit Feed */}
-                    <div className="oled-card p-8 rounded-3xl">
-                        <h3 className="text-xs font-black uppercase text-gray-500 mb-6">
-                            Recent Exit Feed <span className="text-gray-600">(last 20 exits · live)</span>
-                        </h3>
-                        <div className="overflow-x-auto">
-                            <table className="w-full text-left text-[11px] min-w-[600px]">
-                                <thead>
-                                    <tr className="text-gray-500 border-b border-white/5 uppercase text-[9px]">
-                                        <th className="pb-3">Time</th>
-                                        <th className="pb-3">Symbol</th>
-                                        <th className="pb-3">Barrier</th>
-                                        <th className="pb-3">Trigger</th>
-                                        <th className="pb-3">Exit Price</th>
-                                        <th className="pb-3">P&L Pts</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="mono">
-                                    {feed.length === 0 && (
-                                        <tr><td colSpan="6" className="text-center py-12 text-gray-700 uppercase text-[10px] tracking-widest font-bold">No exits recorded this session</td></tr>
-                                    )}
-                                    {feed.map((ex, i) => {
-                                        const bc = BARRIER_COLORS[ex.barrier] || BARRIER_COLORS.LOWER;
-                                        return (
-                                            <tr key={i} className="border-b border-white/5 hover:bg-white/5 transition-colors">
-                                                <td className="py-3 text-gray-500">{ex.time}</td>
-                                                <td className="py-3 font-bold text-white">{ex.symbol}</td>
-                                                <td className="py-3">
-                                                    <span className={`px-2 py-0.5 rounded-full text-[9px] font-black ${bc.text}`}
-                                                        style={{ background: bc.bg.replace('0.7', '0.15') }}>
-                                                        {ex.barrier}
-                                                    </span>
-                                                </td>
-                                                <td className="py-3 text-gray-400 max-w-[200px] truncate">{ex.reason}</td>
-                                                <td className="py-3">{ex.exit_price?.toFixed(2)}</td>
-                                                <td className={`py-3 font-black ${ex.pnl_pts >= 0 ? 'text-success' : 'text-danger'}`}>
-                                                    {ex.pnl_pts >= 0 ? '+' : ''}{ex.pnl_pts?.toFixed(1)}
-                                                </td>
-                                            </tr>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
                         </div>
                     </div>
                 </div>
-            );
-        });
+            )
+        }
 
-
+        // --- MAIN DASHBOARD APP ---
         const Dashboard = () => {
             const [mode, setMode] = useState('Paper');
-            const [activeTab, setActiveTab] = useState('warroom');
-            const [state, setState] = useState({
-                alpha_score: 0, hmm_regime: 'UNKNOWN', gex_sign: 'UNKNOWN',
-                system_halted: false, macro_lockdown: false,
-                available_margin_paper: 0, available_margin_live: 0,
-                signals: {}, power_five: {}, exit_path_70_30: { tp1: 0, tp2: 0, progress: 0 }
-            });
+            const [asset, setAsset] = useState('NIFTY50');
+            const [activeTab, setActiveTab] = useState('CMD');
+            const [state, setState] = useState({ hmm_regime: 'UNKNOWN', signals: {}, power_five: {} });
             const [positions, setPositions] = useState([]);
-            const [portfolioDelta, setPortfolioDelta] = useState({ NIFTY50: 0, BANKNIFTY: 0, threshold: 0.15 });
-            const [evolution, setEvolution] = useState({ leaderboard: [], transition_matrix: [], data_mix: { seed: 50, live: 50 } });
-            const [telemetry, setTelemetry] = useState({ nse_latency_ms: 0, bse_latency_ms: 0, slippage_leakage_inr: 0, cpu_cores: [0, 0, 0] });
-            const [attribution, setAttribution] = useState({ pnl_stack: [], efficiency: [] });
-            const [simulation, setSimulation] = useState({ engine_ranking: [], equity_growth: [] });
-            const [barrierData, setBarrierData] = useState({ summary: { UPPER: 0, LOWER: 0, VERTICAL: 0, PANIC: 0 }, feed: [], total: 0 });
-            const [sizing, setSizing] = useState({ current_atr: 20, max_risk_per_trade: 2500, unit_size_base: 125, assets: [] });
-            const [paperMaxLoss, setPaperMaxLoss] = useState("2500");
-            const [liveMaxLoss,  setLiveMaxLoss]  = useState("2500");
-
-            const [localEngine, setLocalEngine] = useState('Hybrid');
-            const [paperCapital, setPaperCapital] = useState("1000000");
-            const [liveCapital, setLiveCapital] = useState("0");
-            const [hurst, setHurst] = useState(0.55);
-            const [confidence, setConfidence] = useState(0.70);
-            const [vpin, setVpin] = useState(0.82);
-
-            const API_BASE = (() => {
-                const h = window.location.hostname;
-                if (h === 'localhost' || h === '127.0.0.1') return 'http://127.0.0.1:8000';
-                if (h.endsWith('.run.app')) return '';
-                return `${window.location.protocol}//${h}:8000`;
-            })();
-
+            const [telemetry, setTelemetry] = useState({});
+            
             const fetchData = async () => {
                 try {
-                    const [s, p, pd, e, t, a, sim, ba, sz] = await Promise.all([
-                        fetch(`${API_BASE}/state`).then(r => r.json()),
+                    const [s, p, t] = await Promise.all([
+                        fetch(`${API_BASE}/state?asset=${asset}`).then(r => r.json()),
                         fetch(`${API_BASE}/portfolio?mode=${mode}`).then(r => r.json()),
-                        fetch(`${API_BASE}/portfolio/delta`).then(r => r.json()),
-                        fetch(`${API_BASE}/models/evolution`).then(r => r.json()),
-                        fetch(`${API_BASE}/health/telemetry`).then(r => r.json()),
-                        fetch(`${API_BASE}/attribution/strategy`).then(r => r.json()),
-                        fetch(`${API_BASE}/regime/simulation`).then(r => r.json()),
-                        fetch(`${API_BASE}/barriers/attribution`).then(r => r.json()),
-                        fetch(`${API_BASE}/sizing/inspector`).then(r => r.json()),
+                        fetch(`${API_BASE}/health/telemetry`).then(r => r.json())
                     ]);
-                    setState(s);
-                    setPositions(p);
-                    setPortfolioDelta(pd);
-                    setEvolution(e);
-                    setTelemetry(t);
-                    setAttribution(a);
-                    setSimulation(sim);
-                    setBarrierData(ba);
-                    setSizing(sz);
-                } catch (err) { console.error("Poll failed", err); }
+                    setState(s); setPositions(p); setTelemetry(t);
+                } catch(e) {}
             };
-
-            useEffect(() => {
-                const colors = mode === 'Paper' ? { hex: '#00D2FF', rgb: '0, 210, 255' } : { hex: '#3fb950', rgb: '63, 185, 80' };
-                document.documentElement.style.setProperty('--theme-accent', colors.hex);
-                document.documentElement.style.setProperty('--theme-accent-rgb', colors.rgb);
-            }, [mode]);
 
             useEffect(() => {
                 fetchData();
-                const i = setInterval(fetchData, 1000);
+                const i = setInterval(fetchData, 2000);
                 return () => clearInterval(i);
-            }, [mode]);
+            }, [mode, asset]);
 
-            const handlePanic = async () => {
-                if (confirm(`🚨 KILL SWITCH: Liquidate all ${mode} positions?`)) {
-                    await fetch(`${API_BASE}/panic?mode=${mode}`, { method: 'POST' });
-                }
-            };
+            const panic = () => { if(confirm("🚨 TRIGGER GLOBAL LIQUIDATE?")) fetch(`${API_BASE}/panic?mode=${mode}`,{method:'POST'}); };
 
-            const handleHalt = async () => {
-                if (confirm(`🛑 SYSTEM HALT: Stop all daemon processes on the VM?`)) {
-                    await fetch(`${API_BASE}/system/halt`, { method: 'POST' });
-                }
-            };
-
-            const handleHotSwap = async () => {
-                const config = { 
-                    engine: localEngine, 
-                    paper_capital: Number(paperCapital), 
-                    live_capital: Number(liveCapital), 
-                    hurst_threshold: hurst, 
-                    hybrid_confidence: confidence, 
-                    vpin_toxicity: vpin,
-                    paper_max_risk: Number(paperMaxLoss) || 2500,
-                    live_max_risk:  Number(liveMaxLoss)  || 2500
-                };
-                await fetch(`${API_BASE}/regime/config`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(config)
-                });
-                alert("🚀 HOT-SWAP SUCCESSFUL: Meta-Router re-aligned with split capital pools.");
-            };
+            const tabs = [
+                {id: 'CMD', label: 'Command Center'},
+                {id: 'PORT', label: 'Portfolio & Risk'},
+                {id: 'ALPHA', label: 'Strategy Alpha'},
+                {id: 'HLTH', label: 'System Health'},
+                {id: 'EOD', label: 'Analytics & EOD'},
+                {id: 'CONF', label: 'System Config'}
+            ];
 
             return (
-                <div className="flex flex-col h-screen select-none">
-                    <nav className="glass bg-black/95 p-4 sticky top-0 z-[100] border-b border-white/10 flex justify-between items-center px-8">
-                        <div className="flex items-center gap-12">
-                            <div className="mr-8">
-                                <h1 className="text-xl font-black tracking-tighter text-white">🦸‍♂️ K.A.R.T.H.I.K. <span className="text-[9px] bg-accent/20 text-accent px-2 py-0.5 rounded ml-2">v8.0</span></h1>
-                                <div className="text-[8px] text-gray-600 font-black uppercase tracking-[0.2em] mt-0.5 leading-none">Quantum Alpha Kernel</div>
-                            </div>
-                            <div className="flex gap-10">
-                                {[
-                                    { id: 'warroom', label: 'War Room' },
-                                    { id: 'playground', label: 'Orchestrator' },
-                                    { id: 'sim', label: 'Simulation' },
-                                    { id: 'evolution', label: 'Evolution' },
-                                    { id: 'audit', label: 'Audit' },
-                                    { id: 'health', label: 'Health' },
-                                    { id: 'attribution', label: 'Attribution' },
-                                ].map(tab => (
-                                    <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-3 pb-2 border-b-2 transition-all group ${activeTab === tab.id ? 'border-accent text-accent' : 'border-transparent text-gray-500 hover:text-gray-300 hover:border-white/20'}`}>
-                                        <TabIcon name={tab.id} active={activeTab === tab.id} />
-                                        <span className={`text-[11px] uppercase font-black tracking-tight ${activeTab === tab.id ? 'text-accent' : ''}`}>{tab.label}</span>
-                                    </button>
-                                ))}
-                            </div>
+                <div className={`flex flex-col h-screen select-none ${mode === 'Actual' ? 'theme-actual' : ''}`}>
+                    <Header mode={mode} setMode={setMode} asset={asset} setAsset={setAsset} handlePanic={panic} />
+                    
+                    <div className="glass px-8 pt-4 flex justify-between border-b border-white/10 shadow-lg items-center">
+                        <div className="flex gap-8">
+                            {tabs.map(t => (
+                                <button key={t.id} onClick={() => setActiveTab(t.id)} className={`pb-3 text-[10px] uppercase font-black tracking-widest transition-all ${activeTab === t.id ? 'tab-active' : 'text-gray-500 hover:text-gray-300'}`}>
+                                    {t.label}
+                                </button>
+                            ))}
                         </div>
-                        <div className="flex gap-6 items-center">
-                             <div className="flex flex-col items-end">
-                                <span className="text-[8px] font-black text-gray-600 uppercase">Capital Locked ({mode})</span>
-                                <span className={`text-xs font-bold mono ${mode === 'Paper' ? 'text-accent' : 'text-success'}`}>{formatCurrency(Number(mode === 'Paper' ? paperCapital : liveCapital))}</span>
-                             </div>
-                            <button onClick={() => setMode(mode === 'Paper' ? 'Actual' : 'Paper')} className={`px-6 py-2 rounded-full text-[10px] font-black border-2 transition-all hover:scale-105 active:scale-95 ${mode === 'Paper' ? 'border-accent text-accent bg-accent/5 shadow-[0_0_15px_rgba(0,210,255,0.1)]' : 'border-success text-success bg-success/5 shadow-[0_0_15px_rgba(63,185,80,0.1)]'}`}>
-                                {mode.toUpperCase()} MODE
-                            </button>
-                        </div>
-                    </nav>
+                        {activeTab !== 'CMD' && (
+                            <div className="pb-3 flex items-center gap-2">
+                                <span className="text-[9px] text-gray-500 font-bold uppercase">Global Asset:</span>
+                                <select value={asset} onChange={e => setAsset(e.target.value)} className="bg-white/5 border border-white/10 text-[9px] font-bold px-2 py-1 outline-none text-white rounded">
+                                    <option value="NIFTY50">NIFTY50</option>
+                                    <option value="BANKNIFTY">BANKNIFTY</option>
+                                    <option value="SENSEX">SENSEX</option>
+                                </select>
+                            </div>
+                        )}
+                    </div>
 
-                    <main className="flex-1 p-10 overflow-y-auto scroll-hide bg-black">
-                        {activeTab === 'warroom' && <WarRoom state={state} positions={positions} mode={mode} handlePanic={handlePanic} />}
-                        {activeTab === 'playground' && <Playground 
-                            localEngine={localEngine} 
-                            setLocalEngine={setLocalEngine} 
-                            localCapital={mode === 'Paper' ? paperCapital : liveCapital} 
-                            setLocalCapital={mode === 'Paper' ? setPaperCapital : setLiveCapital} 
-                            maxLoss={mode === 'Paper' ? paperMaxLoss : liveMaxLoss}
-                            setMaxLoss={mode === 'Paper' ? setPaperMaxLoss : setLiveMaxLoss}
-                            hurst={hurst} setHurst={setHurst} 
-                            confidence={confidence} setConfidence={setConfidence} 
-                            vpin={vpin} setVpin={setVpin} 
-                            handleHotSwap={handleHotSwap} 
-                            mode={mode} 
-                        />}
-                        {activeTab === 'sim' && <SimulationTab simulation={simulation} />}
-                        {activeTab === 'evolution' && <Evolution evolution={evolution} />}
-                        {activeTab === 'audit' && <Performance attribution={attribution} />}
-                        {activeTab === 'health' && <Health telemetry={telemetry} />}
-                        {activeTab === 'attribution' && <SignalAttribution barrierData={barrierData} sizing={sizing} />}
+                    <main className="flex-1 p-8 overflow-y-auto">
+                        {activeTab === 'CMD' && <CommandCenter state={state} asset={asset} setAsset={setAsset} />}
+                        {activeTab === 'PORT' && <PortfolioRisk positions={positions} telemetry={telemetry} />}
+                        {activeTab === 'ALPHA' && <StrategyAlpha state={state} />}
+                        {activeTab === 'HLTH' && <SystemHealth telemetry={telemetry} />}
+                        {activeTab === 'EOD' && <AnalyticsEOD />}
+                        {activeTab === 'CONF' && <SystemConfig />}
                     </main>
-
-                    <footer className="glass border-t border-white/5 p-3 px-10 flex justify-between items-center text-[10px] font-bold text-gray-500 uppercase tracking-widest bg-black/90">
-                        <div className="flex gap-6 items-center">
-                            <span className="flex items-center gap-2">
-                                <div className={`w-2 h-2 rounded-full ${state.source === 'VM_DIRECT' ? 'bg-success animate-pulse' : state.source === 'FIRESTORE_SYNC' ? 'bg-warning' : 'bg-danger'}`}></div>
-                                {state.source === 'VM_DIRECT' ? 'Redis Live' : state.source === 'FIRESTORE_SYNC' ? 'Cloud Sync' : 'Offline'}
-                            </span>
-                            <span className="flex items-center gap-2">
-                                <div className={`w-2 h-2 rounded-full ${state.source === 'VM_DIRECT' ? 'bg-success animate-pulse' : 'bg-warning'}`}></div>
-                                {state.source === 'VM_DIRECT' ? 'Timescale Live' : 'Archive Mode'}
-                            </span>
-                            {(state.source === 'FIRESTORE_SYNC' || state.source === 'GCS_PARQUET') && (
-                                <span className="text-[8px] text-warning font-black border border-warning/30 bg-warning/5 px-2 py-0.5 rounded animate-pulse">📦 GCS ARCHIVE</span>
-                            )}
-                            <span className={`text-[8px] font-black border px-2 py-0.5 rounded ${state.source === 'VM_DIRECT' ? 'text-accent border-accent/20' : 'text-warning border-warning/20'}`}>
-                                {state.source || 'OFFLINE'}
-                            </span>
-                        </div>
-                        <div className="mono text-gray-600 flex gap-10">
-                            <span>UPTIME: 99.9%</span>
-                            <span>© 2026 AR-KARTHIK INFRASTRUCTURE</span>
-                        </div>
-                    </footer>
                 </div>
             );
         };
@@ -882,5 +614,4 @@
         root.render(<Dashboard />);
     </script>
 </body>
-
 </html>

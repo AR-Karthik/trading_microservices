@@ -36,7 +36,19 @@ class FIIDIIFetcher:
                 # Publish the latest authoritative data for subscriber visualization
                 self.redis.set("latest_fii_dii", json.dumps(data))
                 self.redis.set("LAST_FII_DII_FETCH", datetime.now().isoformat())
-                logger.info("Successfully fetched FII/DII data")
+                
+                # [Audit-Fix] Calculate fii_bias (-1.0 to 1.0) based on FII Net Value
+                fii_net = 0.0
+                for item in data:
+                    if item.get("category") == "FII":
+                        fii_net = float(item.get("netValue", 0.0))
+                        break
+                
+                # Normalize bias: >2000 Cr = 1.0, <-2000 Cr = -1.0
+                bias = max(-1.0, min(1.0, fii_net / 2000.0))
+                self.redis.set("fii_bias", str(round(bias, 2)))
+                
+                logger.info(f"Successfully fetched FII/DII data. Bias: {bias}")
                 return data
             else:
                 logger.error(f"Failed to fetch FII/DII data: {response.status_code}")

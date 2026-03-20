@@ -89,7 +89,7 @@ ENV_VARS = {
     "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", ""),
     "TELEGRAM_CHAT_ID":   os.getenv("TELEGRAM_CHAT_ID", ""),
     "GCP_PROJECT_ID":     PROJECT_ID,
-    "DASHBOARD_ACCESS_KEY": os.getenv("DASHBOARD_ACCESS_KEY", "K_A_R_T_H_I_K_2026_PRO"),
+    "DASHBOARD_ACCESS_KEY": os.getenv("DASHBOARD_ACCESS_KEY", "bA#w#3iW=Q4w"),
     "SIMULATION_MODE":    os.getenv("SIMULATION_MODE", "false"),
     "REDIS_PASSWORD":     os.getenv("REDIS_PASSWORD", "trading_redis"),
     "REDIS_HOST":         "redis",
@@ -102,7 +102,10 @@ ENV_VARS = {
     "POSTGRES_DB":        os.getenv("POSTGRES_DB", "trading_db"),
     "ENABLE_OFF_HOUR_SIMULATOR": os.getenv("ENABLE_OFF_HOUR_SIMULATOR", "true"),
 }
-ENV_CONTENT = "\n".join(f"{k}={v}" for k, v in ENV_VARS.items())
+ENV_CONTENT = "\n".join(f"{k}={v.strip()}" for k, v in ENV_VARS.items())
+
+import base64
+ENV_B64 = base64.b64encode(ENV_CONTENT.encode()).decode()
 
 # Virtual Machine Bootstrap Command Payload
 STARTUP_SCRIPT = f"""#!/bin/bash
@@ -125,12 +128,10 @@ rm -rf {REPO_DIR}
 git clone {REPO_URL} {REPO_DIR}
 cd {REPO_DIR}
 
-# 3. Write .env securely from instance metadata
-cat > {REPO_DIR}/.env << 'ENVEOF'
-{ENV_CONTENT}
-ENVEOF
+# 3. Write .env securely using Base64 to prevent corruption
+echo "{ENV_B64}" | base64 -d > {REPO_DIR}/.env
 
-echo ".env written."
+echo ".env written and decoded."
 
 # 4. OS Hardening, Storage Mounts, & Kernel Tuning
 echo "Optimizing Kernel (THP, ulimit, TCP)..."
@@ -311,18 +312,29 @@ def create_spot_instance():
     try:
         existing = instance_client.get(project=PROJECT_ID, zone=ZONE, instance=INSTANCE_NAME)
         if existing.status == "TERMINATED":
-            print(f"Instance '{INSTANCE_NAME}' exists but is TERMINATED. Starting it...")
+            print(f"Instance '{INSTANCE_NAME}' exists but is TERMINATED. Updating metadata and starting...")
+            # Update metadata to ensure latest startup script
+            instance_client.set_metadata(
+                project=PROJECT_ID, zone=ZONE, instance=INSTANCE_NAME,
+                metadata_resource=compute_v1.Metadata(
+                    fingerprint=existing.metadata.fingerprint,
+                    items=[compute_v1.Items(key="startup-script", value=STARTUP_SCRIPT)]
+                )
+            )
             instance_client.start(project=PROJECT_ID, zone=ZONE, instance=INSTANCE_NAME)
         else:
             print(f"Instance '{INSTANCE_NAME}' already exists (status: {existing.status}). Triggering self-healing redeploy...")
             # Run the update logic via SSH if it's already running
+            # We also refresh the .env file to fix any corruption from previous runs
             redeploy_cmd = (
-                f"sudo -i bash -c 'cd {REPO_DIR} && git pull origin master && "
+                f"sudo -i bash -c \"mkdir -p {REPO_DIR} && cd {REPO_DIR} && "
+                f"echo '{ENV_B64}' | base64 -d > .env && "
+                f"git pull origin master && "
                 f"docker image prune -f && "
                 f"docker compose down && "
-                f"docker compose up -d --build'"
+                f"docker compose up -d --build\""
             )
-            os.system(f"gcloud compute ssh {INSTANCE_NAME} --zone={ZONE} --tunnel-through-iap --command=\"{redeploy_cmd}\"")
+            os.system(f"gcloud compute ssh {INSTANCE_NAME} --zone={ZONE} --tunnel-through-iap --command='{redeploy_cmd}'")
         
         print(f"  👉 Cloud Run Dashboard should be used for monitoring.")
         return

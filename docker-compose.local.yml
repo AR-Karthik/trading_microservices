@@ -1,28 +1,32 @@
 services:
   postgres:
     image: timescale/timescaledb:latest-pg15
+    container_name: trading_timescaledb
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=trading
-    # [Audit 6.4] Missing healthchecks
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-trading}
+      - TZ=Asia/Kolkata
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d trading"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-trading}"]
       interval: 10s
       timeout: 5s
       retries: 5
-
   redis:
     image: redis:7-alpine
+    container_name: trading_redis
     ports:
       - "6379:6379"
-    # [Audit 6.4] Missing healthchecks
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
+      - TZ=Asia/Kolkata
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-trading_redis}"]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-trading_redis}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -31,7 +35,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.local
-    env_file: .env # [Audit 7.3] Ensure environment variables are loaded
+    container_name: data_gateway
+    env_file: .env
     depends_on:
       - redis
       - postgres
@@ -98,6 +103,7 @@ services:
       - postgres
     volumes:
       - .:/app
+      - /dev/shm:/ram_disk
 
   strategy_engine:
     build:
@@ -109,6 +115,7 @@ services:
       - redis
     volumes:
       - .:/app
+      - /dev/shm:/ram_disk
 
   liquidation_daemon:
     build:
@@ -121,6 +128,7 @@ services:
       - postgres
     volumes:
       - .:/app
+      - /dev/shm:/ram_disk
 
   system_controller:
     build:
@@ -133,6 +141,7 @@ services:
       - postgres
     volumes:
       - .:/app
+      - /dev/shm:/ram_disk
 
   paper_bridge:
     build:
@@ -145,6 +154,7 @@ services:
       - postgres
     volumes:
       - .:/app
+      - /dev/shm:/ram_disk
 
   order_reconciler:
     build:
@@ -157,6 +167,7 @@ services:
     env_file: .env
     volumes:
       - .:/app
+      - /dev/shm:/ram_disk
 
   # [Audit 7.6] Adding missing services
   live_bridge:
@@ -170,6 +181,7 @@ services:
     env_file: .env
     volumes:
       - .:/app
+      - /dev/shm:/ram_disk
 
   telegram_alerter:
     build:
@@ -192,6 +204,7 @@ services:
     env_file: .env
     volumes:
       - .:/app
+      - /dev/shm:/ram_disk
 
   dashboard_api:
     build:
@@ -214,6 +227,8 @@ services:
       - "80:80"
     depends_on:
       - dashboard_api
+    volumes:
+      - ./dashboard/frontend/index.html:/usr/share/nginx/html/index.html
 
 volumes:
   pgdata:

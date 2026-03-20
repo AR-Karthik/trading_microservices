@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 import redis.asyncio as redis
 from core.alerts import send_cloud_alert
-from core.mq import MQManager, Ports
+from core.mq import MQManager, Ports, NumpyEncoder
 
 try:
     import asyncpg
@@ -111,11 +111,8 @@ class SystemController:
         self._preemption_detected = False
         self._shutdown_flag = False
         
-        # Shoonya API for history fetch (Phase 0)
-        from NorenRestApiPy.NorenApi import NorenApi
-        host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP/")
-        ws_host = host.replace("https", "wss").replace("NorenWClientTP", "NorenWSTP/")
-        self.api = NorenApi(host=host, websocket=ws_host)
+        # Shoonya API removed [Audit 14.1: Centralized in DataGateway]
+        self.api = None
         self.pool: asyncpg.Pool | None = None
         self._boot_time = time.time()
 
@@ -130,6 +127,7 @@ class SystemController:
         while True:
             try:
                 self.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5, timeout=5.0)
+                logger.info("✅ SystemController connected to TimescaleDB.")
                 break
             except Exception as e:
                 retry_count += 1
@@ -636,55 +634,14 @@ class SystemController:
         while not self._shutdown_flag:
             now = datetime.now(tz=IST)
             
-            # Only run at HISTORY_FETCH_HH:HISTORY_FETCH_MM
-            if now.hour == HISTORY_FETCH_HH and now.minute == HISTORY_FETCH_MM:
-                logger.info("🕒 Triggering 14-day historical fetch for RV/ADX...")
-                await self._fetch_14d_history()
-                # Wait 65s to avoid double trigger
-                await asyncio.sleep(65)
+            # [Audit-Fix] DataGateway now handles this. Just monitor for existence.
+            if not await self.redis.exists("history_14d:NIFTY50"):
+                if (now.hour == 9 and now.minute > 5) or now.hour > 9:
+                    logger.warning("🕒 history_14d missing! DataGateway sync might have failed.")
+                await asyncio.sleep(60)
+                continue
             
             await asyncio.sleep(30)
-
-    async def _fetch_14d_history(self):
-        """Fetches 14 days of history for Nifty & BankNifty from Shoonya."""
-        try:
-            # Login only when needed for history fetch
-            user = os.getenv("SHOONYA_USER")
-            pwd = os.getenv("SHOONYA_PWD")
-            factor2 = os.getenv("SHOONYA_FACTOR2")
-            vc = os.getenv("SHOONYA_VC")
-            app_key = os.getenv("SHOONYA_APP_KEY")
-            imei = os.getenv("SHOONYA_IMEI")
-            
-            import pyotp
-            totp = pyotp.TOTP(factor2).now()
-            self.api.login(userid=user, password=pwd, twoFA=totp, vendor_code=vc, api_secret=app_key, imei=imei)
-            
-            for symbol in ["NSE|26000", "NSE|26001", "BSE|1"]: # Nifty, BankNifty, Sensex
-                # Fetch daily candles for the last 14 sessions
-                end_time = datetime.now().timestamp()
-                start_time = end_time - (20 * 86400) # 20 days to ensure 14 trading sessions
-                
-                # Fetch time series
-                ret = self.api.get_time_price_series(exchange=symbol.split('|')[0], 
-                                                   token=symbol.split('|')[1], 
-                                                   starttime=start_time, 
-                                                   endtime=end_time, 
-                                                   interval=None) # None for daily candles
-                
-                if ret and isinstance(ret, list):
-                    # Sort and take last 14
-                    ret.sort(key=lambda x: x['time'])
-                    closes = [float(c['ssoc']) for c in ret[-LOOKBACK_DAYS:]]
-                    
-                    asset_map = {"26000": "NIFTY50", "26001": "BANKNIFTY", "1": "SENSEX"}
-                    asset_name = asset_map.get(symbol.split('|')[1], "UNKNOWN")
-                    await self.redis.set(f"history_14d:{asset_name}", json.dumps(closes))
-                    logger.info(f"✅ Stored 14D history for {asset_name}: {len(closes)} bars.")
-            
-            logger.info("14-day lookback sync complete.")
-        except Exception as e:
-            logger.error(f"Error fetching 14d history: {e}")
 
     # ── Hard State Sync ──────────────────────────────────────────────────────
 
