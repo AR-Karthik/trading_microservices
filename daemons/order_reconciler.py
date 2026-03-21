@@ -11,6 +11,7 @@ import zmq.asyncio
 from core.mq import MQManager, Ports, Topics
 from core.logger import setup_logger
 from core.health import HeartbeatProvider
+from core.margin import AsyncMarginManager
 
 # Wave 2: Shoonya API for status polling
 try:
@@ -49,6 +50,8 @@ class OrderReconciler:
             except Exception as e:
                 logger.error(f"Failed to init Shoonya API: {e}")
         
+        self.margin_manager = AsyncMarginManager(self.r)
+        
         # MQ Sockets
         self.cmd_pub = None
         self.order_push = None
@@ -74,6 +77,10 @@ class OrderReconciler:
                 await asyncio.sleep(1)
 
     async def reconcile_basket(self, p_uuid: str):
+        """[GCP FIX] Shield the entire reconciliation from SIGTERM cancellation."""
+        await asyncio.shield(self._reconcile_logic(p_uuid))
+
+    async def _reconcile_logic(self, p_uuid: str):
         """
         Broken Condor Gap Reconciliation (Spec 11.1)
         1. Query order status for all legs in parent_uuid.
@@ -162,6 +169,15 @@ class OrderReconciler:
                 all_filled = False
                 # Still pending after 3s? Force fill or cancel.
                 needs_force_fill.append(order)
+        
+        # [PHD FIX] Log the reconciliation event for counterfactual parity
+        if needs_rollback or needs_force_fill:
+            await self.r.lpush("RECONCILIATION_LOG", json.dumps({
+                "time": time.time(),
+                "parent_uuid": p_uuid,
+                "action": "ROLLBACK" if needs_rollback else "FORCE_FILL",
+                "reason": "Execution_Drift_Detected"
+            }))
 
         if needs_rollback:
             await self.trigger_rollback(p_uuid, data["legs"])
@@ -239,12 +255,12 @@ class OrderReconciler:
             status_raw = await self.r.get(f"order_status:{order_id}")
             status = json.loads(status_raw) if status_raw else {}
             
-            # [Audit-Fix] Component 1: Margin Restoration for Rejected/Cancelled legs
+            # [ACCOUNTING FIX] Don't use 125,000. Use the MarginManager to release.
             if status.get("status") in ["REJECTED", "CANCELLED"]:
-                qty = float(leg.get("quantity", leg.get("qty", 1)))
-                restore_amt = qty * 125000.0  # Appx margin per lot
-                await self.r.incrbyfloat("CASH_COMPONENT_LIVE", restore_amt)
-                logger.info(f"💰 MARGIN RESTORED: ₹{restore_amt:,} returned for {status.get('status')} {leg['symbol']}")
+                orig_margin = float(leg.get("reserved_margin", 0))
+                if orig_margin > 0:
+                    await self.margin_manager.release(orig_margin, execution_type=leg.get("execution_type", "Paper"))
+                    logger.info(f"💰 Vault Synced: Released ₹{orig_margin:,} back to pool for {leg['symbol']}")
             
             # If the leg was partially or fully filled, it's a naked risk. Close it.
             if status.get("status") in ["COMPLETE", "PARTIAL_FILL"]:
