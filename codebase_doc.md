@@ -27,7 +27,8 @@ This document provides detailed information about each file in the project, incl
 - **Services**:
   - `postgres`: TimescaleDB for persistent time-series and relational data.
   - `redis`: In-memory data store for caching and IPC.
-  - `data_gateway`: Bridge between external data sources and internal systems.
+  - `tick_sensor`: Fast Lane: Pure WebSocket ingestion for real-time market data.
+  - `snapshot_manager`: Slow Lane: REST API polling for account stats, history, and structural data.
   - `hmm_engine_nifty/banknifty/sensex`: Hidden Markov Model engines for different market segments.
   - `market_sensor`: Monitors market conditions and provides signals.
   - `meta_router`: Routes messages and data between services.
@@ -189,7 +190,11 @@ This document provides detailed information about each file in the project, incl
             - **Rationale**: Real-time visibility into market liquidity and slippage risk.
         - `run(self)`: Entry point that gathers and runs the concurrent heartbeat, command watcher, and EOD snapshot loops.
 
-### [daemons/data_gateway.py](file:///c:/Users/karth/.gemini/antigravity/scratch/trading_microservices/daemons/data_gateway.py)
+### [daemons/tick_sensor.py](file:///c:/Users/karth/.gemini/antigravity/scratch/trading_microservices/daemons/tick_sensor.py)
+[NEW] Pure WebSocket ingestion, pins to dedicated core.
+
+### [daemons/snapshot_manager.py](file:///c:/Users/karth/.gemini/antigravity/scratch/trading_microservices/daemons/snapshot_manager.py)
+[NEW] REST API polling for "Slow Lane" data (Greeks, Walls, Account).
 - **Purpose**: The primary ingestion bridge for market data via the Shoonya (Finvasia) API. It handles WebSocket connections, dynamic option subscriptions, and ensures data integrity through watchdogs.
 - **Class: `DataGateway`**:
     - **Attributes**:

@@ -26,10 +26,9 @@ import asyncpg
 from dotenv import load_dotenv
 load_dotenv()
 
-from core.mq import MQManager, Ports, Topics
-from core.alerts import send_cloud_alert
 from core.db_retry import with_db_retry
 from core.greeks import BlackScholes
+from core.shm import ShmManager, SignalVector, RegimeShm, RegimeVector
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,12 +70,18 @@ class LiquidationDaemon:
         self._redis: redis.Redis | None = None
         self.pool: asyncpg.Pool | None = None
 
-        # [Audit-Fix] Isolated SHM Managers for Multi-Index Alpha
-        from core.shm import ShmManager
+        # [Audit-Fix] Dual-Vector SHM Surveillance (Signals + Regimes)
         self.shm_alpha_managers = {
             idx: ShmManager(asset_id=idx, mode='r') for idx in ["NIFTY50", "BANKNIFTY", "SENSEX"]
         }
+        self.shm_regime_managers = {
+            idx: RegimeShm(asset_id=idx, mode='r') for idx in ["NIFTY50", "BANKNIFTY", "SENSEX"]
+        }
         self.shm_alpha_managers["GLOBAL"] = ShmManager(asset_id="GLOBAL", mode='r')
+        
+        # Risk State Buffers
+        self.last_red_alert_ts: dict[str, float] = {}
+        self.last_tsl_sync_ts: dict[str, float] = {}
 
     async def _reconnect_pool(self):
         """Reconnect DB pool."""
@@ -475,43 +480,90 @@ class LiquidationDaemon:
         if not pos:
             return
 
-        # [Audit-Fix] Determine Underlying for Asset-Keyed Signals
+        # [Audit-Fix] Determine Underlying for Asset-Keyed SHM
         underlying = "NIFTY50"
         if "BANKNIFTY" in symbol: underlying = "BANKNIFTY"
         elif "SENSEX" in symbol: underlying = "SENSEX"
         
-        # Pull isolated signals
+        # 1. Consumption Layer: High-Fidelity Vectors from SHM
+        sig_shm = self.shm_alpha_managers.get(underlying)
+        reg_shm = self.shm_regime_managers.get(underlying)
+        
+        sig = sig_shm.read() if sig_shm else {}
+        reg = reg_shm.read() if reg_shm else {}
+        
+        # [Audit-Fix] 5-Gate Exit Hierarchy Standardized
+        price = float(tick.get("price", 0.0))
+        entry = float(pos.get("price", price))
+        
+        # GATE 1: Hard Stop (LTP <= SL)
+        # (This is handled within lifecycle-specific evaluators below for backward compat)
+        
+        # GATE 2: Regime Shift (S18 = 3) -> Pre-emptive Reduction
+        s18 = reg.get("regime_s18", 0)
+        if s18 == 3 and pos.get("lifecycle_class") == "POSITIONAL":
+            # 50% exit for all legs in the Iron Condor/Credit basket
+            parent_uuid = pos.get("parent_uuid")
+            exit_reason = f"PRE_EMPTIVE_REDUCTION: S18=3 (Volatile Regime Shift)"
+            await self._execute_basket_reduction(parent_uuid, 0.50, exit_reason)
+            return
+
+        # GATE 3: Hedge Activation (ASTO +/- 90)
+        asto = sig.get("asto", 0.0) if sig else 0.0
+        if abs(asto) >= 90:
+            # Trigger Micro-Futures neutralizer
+            delta = sig.get("net_delta", 0.0) if sig else 0.0
+            rv = sig.get("rv", 0.0) if sig else 0.0
+            await self._execute_hedge_waterfall(pos, delta, rv)
+
+        # GATE 4: Quality Decay (S27 < 30)
+        s27 = reg.get("quality_s27", 100.0)
+        pnl = (price - entry) if pos.get("action") == "BUY" else (entry - price)
+        if s27 < 30 and pnl > 0 and pos.get("lifecycle_class") == "KINETIC":
+            exit_reason = f"PROFIT_BANK: S27 Quality={s27:.1f} < 30"
+            await self._record_barrier_exit(symbol, "QUALITY_DECAY", exit_reason, price, entry)
+            await self._attempt_exit(pos, symbol, price, exit_reason)
+            return
+
+        # GATE 5: Time Gate (15:15 IST)
+        now_ist = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=30)))
+        if now_ist.hour == 15 and now_ist.minute >= 15:
+            exit_reason = "EOD_SQUARE_OFF: Market Closing (15:15 IST)"
+            await self._record_barrier_exit(symbol, "TIME_LIMIT", exit_reason, price, entry)
+            await self._attempt_exit(pos, symbol, price, exit_reason)
+            return
+
+        # Fallback to existing lifecycle logic for Hard Stop / TP (Additive Only)
+        atr = sig.get("atr", 20.0) if sig else 20.0
         vix_raw = await self._redis.get(f"vix:{underlying}") or await self._redis.get("vix")
         vix = float(vix_raw) if vix_raw else 15.0
-        atr_raw = await self._redis.get(f"atr:{underlying}") or await self._redis.get("atr")
-        atr = float(atr_raw) if atr_raw else 20.0
-        hmm_raw = await self._redis.get(f"hmm_regime:{underlying}") or await self._redis.get("hmm_regime")
-        current_hmm = str(hmm_raw) if hmm_raw else "RANGING"
-
-        # Pull isolated alpha/cvd from Redis (fallback if SHM not used for some signals)
-        rv_raw = await self._redis.get(f"rv:{underlying}") or await self._redis.get("rv")
-        rv = float(rv_raw or 0.0)
+        rv = sig.get("rv", 0.0) if sig else 0.0
+        current_hmm = reg.get("regime_s18", 0) # Use S18 int as context
         
+        # [Risk Telemetry] Standardized Status Updates
         try:
-            if rv > 0.002:
-                price = tick.get("price", 0.0)
-                action = pos.get("action", "BUY")
-                entry = pos.get("price", price)
-                aggressive_price = float(price * 0.99 if action == "BUY" else price * 1.01)
-                exit_reason = f"PANIC_VOL_EXIT: RV {rv:.5f} > 3σ"
-                await self._record_barrier_exit(symbol, "PANIC", exit_reason, aggressive_price, float(entry))
-                await self._attempt_exit(pos, symbol, price=aggressive_price, reason=exit_reason)
-                return
-        except Exception: 
-            rv = 0.0
-
+            p_uuid = pos.get("parent_uuid", "STANDALONE")
+            status = "GREEN"
+            if pnl < -atr: status = "YELLOW"
+            if s18 == 3: status = "RED"
+            
+            await self._redis.hset(f"POSITION_STATE:{pos.get('symbol')}", mapping={
+                "uuid": pos.get("parent_uuid", "NONE"),
+                "risk_status": status,
+                "current_sl": pos.get("sl_level", entry - atr),
+                "regime_s18": s18,
+                "quality_s27": s27,
+                "last_update": time.time()
+            })
+        except Exception: pass
+        
         lifecycle = str(pos.get("lifecycle_class") or "KINETIC")
         if lifecycle == "POSITIONAL":
-            await self._evaluate_positional_barriers(symbol, tick, state, pos, rv, vix, atr, current_hmm, is_index_tick)
+            await self._evaluate_positional_barriers(symbol, tick, {}, pos, rv, vix, atr, str(current_hmm), is_index_tick)
         elif lifecycle == "ZERO_DTE":
-            await self._evaluate_zero_dte_barriers(symbol, tick, state, pos, rv, vix, atr, current_hmm, is_index_tick)
+            await self._evaluate_zero_dte_barriers(symbol, tick, {}, pos, rv, vix, atr, str(current_hmm), is_index_tick)
         else:
-            await self._evaluate_kinetic_barriers(symbol, tick, state, pos, rv, vix, atr, current_hmm, is_index_tick)
+            await self._evaluate_kinetic_barriers(symbol, tick, {}, pos, rv, vix, atr, str(current_hmm), is_index_tick)
 
     async def _evaluate_kinetic_barriers(self, symbol: str, tick: dict, state: dict, pos: dict, rv: float, vix: float, atr: float, current_hmm: str, is_index_tick: bool):
         if is_index_tick:
@@ -886,6 +938,16 @@ class LiquidationDaemon:
         if abs(delta) >= 0.25 or (total_cap > 0 and (margin_util / total_cap) > 0.90):
             logger.warning(f"🔪 WATERFALL STEP 3: Pro-rata 25% slash. Delta={delta:.2f}, Margin%={margin_util/max(total_cap,1)*100:.0f}%")
             await self._attempt_partial_exit(pos, symbol, 0, f"PRORATA_SLASH: Delta={delta:.2f}", 0.25)
+
+    async def _execute_basket_reduction(self, parent_uuid: str, pct: float, reason: str):
+        """Reduces all legs in a position basket by a specific percentage."""
+        if not parent_uuid: return
+        basket_legs = [p for p in self.orphaned_positions.values() if p.get("parent_uuid") == parent_uuid]
+        logger.warning(f"🔪 BASKET REDUCTION: {parent_uuid} | Pct={pct:.0%} | Reason={reason}")
+        
+        for leg in basket_legs:
+            symbol = leg["symbol"]
+            await self._attempt_partial_exit(leg, symbol, 0, reason, pct)
 
     # ── Exit Execution with HTTP 400 Handling ────────────────────────────────
 

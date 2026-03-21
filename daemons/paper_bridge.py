@@ -140,6 +140,15 @@ class PaperBridge:
         exec_type = execution.get('execution_type', 'Paper')
         parent_uuid = execution.get('parent_uuid', 'NONE')
         
+        # [Audit-Fix] Component 1: Redis Cash & Quarantine Sync
+        total_outflow = (abs(qty) * price) + fees
+        if execution['action'] == 'BUY':
+            await self.redis.decrbyfloat("CASH_COMPONENT_LIVE", total_outflow)
+            logger.info(f"💰 CASH SETTLED: ₹{total_outflow:,.2f} deducted for {symbol}")
+        else:
+            await self.redis.incrbyfloat("QUARANTINE_PREMIUM_PAPER", total_outflow)
+            logger.info(f"🛡️ PREMIUM QUARANTINED: ₹{total_outflow:,.2f} locked for {symbol}")
+        
         # 1. Fetch current state
         record = await conn.fetchrow(
             "SELECT quantity, avg_price, realized_pnl FROM portfolio WHERE symbol = $1 AND strategy_id = $2 AND execution_type = $3 AND parent_uuid = $4 FOR UPDATE",
@@ -191,12 +200,14 @@ class PaperBridge:
         await conn.execute(
             """
             UPDATE portfolio
-            SET quantity = $1, avg_price = $2, realized_pnl = $3, delta = $4, theta = $5, updated_at = $6
-            WHERE symbol = $7 AND strategy_id = $8 AND execution_type = $9 AND parent_uuid = $10
+            SET quantity = $1, avg_price = $2, realized_pnl = $3, delta = $4, theta = $5, 
+                short_strikes = $6, updated_at = $7
+            WHERE symbol = $8 AND strategy_id = $9 AND execution_type = $10 AND parent_uuid = $11
             """,
             new_qty, new_avg_price, realized_pnl, 
             float(execution.get('delta', 0.0)),
             float(execution.get('theta', 0.0)),
+            json.dumps(execution.get('short_strikes', {})),
             execution['time'], symbol, strategy_id, exec_type, parent_uuid
         )
         # Update PnL cache per asset [Audit Fix]
@@ -245,7 +256,17 @@ class PaperBridge:
                     continue
                 self.order_timestamps.append(now)
 
-                exec_price, fees = await calculate_slippage_and_fees(order)
+                # [Audit-Fix] Component 2: Live Price Matching (Fetch LTP from SHM/Redis)
+                market_price = float(order.get('price', 100.0))
+                try:
+                    state_raw = await self.redis.get(f"latest_market_state:{order['symbol']}")
+                    if state_raw:
+                        state = json.loads(state_raw)
+                        market_price = float(state.get("price", market_price))
+                        logger.info(f"🎯 LTP MATCH: Using real-time price {market_price} for {order['symbol']}")
+                except Exception: pass
+
+                exec_price, fees = await self.calculate_slippage_and_fees(order, market_price)
                 execution = {
                     "id": str(uuid.uuid4()),
                     "time": datetime.now(timezone.utc),
@@ -258,7 +279,8 @@ class PaperBridge:
                     "execution_type": order.get('execution_type', 'Paper'),
                     "parent_uuid": order.get('parent_uuid', 'NONE'),
                     "delta": order.get('delta', 0.0),
-                    "theta": order.get('theta', 0.0)
+                    "theta": order.get('theta', 0.0),
+                    "short_strikes": order.get("short_strikes", {})
                 }
                 
                 async with self.pool.acquire() as conn:
@@ -428,20 +450,24 @@ class PaperBridge:
                 except Exception as e:
                     logger.error(f"Paper Panic exception: {e}")
 
-async def calculate_slippage_and_fees(order: dict) -> tuple[float, float]:
-    """Calculates slippage based on index-specific tick size [PB-01]."""
-    price = float(order['price'])
-    symbol = order['symbol']
-    
-    # Tick size mapping
-    tick_size = 0.05 # Default for NIFTY/BANKNIFTY
-    if "SENSEX" in symbol:
-        tick_size = 0.05 # SENSEX also 0.05
+    async def calculate_slippage_and_fees(self, order: dict, market_price: float) -> tuple[float, float]:
+        """Calculates slippage scaled by HMM Regime (S18) [PB-01/Fortress]."""
+        symbol = order['symbol']
         
-    # [PB-01] Dynamic slippage (2 to 5 ticks)
-    slip = random.randint(2, 5) * tick_size
-    exec_price = price + slip if order['action'] == 'BUY' else price - slip
-    return float(f"{exec_price:.2f}"), 20.0
+        # [Audit-Fix] Component 3: Institutional Slippage (S18 scaling)
+        regime_raw = await self.redis.get("s18_state") # Int status from hmm_engine
+        regime = int(regime_raw) if regime_raw else 0
+        regime_mult = {0: 1, 1: 2, 2: 1, 3: 5}.get(regime, 1)
+
+        tick_size = 0.05 
+        base_slip = random.randint(2, 5) * tick_size
+        final_slip = base_slip * regime_mult
+        
+        if regime_mult > 1:
+            logger.warning(f"🛡️ SLIPPAGE SCALED: {regime_mult}x multiplier active (Regime {regime}) for {symbol}")
+
+        exec_price = market_price + final_slip if order['action'] == 'BUY' else market_price - final_slip
+        return float(f"{exec_price:.2f}"), 20.0
 
 async def _run_heartbeat(r):
     hb = HeartbeatProvider("PaperBridge", r)

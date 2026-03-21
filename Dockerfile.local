@@ -23,4 +23,4 @@ COPY . .
 # Ensure /ram_disk exists for IPC
 RUN mkdir -p /ram_disk
 
-CMD ["python", "-m", "daemons.data_gateway"]
+CMD ["python"]

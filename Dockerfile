@@ -17,18 +17,21 @@ RUN apt-get update && apt-get install -y \
 # Install simdjson
 RUN git clone https://github.com/simdjson/simdjson.git /tmp/simdjson && \
     cd /tmp/simdjson && mkdir build && cd build && \
-    cmake .. && make -j$(nproc) && make install
+    cmake .. && make -j$(nproc) && make install && \
+    rm -rf /tmp/simdjson
 
 # Install redis-plus-plus
 RUN git clone https://github.com/sewenew/redis-plus-plus.git /tmp/redis-pp && \
     cd /tmp/redis-pp && mkdir build && cd build && \
-    cmake .. && make -j$(nproc) && make install
+    cmake .. && make -j$(nproc) && make install && \
+    rm -rf /tmp/redis-pp
 
 # Install uWebSockets & uSockets
 RUN git clone --recursive https://github.com/uNetworking/uWebSockets.git /tmp/uWebSockets && \
     cd /tmp/uWebSockets/uSockets && make -j$(nproc) && cp uSockets.a /usr/local/lib/ && \
     mkdir -p /usr/local/include/uWebSockets && cp -r src/* /usr/local/include/uWebSockets/ && \
-    mkdir -p /usr/local/include/uSockets && cp -r src/* /usr/local/include/uSockets/
+    mkdir -p /usr/local/include/uSockets && cp -r src/* /usr/local/include/uSockets/ && \
+    rm -rf /tmp/uWebSockets
 
 WORKDIR /app
 COPY cpp_gateway/ ./cpp_gateway/
@@ -38,7 +41,9 @@ RUN protoc -I=cpp_gateway/proto --cpp_out=cpp_gateway/proto cpp_gateway/proto/me
 
 RUN mkdir -p cpp_gateway/build && cd cpp_gateway/build && \
     cmake .. && \
-    make -j$(nproc)
+    make -j$(nproc) && \
+    cp cpp_gateway /usr/local/bin/ && \
+    cd /app && rm -rf cpp_gateway/build
 
 # Stage 2: Runtime Image
 FROM python:3.11-slim AS runtime

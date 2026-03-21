@@ -46,8 +46,15 @@ async def check_access_key(request: Request, call_next):
         return JSONResponse(status_code=401, content={"detail": "Invalid Access Key"})
     response = await call_next(request)
     if requested_key == ACCESS_KEY:
-        response.set_cookie(key="dashboard_session", value=ACCESS_KEY,
-            httponly=True, samesite="lax", max_age=86400)
+        # [Audit-Fix] Component 5: Auth Security Hardening
+        response.set_cookie(
+            key="dashboard_session", 
+            value=ACCESS_KEY,
+            httponly=True, 
+            samesite="strict", # Prevent CSRF
+            secure=True,       # Force HTTPS
+            max_age=86400
+        )
     return response
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
@@ -152,9 +159,9 @@ def health():
     return {"status": "ok", "source": "cloud_run_proxy"}
 
 @app.get("/state")
-async def get_state():
+async def get_state(asset: Optional[str] = None):
     # 1. Try VM Direct
-    vm_data = await smart_proxy("state")
+    vm_data = await smart_proxy("state", params={"asset": asset} if asset else None)
     if vm_data:
         vm_data["source"] = "VM_DIRECT"
         vm_data["is_vm_running"] = True
@@ -178,26 +185,41 @@ async def get_state():
             except Exception:
                 vm_running = m.get("status") == "ONLINE"
 
+        # [Audit-Fix] Component 4: Asset-Specific State Routing
+        all_index_states = m.get("index_states", {})
+        all_power_five = m.get("power_five", {})
+        
+        # Filter if asset provided
+        if asset:
+            index_states = {asset: all_index_states.get(asset, {})}
+            power_five = {asset: all_power_five.get(asset, {})}
+        else:
+            index_states = all_index_states
+            power_five = all_power_five
+
         return {
-            # D-13: cloud_publisher writes live_alpha + live_regime into metadata
             "alpha_score":            float(m.get("live_alpha", 0.0)),
             "hmm_regime":             m.get("live_regime", "UNKNOWN"),
             "is_vm_running":          vm_running,
             "last_heartbeat":         last_hb_str,
+            "exchange_ts":            m.get("exchange_ts", ""), # [Audit-Fix] Lag handshake
+            "network_lag_ms":         m.get("network_lag_ms", 0.0), # [Audit-Fix] Lag handshake
             "source":                 "FIRESTORE_SYNC",
-            # D-38: Sync enriched signals from Firestore
             "available_margin_paper": float(c.get("paper_capital_limit", m.get("available_margin_paper", 0.0))),
             "available_margin_live":  float(c.get("live_capital_limit",  m.get("available_margin_live",  0.0))),
             "paper_capital_limit":    float(c.get("paper_capital_limit", 0.0)),
             "live_capital_limit":     float(c.get("live_capital_limit",  0.0)),
-            "power_five":             m.get("power_five", {}),
+            "power_five":             power_five,
             "exit_path_70_30":        m.get("exit_path_70_30", {"tp1": 0, "tp2": 0, "progress": 0}),
             "signals":                m.get("signals", {"adx": 20.0, "rv": 0.15, "atm_iv": 0.18}),
             "portfolio_delta":        m.get("portfolio_delta", {"NIFTY50": 0.0, "BANKNIFTY": 0.0, "SENSEX": 0.0}),
+            "realized_pnl_live":      float(m.get("realized_pnl_live", 0.0)), # [Audit-Fix] Real metrics
+            "realized_pnl_paper":     float(m.get("realized_pnl_paper", 0.0)), # [Audit-Fix] Real metrics
+            "indicators":             m.get("indicators", {}), # [Audit-Fix] Veto lights
             "gex_sign":               m.get("gex_sign", "UNKNOWN"),
             "system_halted":          c.get("SYSTEM_HALTED", False),
             "macro_lockdown":         False,
-            "index_states":           m.get("index_states", {}),
+            "index_states":           index_states,
         }
     except Exception as e:
         return {"source": "OFFLINE", "is_vm_running": False, "alpha_score": 0.0,

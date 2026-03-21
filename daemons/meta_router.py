@@ -124,7 +124,9 @@ class BaseStrategyLogic:
             kelly_f = p - ((1.0 - p) / b)
             half_kelly = max(0.01, 0.5 * kelly_f)
 
-            final_lots: float = round(float(unit_size * half_kelly), 4)
+            # [Audit-Fix] S27 Quality Integration (The "Fortress" final lot calculation)
+            s27_quality = float(regime_context.get("s27_quality", 100.0)) / 100.0
+            final_lots: float = round(float(unit_size * half_kelly * s27_quality), 4)
 
             return {
                 "asset": self.asset_id,
@@ -149,6 +151,9 @@ LIFECYCLE_MAP = {
     "IronCondor": "POSITIONAL",
     "DirectionalCredit": "POSITIONAL",
     "TastyTrade0DTE": "ZERO_DTE",
+    "KineticHunter": "KINETIC",
+    "ElasticHunter": "ELASTIC",
+    "PositionalHunter": "POSITIONAL"
 }
 
 # [C2-03] Regime-Strategy Lock: each strategy is only authorized in these regimes
@@ -157,6 +162,9 @@ REGIME_STRATEGY_LOCK = {
     "GammaScalping": ["TRENDING"],
     "DirectionalCredit": ["TRENDING"],
     "TastyTrade0DTE": ["RANGING", "HIGH_VOL_CHOP"],
+    "KineticHunter": ["TRENDING"],
+    "ElasticHunter": ["RANGING", "WAITING", "NEUTRAL"],
+    "PositionalHunter": ["RANGING"]
 }
 
 class HeuristicRegimeReader:
@@ -190,6 +198,8 @@ class MetaRouter:
         if not test_mode:
             # [Audit 2.1] MetaRouter is the primary binder for SYSTEM_CMD (PUB)
             self.cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD, bind=True)
+            # [Audit 3.3] Event-Driven: Subscribe to Market State directly to bypass Redis lag
+            self.state_sub = self.mq.create_subscriber(Ports.MARKET_STATE, topics=["STATE."])
             from core.auth import get_redis_url
             redis_url = get_redis_url()
             self._redis = redis.from_url(redis_url, decode_responses=True)
@@ -238,6 +248,9 @@ class MetaRouter:
         # Throttling for "Portfolio Heat Map" alerts
         self.last_heat_alert_val: float = 0.0
         self.last_heat_alert_ts: float = 0.0
+        
+        # [Audit-Fix] Position Ceiling Tracker
+        self.parent_tracker = {} # asset -> set of active parent_uuids
     
     async def _sync_settings(self):
         """Syncs engine mode and parameters from Redis (upstream Firestore)."""
@@ -429,12 +442,32 @@ class MetaRouter:
                 logger.warning(f"🛡️ ASTO SHIELD VETO: |{asto_val:.1f}| > 60. Blocking POSITIONAL entry for {asset}.")
                 active_dec["lots"] = 0
 
-            # [C2-09] ASTO Hunter Veto: block KINETIC if |ASTO| <= 70 or ADX <= 25
-            adx_val = float(state.get("adx", 0.0))
-            if active_dec.get("lifecycle_class") == "KINETIC":
-                if abs(asto_val) <= 70 or adx_val <= 25:
-                    logger.warning(f"🏹 ASTO HUNTER VETO: |{asto_val:.1f}| <= 70 or ADX {adx_val:.1f} <= 25. Blocking KINETIC entry for {asset}.")
+            # [Audit-Fix 2.0] State 3 (Volatile) Nuclear Option
+            current_s18 = int(ctx.get("s18_int", 0))
+            if current_s18 == 3:
+                logger.critical(f"🚨 HMM STATE 3 (VOLATILE) DETECTED for {asset}: Fortress lockdown. Zeroing all new entry lots.")
+                active_dec["lots"] = 0
+
+            # [Audit-Fix] Tasty 0DTE Edge Gate (S12)
+            iv_rv_spread = float(state.get("iv_rv_spread", 0.0))
+            if active_dec.get("lifecycle_class") == "ZERO_DTE" and iv_rv_spread < 0.05:
+                logger.warning(f"📉 TASTY VETO: {asset} 0DTE requested but IV-RV spread ({iv_rv_spread:.2%}) < 5% trigger.")
+                active_dec["lots"] = 0
+
+            # [Audit-Fix] Position Ceiling: Cap max concurrent parent_uuids to 5 per index
+            if active_dec.get("lots", 0) > 0:
+                if asset not in self.parent_tracker: self.parent_tracker[asset] = set()
+                # Periodic cleanup of tracker (simple TTL logic)
+                if len(self.parent_tracker[asset]) >= 5:
+                    logger.warning(f"🛡️ POSITION CEILING: {asset} already has {len(self.parent_tracker[asset])} active parents. Blocking new entry.")
                     active_dec["lots"] = 0
+                else:
+                    self.parent_tracker[asset].add(active_dec["parent_uuid"])
+                    # Simple async cleanup after 15 mins (avg trade life)
+                    async def cleanup_parent(a, p):
+                        await asyncio.sleep(900)
+                        self.parent_tracker[a].discard(p)
+                    asyncio.create_task(cleanup_parent(asset, active_dec["parent_uuid"]))
 
             # [C2-08] ASTO Delta Hedge Trigger: emergency hedge if |ASTO| > 90
             if abs(asto_val) > 90 and active_dec.get("lifecycle_class") == "POSITIONAL":
@@ -848,7 +881,19 @@ class MetaRouter:
                         await self._redis.set("SHM_FALLBACK:ACTIVE", "True")
                         logger.error(f"🚨 IPC FAILURE: SHM Read Error: {e}")
                 
-                await asyncio.sleep(0.5)  # [R2-19] 100ms→500ms to reduce Redis pressure
+                # [Audit-Fix] Latency reduction 500ms -> 50ms + ZMQ Async Listen
+                try:
+                    # Non-blocking ZMQ check for immediate market state trigger
+                    # This allows the loop to run at 50ms pulse but trigger instantly on ZMQ pulse
+                    while True:
+                        msg_topic, msg_data = await asyncio.wait_for(self.state_sub.recv_json(), timeout=0.01)
+                        if msg_data:
+                            asset_id = msg_data.get("symbol", "UNKNOWN")
+                            multi_market_state[asset_id] = msg_data
+                except (asyncio.TimeoutError, zmq.Again):
+                    pass
+
+                await asyncio.sleep(0.05)
 
             except Exception as e:
                 logger.error(f"Router Exception: {e}")

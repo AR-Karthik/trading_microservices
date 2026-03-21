@@ -124,13 +124,20 @@ class CloudPublisher:
                     # Fetch regime
                     asset_reg_raw = await self.redis.hget("hmm_regime_state", asset)
                     asset_reg = "UNKNOWN"
+                    s18, s27 = 0, 0.0
                     if asset_reg_raw:
-                        try: asset_reg = json.loads(asset_reg_raw).get("regime", "UNKNOWN")
+                        try:
+                            reg_data = json.loads(asset_reg_raw)
+                            asset_reg = reg_data.get("regime", "UNKNOWN")
+                            s18 = int(reg_data.get("s18", 0))
+                            s27 = float(reg_data.get("s27", 0.0))
                         except: pass
                     
                     index_states[asset] = {
                         "score": st.get("s_total", 0.0), 
-                        "regime": asset_reg, 
+                        "regime": asset_reg,
+                        "s18": s18, # [Audit-Fix] Component 1: Integer State Visibility
+                        "s27": s27, # [Audit-Fix] Component 1: Quality Score Visibility
                         "price": st.get("price", 0.0)
                     }
 
@@ -178,6 +185,28 @@ class CloudPublisher:
                     d = await self.redis.get(f"NET_DELTA_{idx}") or "0.0"
                     portfolio_delta[idx] = float(d)
 
+                # [Audit-Fix] Component 2: Real-Time Realized P&L Tracker
+                realized_pnl_live = float(await self.redis.get("DAILY_REALIZED_PNL_LIVE") or 0.0)
+                realized_pnl_paper = float(await self.redis.get("DAILY_REALIZED_PNL_PAPER") or 0.0)
+
+                # [Audit-Fix] Component 4: Exchange Lag Detection (Core 1 Handshake)
+                network_lag_ms = 0.0
+                nifty_tick_raw = await self.redis.get("latest_tick:NIFTY50")
+                if nifty_tick_raw:
+                    try:
+                        nifty_tick = json.loads(nifty_tick_raw)
+                        exch_ts_str = nifty_tick.get("exchange_ts")
+                        if exch_ts_str:
+                            # Shoonya LTT is usually HH:MM:SS
+                            # For precise lag, we assume the tick happened today
+                            now_ist = datetime.now(IST)
+                            exch_time = datetime.strptime(exch_ts_str, "%H:%M:%S").replace(
+                                year=now_ist.year, month=now_ist.month, day=now_ist.day, tzinfo=IST
+                            )
+                            lag = (datetime.now(IST) - exch_time).total_seconds()
+                            network_lag_ms = max(0.0, lag * 1000.0)
+                    except: pass
+
                 # Minimal state for discovery
                 state = {
                     "vm_public_ip": self.external_ip,
@@ -187,6 +216,9 @@ class CloudPublisher:
                     "system_health": "HEALTHY",
                     "live_alpha": float(alpha),
                     "live_regime": regime,
+                    "realized_pnl_live": realized_pnl_live,
+                    "realized_pnl_paper": realized_pnl_paper,
+                    "network_lag_ms": network_lag_ms,
                     "signals": deep_signals, # Backward compat
                     "all_signals": all_deep_signals, # Wave 3: Multi-index
                     "power_five": power_five,
@@ -198,8 +230,15 @@ class CloudPublisher:
                     "indicators": {
                         "slippage_audit": float(await self.redis.get("METRIC:AVG_SLIPPAGE") or 0.0),
                         "portfolio_heat": float(await self.redis.get("METRIC:MARGIN_UTIL") or 0.0),
-                        "vm_up_to_date": True, # Stale Dashboard Veto signal
-                        "bid_ask_heatmap": await self._fetch_spread_heatmap()
+                        "vm_up_to_date": bool(network_lag_ms < 500.0), # Stale Dashboard Veto signal
+                        "bid_ask_heatmap": await self._fetch_spread_heatmap(),
+                        # [Audit-Fix] Component 3: The "Veto Monitor"
+                        "system_vetos": {
+                            "toxic_vpin": await self.redis.get("VETOR:VPIN_ACTIVE") == "True",
+                            "vix_spike": await self.redis.get("VIX_SPIKE_DETECTED") == "True",
+                            "margin_low": await self.redis.get("MARGIN_HALT") == "True",
+                            "trading_paused": await self.redis.get("TRADING_PAUSED") == "True"
+                        }
                     }
                 }
 
@@ -483,5 +522,13 @@ class CloudPublisher:
 
 
 if __name__ == "__main__":
+    # [Audit-Fix] Component 5: Core 0 Pinning for Management affinity
+    try:
+        if hasattr(os, 'sched_setaffinity'):
+            os.sched_setaffinity(0, {0})
+            logger.info("🎯 CORE PINNING: CloudPublisher pinned to Core 0 (Management).")
+    except Exception as e:
+        logger.warning(f"Could not pin to Core 0: {e}")
+
     publisher = CloudPublisher()
     asyncio.run(publisher.run())

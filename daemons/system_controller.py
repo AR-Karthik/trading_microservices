@@ -111,7 +111,7 @@ class SystemController:
         self._preemption_detected = False
         self._shutdown_flag = False
         
-        # Shoonya API removed [Audit 14.1: Centralized in DataGateway]
+        # Shoonya API removed [Audit 14.1: Centralized in SnapshotManager]
         self.api = None
         self.pool: asyncpg.Pool | None = None
         self._boot_time = time.time()
@@ -646,24 +646,19 @@ class SystemController:
     # ── Hard State Sync ──────────────────────────────────────────────────────
 
     async def _hard_state_sync(self):
-        """Every 15 minutes, compares broker positions with DB 'portfolio' table."""
+        """Every 15 minutes, compares broker truth (from Redis) with DB 'portfolio' table."""
         logger.info("Ghost Fill Sync task started (15m interval).")
         while not self._shutdown_flag:
             try:
-                # 1. Fetch broker truth
-                loop = asyncio.get_running_loop()
-                broker_positions = await loop.run_in_executor(None, self.api.get_positions)
+                # 1. Fetch broker truth from Redis Hash (populated by SnapshotManager)
+                truth_map_raw = await self.redis.hgetall("broker_positions")
+                truth_map = {k: int(v) for k, v in truth_map_raw.items()}
                 
-                if broker_positions is None: # Possible on error
-                    await asyncio.sleep(900)
+                # If no truth in Redis, maybe SnapshotManager haven't polled yet. Wait.
+                if not truth_map:
+                    logger.debug("No broker truth in Redis yet. Skipping sync.")
+                    await asyncio.sleep(60)
                     continue
-                
-                # Convert list of dicts to a map {symbol: qty}
-                truth_map = {}
-                if isinstance(broker_positions, list):
-                    for pos in broker_positions:
-                        if int(pos.get('netqty', 0)) != 0:
-                            truth_map[pos['tsym']] = int(pos['netqty'])
                 
                 # 2. Fetch DB state
                 async with self.pool.acquire() as conn:
@@ -701,37 +696,19 @@ class SystemController:
             await asyncio.sleep(900) # 15 minutes
 
     async def _periodic_margin_sync(self):
-        """[Audit-Fix] Additive: Periodically pulls live margin limits from Shoonya and updates Redis."""
-        logger.info("Broker margin sync task active (60s interval).")
+        """[Audit-Fix] Monitors margin limits from Redis (updated by SnapshotManager)."""
+        logger.info("Monitoring Redis for margin updates (60s interval).")
         while not self._shutdown_flag:
             try:
-                # Only sync if we have a valid API session (login happens in _fetch_14d_history or on-demand)
-                # For this additive fix, we'll login if needed or reuse existing
-                if not hasattr(self, 'api') or not self.api:
-                    await asyncio.sleep(10)
-                    continue
-
-                loop = asyncio.get_running_loop()
-                limits = await loop.run_in_executor(None, self.api.get_limits)
-                
-                if limits and limits.get('stat') == 'Ok':
-                    # Shoonya returns 'cash' and 'collateral' in 'cash' field or similar depending on broker setup
-                    # Usually 'cash' is available margin. We'll map it to our internal keys.
-                    total_cash = float(limits.get('cash', 1000000.0))
-                    
-                    # Update Redis for MetaRouter to consume
-                    # We apply the HEDGE_RESERVE_PCT here to maintain the safety buffer
-                    eff_cash = total_cash * (1 - HEDGE_RESERVE_PCT)
-                    await self.redis.set("CASH_COMPONENT_LIVE", f"{eff_cash * 0.5:.2f}")
-                    await self.redis.set("COLLATERAL_COMPONENT_LIVE", f"{eff_cash * 0.5:.2f}")
-                    await self.redis.set("HEDGE_RESERVE_LIVE", f"{total_cash * HEDGE_RESERVE_PCT:.2f}")
-                    
-                    logger.debug(f"📊 Margin Sync: TotalCash={total_cash:.2f} | Eff={eff_cash:.2f}")
-                
+                # Consumer only. Logging only for observability.
+                m_avail = await self.redis.get("ACCOUNT:MARGIN:AVAILABLE")
+                m_used = await self.redis.get("ACCOUNT:MARGIN:USED")
+                if m_avail:
+                    logger.debug(f"📊 Margin Health: Available={m_avail} | Used={m_used}")
             except Exception as e:
-                logger.error(f"Broker margin sync failed: {e}")
+                logger.error(f"Margin monitoring failed: {e}")
             
-            await asyncio.sleep(60) # 60 second interval
+            await asyncio.sleep(60)
 
     # ── Exchange Health Monitor (Spec 12.4) ──────────────────────────────────
 

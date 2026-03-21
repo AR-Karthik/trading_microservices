@@ -17,7 +17,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    cpuset: "3"
+    cpuset: "0"
+    shm_size: '256mb'
 
   timescaledb:
     image: timescale/timescaledb:latest-pg14
@@ -36,16 +37,17 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    cpuset: "3"
+    cpuset: "0"
+    shm_size: '256mb'
 
   # 2. Data Ingestion
-  data_gateway:
+  tick_sensor:
     image: trading-app:latest
     build:
       context: .
       dockerfile: Dockerfile.local
-    container_name: data_gateway
-    command: python -m daemons.data_gateway
+    container_name: tick_sensor
+    command: python -m daemons.tick_sensor
     depends_on:
       redis:
         condition: service_healthy
@@ -54,11 +56,54 @@ services:
     environment:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
-      - SIMULATION_MODE=false
+      - SIMULATION_MODE=${SIMULATION_MODE:-false}
+    network_mode: host # [Audit-Fix] Component 3: Reduce network bridge latency
     ipc: host
-    cpuset: "0"
+    cpuset: "1" # [Audit-Fix] Component 1: Data Ingestion Core
     volumes:
       - /ram_disk:/ram_disk
+      - /dev/shm:/dev/shm
+    shm_size: '256mb'
+
+  snapshot_manager:
+    image: trading-app:latest
+    container_name: snapshot_manager
+    command: python -m daemons.snapshot_manager
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+    env_file: .env
+    environment:
+      - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
+      - SIMULATION_MODE=${SIMULATION_MODE:-false}
+    ipc: host
+    cpuset: "1"
+    volumes:
+      - /ram_disk:/ram_disk
+      - /dev/shm:/dev/shm
+    shm_size: '256mb'
+
+  shoonya_rest:
+    image: trading-app:latest
+    container_name: shoonya_rest
+    command: python -m daemons.shoonya_rest
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+    env_file: .env
+    environment:
+      - TZ=Asia/Kolkata
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
+      - SIMULATION_MODE=${SIMULATION_MODE:-false}
+    ipc: host
+    cpuset: "1"
+    volumes:
+      - /ram_disk:/ram_disk
+      - /dev/shm:/dev/shm
+    shm_size: '256mb'
 
   # 3. Market State
   market_sensor:
@@ -66,7 +111,7 @@ services:
     container_name: market_sensor
     command: python -m daemons.market_sensor
     depends_on:
-      data_gateway:
+      snapshot_manager:
         condition: service_started
       redis:
         condition: service_healthy
@@ -76,10 +121,13 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
+    network_mode: host # [Audit-Fix] Component 3: Reduce network bridge latency
     ipc: host
-    cpuset: "0"
+    cpuset: "1" # [Audit-Fix] Component 1: Data Ingestion Core
     volumes:
       - /ram_disk:/ram_disk
+      - /dev/shm:/dev/shm
+    shm_size: '256mb'
 
   # 4. HMM Engines
   hmm_engine_nifty:
@@ -98,7 +146,11 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
     ipc: host
-    cpuset: "1"
+    cpuset: "3" # [Audit-Fix] Component 1: War Room Core
+    deploy:
+      resources:
+        reservations:
+          cpus: '0.2' # [Audit-Fix] Component 2: Execution Fair Sharing
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -119,7 +171,11 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
     ipc: host
-    cpuset: "1"
+    cpuset: "3" # [Audit-Fix] Component 1: War Room Core
+    deploy:
+      resources:
+        reservations:
+          cpus: '0.2'
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -140,7 +196,11 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
     ipc: host
-    cpuset: "1"
+    cpuset: "3" # [Audit-Fix] Component 1: War Room Core
+    deploy:
+      resources:
+        reservations:
+          cpus: '0.2'
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -166,7 +226,8 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
     ipc: host
-    cpuset: "1"
+    cpuset: "3" # [Audit-Fix] Component 1: War Room Core
+    cpu_shares: 1024 # [Audit-Fix] Component 2: MetaRouter Priority
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -187,7 +248,7 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-    cpuset: "2"
+    cpuset: "3" # [Audit-Fix] Component 1: War Room Core
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -207,7 +268,7 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-    cpuset: "2"
+    cpuset: "3" # [Audit-Fix] Component 1: War Room Core
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -222,7 +283,7 @@ services:
         condition: service_started
       live_bridge:
         condition: service_started
-      data_gateway:
+      snapshot_manager:
         condition: service_started
       redis:
         condition: service_healthy
@@ -233,7 +294,8 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
     ipc: host
-    cpuset: "2"
+    cpuset: "3" # [Audit-Fix] Component 1: War Room Core
+    cpu_shares: 512 # [Audit-Fix] Component 2: Decision Priority
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -255,7 +317,8 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
     ipc: host
-    cpuset: "3"
+    cpuset: "3" # [Audit-Fix] Component 1: War Room Core
+    cpu_shares: 2048 # [Audit-Fix] Component 2: Highest Priority (Safety)
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -275,7 +338,7 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-    cpuset: "3"
+    cpuset: "0" # [Audit-Fix] Component 1: Move to Management Core
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -295,7 +358,7 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-    cpuset: "3"
+    cpuset: "0" # [Audit-Fix] Component 1: Move to Management Core
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -313,7 +376,7 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-    cpuset: "3"
+    cpuset: "0" # [Audit-Fix] Component 1: Move to Management Core
     volumes:
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
@@ -332,7 +395,7 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
     ipc: host
-    cpuset: "3"
+    cpuset: "0" # [Audit-Fix] Component 1: Move to Management Core
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -350,7 +413,7 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-    cpuset: "3"
+    cpuset: "0" # [Audit-Fix] Component 1: Move to Management Core
 
   # 14. Dashboard API & Frontend (UI - depends on all data sources)
   dashboard_api:
@@ -370,7 +433,7 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
       - SIMULATION_MODE=false
-    cpuset: "3"
+    cpuset: "0" # [Audit-Fix] Component 1: Move to Management Core
     volumes:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
@@ -385,6 +448,7 @@ services:
       dashboard_api:
         condition: service_started
     restart: always
+    cpuset: "0" # [Audit-Fix] Component 1: Move to Management Core
     environment:
       - TZ=Asia/Kolkata
       - SIMULATION_MODE=false

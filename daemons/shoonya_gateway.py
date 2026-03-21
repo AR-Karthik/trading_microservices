@@ -26,12 +26,31 @@ from utils.shoonya_master import get_token, get_symbol
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("ShoonyaGateway")
 
+class TokenBucketRateLimiter:
+    def __init__(self, rate=1, per=1.0):
+        self.rate = rate
+        self.per = per
+        self.tokens = rate
+        self.last_refill = asyncio.get_event_loop().time()
+    
+    async def acquire(self):
+        while self.tokens < 1:
+            await asyncio.sleep(0.1)
+            now = asyncio.get_event_loop().time()
+            elapsed = now - self.last_refill
+            self.tokens = min(self.rate, self.tokens + elapsed * (self.rate / self.per))
+            self.last_refill = now
+        self.tokens -= 1
+
 class ShoonyaDataStreamer:
     def __init__(self, redis_client, pub_socket):
         self.redis = redis_client
         self.pub_socket = pub_socket
         self.mq_manager = MQManager()
-        self.loop = None
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = None
         
         load_dotenv()
         self.host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP")
@@ -69,6 +88,9 @@ class ShoonyaDataStreamer:
         self.symbol_slots = {}
         self.next_slot = 0
 
+        # [Audit-Fix] Component 3: JIT Rate Limiter for search_scrip
+        self.search_rate_limiter = TokenBucketRateLimiter(rate=1, per=1.0)
+
     def event_handler_feed_update(self, tick_data):
         """Callback fired by Shoonya WebSocket on every price tick."""
         try:
@@ -88,12 +110,17 @@ class ShoonyaDataStreamer:
             price = float(tick_data['lp'])
             volume = int(tick_data.get('v', 0))
             
+            # [Audit-Fix] Component 1 & 2: Latency Anchor (LTT) and Institutional Flow (OI)
+            exchange_ts = tick_data.get('ltt') # Last Traded Time from Shoonya
+            oi = int(tick_data.get('oi', 0))
+
             # Simplified payload matching our internal microservice format
             payload = {
                 "symbol": symbol,
                 "price": price,
                 "volume": volume,
-                # In production we would track OI here if trading derivatives
+                "oi": oi,
+                "exchange_ts": exchange_ts,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "type": "TICK"
             }
@@ -121,8 +148,12 @@ class ShoonyaDataStreamer:
         
         if symbol in self.symbol_slots:
             slot = self.symbol_slots[symbol]
-            # Offload blocking write to thread pool if needed, but struct.pack is fast
-            self.shm.write_tick(slot, symbol, payload['price'], payload['volume'])
+            # [Audit-Fix] Component 4: SHM Heartbeat Synchronization
+            # Pass high-res microsecond epoch for staleness detection
+            hires_ts = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
+            self.shm.write_tick(slot, symbol, payload['price'], payload['volume'], 
+                                timestamp=datetime.fromisoformat(payload['timestamp']).timestamp(),
+                                hires_ts=hires_ts)
 
         # 2. Update latest state for Dashboard API (Legacy/Fallback)
         await self.redis.set(f"latest_tick:{symbol}", json.dumps(payload))
@@ -253,26 +284,42 @@ class ShoonyaDataStreamer:
                     logger.error(f"Error in JIT subscription listener: {e}")
 
     async def _resolve_symbol_to_token(self, symbol: str) -> tuple[str | None, str | None]:
-        """Resolves a trading symbol to a token and exchange using Shoonya search_scrip."""
-        # Heuristic: If it has 'CE' or 'PE' and starts with NIFTY/BANKNIFTY, it's NFO
+        """Resolves a trading symbol to a token and exchange using Shoonya search_scrip with JIT Protection."""
+        # [Audit-Fix] Component 3b: Local/Redis Token Cache
+        cached_data = await self.redis.hget("token_lookup", symbol)
+        if cached_data:
+            return tuple(cached_data.split("|"))
+
+        # [Audit-Fix] Component 5: Robust BFO/NSE Routing
         exch = "NFO"
-        if "SENSEX" in symbol: exch = "BFO"
+        if any(idx in symbol for idx in ["SENSEX", "BANKEX"]): 
+            exch = "BFO"
         elif any(s in symbol for s in ["RELIANCE", "HDFCBANK", "INFY", "TCS", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "LT"]):
             exch = "NSE"
             
         try:
+            # [Audit-Fix] Component 3a: JIT Rate Limiting for API key safety
+            await self.search_rate_limiter.acquire()
+            
             # For options, symbols are like 'NIFTY26MAR22350CE'
             # For stocks, they are plain 'RELIANCE'
-            res = self.api.search_scrip(exchange=exch, searchtext=symbol)
+            res = await self.loop.run_in_executor(None, lambda: self.api.search_scrip(exchange=exch, searchtext=symbol))
+            
             if res and res.get('stat') == 'Ok':
                 values = res.get('values', [])
                 if values:
                     # Exact match check
                     for val in values:
                         if val.get('tsym') == symbol:
-                            return val.get('token'), val.get('exch')
-                    # Fallback to first result if no exact match (Shoonya search is prefix-heavy)
-                    return values[0].get('token'), values[0].get('exch')
+                            token, out_exch = val.get('token'), val.get('exch')
+                            # Cache it
+                            await self.redis.hset("token_lookup", symbol, f"{token}|{out_exch}")
+                            return token, out_exch
+                    
+                    # Fallback to first result
+                    token, out_exch = values[0].get('token'), values[0].get('exch')
+                    await self.redis.hset("token_lookup", symbol, f"{token}|{out_exch}")
+                    return token, out_exch
         except Exception as e:
             logger.error(f"Search scrip failed for {symbol}: {e}")
         return None, None
@@ -298,6 +345,15 @@ async def main():
         mq.context.term()
 
 if __name__ == "__main__":
+    # [Audit-Fix] Component 4: Core 1 Pinning for Nervous System minimization
+    try:
+        import os
+        if hasattr(os, 'sched_setaffinity'):
+            os.sched_setaffinity(0, {1})
+            logger.info("🎯 CORE PINNING: ShoonyaGateway pinned to Core 1.")
+    except Exception as e:
+        logger.warning(f"Could not pin to Core 1: {e}")
+
     if uvloop:
         uvloop.install()
     elif hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):

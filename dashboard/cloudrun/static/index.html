@@ -109,9 +109,29 @@
                                     <div className={`text-xl font-black mono ${signals.change_pct >= 0 ? 'text-success' : 'text-danger'}`}>{signals.change_pct > 0 ? '+' : ''}{signals.change_pct?.toFixed(2)}%</div>
                                 </div>
                             </div>
-                            <div className="flex justify-between text-[10px] font-bold text-gray-400 mb-1 mt-4">
+                             <div className="flex justify-between text-[10px] font-bold text-gray-400 mb-1 mt-4">
                                 <span>Vol-Regime</span>
                                 <span className={state.hmm_regime.includes('TREND') ? 'text-success' : 'text-warning'}>{state.hmm_regime}</span>
+                            </div>
+
+                            {/* [Audit-Fix] Component 2: S27 Confidence Calibration */}
+                            <div className="mt-4">
+                                <div className="flex justify-between text-[8px] font-bold text-gray-500 uppercase mb-1">
+                                    <span>HMM Confidence (S27)</span>
+                                    <span className="text-accent">{(state.index_states?.[asset]?.s27 || 0).toFixed(1)}%</span>
+                                </div>
+                                <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden">
+                                    <div className="h-full bg-accent shadow-[0_0_10px_#00D2FF] transition-all duration-1000" style={{ width: `${state.index_states?.[asset]?.s27 || 0}%` }}></div>
+                                </div>
+                            </div>
+
+                            {/* [Audit-Fix] Component 1: The Veto Monitor */}
+                            <div className="flex gap-2 mt-4">
+                                {['toxic_vpin', 'vix_spike', 'margin_low', 'trading_paused'].map(v => (
+                                    <div key={v} className={`px-2 py-1 rounded text-[7px] font-black border transition-all ${state.indicators?.system_vetos?.[v] ? 'bg-danger/20 border-danger text-danger animate-pulse' : 'bg-success/20 border-success text-success'}`}>
+                                        {v.replace('_', ' ').toUpperCase()}
+                                    </div>
+                                ))}
                             </div>
                             <div className="mt-6 border-t border-white/10 pt-4">
                                 <div className="text-[9px] font-black uppercase text-gray-500 mb-2">Smart Money Flow Ribbon</div>
@@ -202,19 +222,50 @@
                                 </table>
                             </div>
                         </div>
-                        <div className="oled-card p-6 rounded-2xl flex flex-col items-start">
-                            <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6 w-full text-left">Liquidity Thermometer</h3>
+                        <div className="oled-card p-6 rounded-2xl flex flex-col items-start min-h-[300px]">
+                            <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6 w-full text-left">Fortress Risk Monitors</h3>
+                            
+                            {/* [Audit-Fix] Component 3: The Delta Anchor */}
+                            <div className="w-full mb-8">
+                                <div className="flex justify-between text-[9px] font-black text-gray-400 uppercase mb-2">
+                                    <span>Portfolio Delta (ΣΔ)</span>
+                                    <span className={`mono ${Math.abs(Object.values(telemetry.portfolio_delta || {}).reduce((a,b)=>a+b, 0)) > 10.0 ? 'text-danger animate-pulse font-black' : 'text-accent'}`}>
+                                        {Object.values(telemetry.portfolio_delta || {}).reduce((a,b)=>a+b, 0).toFixed(2)}
+                                    </span>
+                                </div>
+                                <div className="h-12 bg-white/5 rounded border border-white/10 flex items-center px-4 relative">
+                                    <div className="absolute left-1/2 top-0 bottom-0 w-[1px] bg-white/20"></div>
+                                    <div className={`h-2 rounded shadow-lg transition-all ${Math.abs(Object.values(telemetry.portfolio_delta || {}).reduce((a,b)=>a+b, 0)) > 10.0 ? 'bg-danger shadow-danger/50' : 'bg-accent'}`} 
+                                         style={{ 
+                                            width: `${Math.min(45, Math.abs(Object.values(telemetry.portfolio_delta || {}).reduce((a,b)=>a+b, 0)) * 2)}%`,
+                                            marginLeft: Object.values(telemetry.portfolio_delta || {}).reduce((a,b)=>a+b, 0) >= 0 ? '50%' : `${50 - Math.min(45, Math.abs(Object.values(telemetry.portfolio_delta || {}).reduce((a,b)=>a+b, 0)) * 2)}%`
+                                         }}></div>
+                                </div>
+                            </div>
+
+                            {/* [Audit-Fix] Component 6: Real-Time Liquidity Thermometer */}
                             <div className="flex-1 w-full flex justify-center items-end px-4 gap-8">
-                                <div className="w-24 h-48 bg-white/5 rounded-t-full border border-white/10 relative overflow-hidden flex flex-col justify-end">
-                                    <div className="w-full bg-warning h-[15%]" title="Hedge Reserve"></div>
-                                    <div className="w-full bg-danger h-[25%]" title="Used Margin"></div>
-                                    <div className="w-full bg-success flex-1" title="Free Cash"></div>
-                                </div>
-                                <div className="text-[9px] font-bold text-gray-400 space-y-8 uppercase h-48 flex flex-col justify-around py-4">
-                                    <div>Free Cash<br/><span className="text-success mono">{formatCurrency(750000)}</span></div>
-                                    <div>Used Margin<br/><span className="text-danger mono">{formatCurrency(250000)}</span></div>
-                                    <div>Reserve<br/><span className="text-warning mono">{formatCurrency(150000)}</span></div>
-                                </div>
+                                {(() => {
+                                    const limit = telemetry.live_capital_limit || 1000000;
+                                    const avail = telemetry.available_margin_live || 0;
+                                    const used = limit - avail;
+                                    const used_pct = (used / limit) * 100;
+                                    const reserve_pct = 15; // Assumption based on config
+                                    return (
+                                        <>
+                                        <div className="w-24 h-48 bg-white/5 rounded-t-full border border-white/10 relative overflow-hidden flex flex-col justify-end">
+                                            <div className="w-full bg-warning h-[15%]" title="Hedge Reserve"></div>
+                                            <div className="w-full bg-danger transition-all duration-1000" style={{height: `${used_pct}%`}} title="Used Margin"></div>
+                                            <div className="w-full bg-success flex-1" title="Free Cash"></div>
+                                        </div>
+                                        <div className="text-[9px] font-bold text-gray-400 space-y-8 uppercase h-48 flex flex-col justify-around py-4">
+                                            <div>Free Cash<br/><span className="text-success mono">{formatCurrency(avail)}</span></div>
+                                            <div>Used Margin<br/><span className="text-danger mono">{formatCurrency(used)}</span></div>
+                                            <div>Reserve<br/><span className="text-warning mono">{formatCurrency(limit * 0.15)}</span></div>
+                                        </div>
+                                        </>
+                                    );
+                                })()}
                             </div>
                         </div>
                     </div>
@@ -284,8 +335,8 @@
         };
 
         // --- TAB 4: SYSTEM HEALTH ---
-        const SystemHealth = ({ telemetry }) => {
-            const shm_diff = telemetry.shm_last_update ? ((Date.now()/1000) - telemetry.shm_last_update).toFixed(1) : '—';
+        const SystemHealth = ({ telemetry, state }) => {
+            const shm_diff = state.network_lag_ms ? (state.network_lag_ms / 1000).toFixed(2) : (telemetry.shm_last_update ? ((Date.now()/1000) - telemetry.shm_last_update).toFixed(1) : '—');
             return (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-in fade-in duration-500">
                     <div className="oled-card p-6 rounded-2xl">
@@ -600,9 +651,9 @@
 
                     <main className="flex-1 p-8 overflow-y-auto">
                         {activeTab === 'CMD' && <CommandCenter state={state} asset={asset} setAsset={setAsset} />}
-                        {activeTab === 'PORT' && <PortfolioRisk positions={positions} telemetry={telemetry} />}
+                        {activeTab === 'PORT' && <PortfolioRisk positions={positions} telemetry={state} />}
                         {activeTab === 'ALPHA' && <StrategyAlpha state={state} />}
-                        {activeTab === 'HLTH' && <SystemHealth telemetry={telemetry} />}
+                        {activeTab === 'HLTH' && <SystemHealth telemetry={telemetry} state={state} />}
                         {activeTab === 'EOD' && <AnalyticsEOD />}
                         {activeTab === 'CONF' && <SystemConfig />}
                     </main>

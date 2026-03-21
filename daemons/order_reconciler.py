@@ -102,7 +102,13 @@ class OrderReconciler:
                 logger.error(f"Redis fetch failed for status {order_id}: {e}")
                 self._storage_exhausted = True
 
-            # Wave 2: Poll broker directly if status is missing in Redis
+            # [Audit-Fix] Mapping Grace Period: if status is missing, wait 500ms for Bridge ID mapping
+            if not status_raw and not self._storage_exhausted:
+                logger.info(f"⏳ Status missing for {order_id}. Waiting 500ms for Bridge mapping...")
+                await asyncio.sleep(0.5)
+                status_raw = await self.r.get(f"order_status:{order_id}")
+
+            # Wave 2: Poll broker directly if status is still missing
             if not status_raw and self.api:
                 logger.warning(f"🔍 Status missing for {order_id} in Redis. Polling broker...")
                 try:
@@ -160,6 +166,8 @@ class OrderReconciler:
         if needs_rollback:
             await self.trigger_rollback(p_uuid, data["legs"])
         elif needs_force_fill:
+            # [Audit-Fix] Wing-First Priority: Secure protective BUY legs before fixing income legs
+            needs_force_fill.sort(key=lambda x: 0 if str(x.get("action", x.get("side", ""))).upper() == "BUY" else 1)
             await self.force_fill(p_uuid, needs_force_fill)
         elif all_filled:
             logger.info(f"✅ Basket {p_uuid} reconciled: FULLY FILLED")
@@ -230,6 +238,13 @@ class OrderReconciler:
             
             status_raw = await self.r.get(f"order_status:{order_id}")
             status = json.loads(status_raw) if status_raw else {}
+            
+            # [Audit-Fix] Component 1: Margin Restoration for Rejected/Cancelled legs
+            if status.get("status") in ["REJECTED", "CANCELLED"]:
+                qty = float(leg.get("quantity", leg.get("qty", 1)))
+                restore_amt = qty * 125000.0  # Appx margin per lot
+                await self.r.incrbyfloat("CASH_COMPONENT_LIVE", restore_amt)
+                logger.info(f"💰 MARGIN RESTORED: ₹{restore_amt:,} returned for {status.get('status')} {leg['symbol']}")
             
             # If the leg was partially or fully filled, it's a naked risk. Close it.
             if status.get("status") in ["COMPLETE", "PARTIAL_FILL"]:
@@ -338,10 +353,14 @@ class OrderReconciler:
                             resolved += 1
                     elif age_s > 300:  # 5 minutes with no status = phantom
                         phantoms += 1
-                        logger.critical(f"👻 PHANTOM ORDER: {order_id} dispatched {age_s:.0f}s ago with no status.")
+                        # [Audit-Fix] Component 4: Phantom Lock (Manual intervention only)
+                        strat_id = data.get('strategy_id', 'UNKNOWN')
+                        await self.r.set(f"STRATEGY_LOCK:{strat_id}", "LOCKED_BY_RECONCILER_PHANTOM")
+                        
                         from core.alerts import send_cloud_alert
                         asyncio.create_task(send_cloud_alert(
                             f"👻 PHANTOM ORDER on reboot: {order_id}\n"
+                            f"Strategy {strat_id} LOCKED.\n"
                             f"Symbol: {data.get('symbol')}\n"
                             f"Age: {age_s:.0f}s\n"
                             f"MANUAL VERIFICATION REQUIRED!",

@@ -17,6 +17,7 @@ from core.mq import MQManager, Ports, RedisLogger, Topics, NumpyEncoder  # [R2-0
 from core.greeks import BlackScholes
 import re
 from core.shared_memory import TickSharedMemory
+from core.shm import ShmManager, SignalVector, RegimeShm, RegimeVector
 from core.margin import AsyncMarginManager
 
 try:
@@ -113,19 +114,18 @@ class DirectionalCreditSpreadStrategy(BaseStrategy):
     def on_tick(self, symbol: str, data: dict) -> list | None:
         # Logistic governed by Meta-Router/Regime. Sensor provides alpha.
         # This strategy is triggered for 'POSITIONAL' entries.
-        if not data.get('is_ranging', False) and not data.get('is_trending', False):
-            return None
+        # [Audit-Fix] Double-Key Authorization: Target S18 = 1 (Trending)
+        s18 = data.get("regime_s18", 0)
+        if s18 != 1: return None
         
-        price = float(data['price'])
-        # [SE-01] Generalize strike rounding based on asset
-        meta = INDEX_METADATA.get(symbol, INDEX_METADATA["NIFTY50"])
-        increment = meta["increment"]
+        # [Audit-Fix] Use 1.5x ATR or Delta for robust strike selection
+        atr = data.get("atr", 100.0)
+        offset = max(increment * 2, atr * 1.5)
 
         # Directional logic: alpha balance determines CE vs PE
         alpha = data.get('s_total', 0)
         if alpha > 25: # Bullish Bias -> Bull Put Spread
-            otype = "PE"
-            s1 = round((price * 0.98) / increment) * increment
+            s1 = round((price - offset) / increment) * increment
             s2 = s1 - self.spread_width
             parent_uuid = f"DCS_{uuid.uuid4().hex[:8]}"
             return [
@@ -133,13 +133,12 @@ class DirectionalCreditSpreadStrategy(BaseStrategy):
                 {"action": "BUY",  "otype": "PE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL", "underlying": symbol}
             ]
         elif alpha < -25: # Bearish Bias -> Bear Call Spread
-            otype = "CE"
-            s1 = round((price * 1.02) / increment) * increment
+            s1 = round((price + offset) / increment) * increment
             s2 = s1 + self.spread_width
             parent_uuid = f"DCS_{uuid.uuid4().hex[:8]}"
             return [
-                {"action": "SELL", "otype": "CE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
-                {"action": "BUY",  "otype": "CE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"}
+                {"action": "SELL", "otype": "CE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL", "underlying": symbol},
+                {"action": "BUY",  "otype": "CE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL", "underlying": symbol}
             ]
         return None
 
@@ -175,6 +174,11 @@ class TastyTrade0DTEStrategy(BaseStrategy):
         increment = meta["increment"]
         
         # [S-02] Iron Butterfly (protected straddle) instead of naked straddle
+        # [S-03] Tasty Edge Check: IV-RV Spread must be > 3.0%
+        iv_rv_spread = data.get("iv_rv_spread", 0.0)
+        if iv_rv_spread < 0.03:
+            return None # No edge, no trade.
+
         atm_strike = round(price / increment) * increment
         wing_offset = increment * 4  # e.g., 200 for NIFTY, 400 for others
         parent_uuid = f"TT0_{uuid.uuid4().hex[:8]}"
@@ -184,6 +188,94 @@ class TastyTrade0DTEStrategy(BaseStrategy):
             {"action": "SELL", "otype": "PE", "strike": atm_strike, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE", "underlying": symbol},
             {"action": "BUY",  "otype": "PE", "strike": atm_strike - wing_offset, "parent_uuid": parent_uuid, "lifecycle": "ZERO_DTE", "underlying": symbol}
         ]
+
+class ElasticHunterStrategy(BaseStrategy):
+    """
+    S02: Mean Reversion Hunter. 
+    Target: S18 = 0 (Neutral) or 2 (Ranging).
+    Trigger: Price > 2.0 Sigma from VWAP + RSI Divergence.
+    """
+    def on_tick(self, symbol: str, data: dict) -> list | None:
+        s18 = data.get("regime_s18", 0)
+        if s18 not in [0, 2]: return None # Veto if Trending or Volatile
+
+        # [Audit-Fix] Threshold at 2.0 per spec
+        z_score = data.get("price_zscore", 0.0)
+        if abs(z_score) > 2.0:
+            parent_uuid = f"ELAS_{uuid.uuid4().hex[:8]}"
+            # Bet on return to Mean (VWAP)
+            action = "SELL" if z_score > 2.0 else "BUY"
+            return [{"action": action, "symbol": symbol, "parent_uuid": parent_uuid, "lifecycle": "ELASTIC"}]
+        return None
+
+class KineticHunterStrategy(BaseStrategy):
+    """
+    S01: Trend Movement Specialist. 
+    Target: S18 = 1 (Trending).
+    Trigger: |ASTO| > 70 + Smart Flow (S25) > 20 + Whale Alignment (S22).
+    """
+    def on_tick(self, symbol: str, data: dict) -> list | None:
+        s18 = data.get("regime_s18", 0)
+        if s18 != 1: return None # Veto if NOT Trending
+        
+        # [Audit-Fix] Kinetic Triggers (S22 + S23 + S25)
+        asto = data.get("asto", 0.0)
+        smart_flow = data.get("smart_flow", 0.0)
+        whale_p = data.get("whale_pivot", 0.0)
+        
+        # Trend check: |ASTO| > 70 and Smart Flow alignment
+        if abs(asto) > 70 and abs(smart_flow) > 20:
+            # Direction check: All 3 signals must align
+            is_bullish = (asto > 70 and smart_flow > 20 and whale_p > 0)
+            is_bearish = (asto < -70 and smart_flow < -20 and whale_p < 0)
+            
+            if is_bullish or is_bearish:
+                parent_uuid = f"KINE_{uuid.uuid4().hex[:8]}"
+                action = "BUY" if is_bullish else "SELL"
+                return [{"action": action, "symbol": symbol, "parent_uuid": parent_uuid, "lifecycle": "KINETIC"}]
+        return None
+
+class PositionalHunterStrategy(BaseStrategy):
+    """
+    S11: Theta/Edge Harvesting Specialist.
+    Target: S18 = 2 (Ranging).
+    Trigger: IV-RV Spread > 3% + Persistence (S26) > 60%.
+    """
+    def on_tick(self, symbol: str, data: dict) -> list | None:
+        s18 = data.get("regime_s18", 0)
+        if s18 != 2: return None # Veto if NOT Ranging
+        
+        # [Audit-Fix] Positional Triggers (S12 + S26)
+        iv_rv = data.get("iv_rv_spread", 0.0)
+        s26 = data.get("persistence_s26", 0.0)
+        
+        if iv_rv > 0.03 and s26 > 60:
+            # Mean Reversion entry logic for credit spreads
+            z_score = data.get("price_zscore", 0.0)
+            side = "bull" if z_score < 0 else "bear"
+            
+            # Delegates to internal Credit Spread logic
+            parent_uuid = f"POSI_{uuid.uuid4().hex[:8]}"
+            # We use 100 wide wings for conservative yield
+            spread_width = 100
+            price = data.get("price", 0.0)
+            increment = 50 if "NIFTY" in symbol else 100
+            
+            if side == "bull":
+                s1 = round((price - 100) / increment) * increment
+                s2 = s1 - spread_width
+                return [
+                    {"action": "SELL", "otype": "PE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL", "underlying": symbol},
+                    {"action": "BUY",  "otype": "PE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL", "underlying": symbol}
+                ]
+            else:
+                s1 = round((price + 100) / increment) * increment
+                s2 = s1 + spread_width
+                return [
+                    {"action": "SELL", "otype": "CE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL", "underlying": symbol},
+                    {"action": "BUY",  "otype": "CE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL", "underlying": symbol}
+                ]
+        return None
 
 
 class GammaScalpingStrategy(BaseStrategy):
@@ -312,8 +404,9 @@ class IronCondorStrategy(BaseStrategy):
                 }]
         
         # ── Standard Entry Logic ──
-        # [R2-15] IC authorized in RANGING and HIGH_VOL_CHOP per spec §Strategy 2
-        if not data.get('is_ranging', False) and not data.get('is_high_vol_chop', False): return None
+        # [Audit-Fix] Double-Key Authorization: Target S18 = 2 (Ranging)
+        s18 = data.get("regime_s18", 0)
+        if s18 != 2: return None
         
         T = self.expiry_years
         iv = self.iv
@@ -363,15 +456,19 @@ class CreditSpreadStrategy(BaseStrategy):
 
         if self.side == "bull": # Bull Put Spread
             otype = "PE"
-            s1 = round((price * 0.98) / 50) * 50 # Approximation for speed or use find_strike
+            s1 = round((price - 100) / 50) * 50 # Fixed offset for basic CreditSpread
             s2 = s1 - self.spread_width
             return [
-                {"action": "SELL", "otype": "PE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
-                {"action": "BUY",  "otype": "PE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"}
+                {"action": "SELL", "otype": "PE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL", "underlying": symbol},
+                {"action": "BUY",  "otype": "PE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL", "underlying": symbol}
             ]
+        else: # Bear Call Spread
+            otype = "CE"
+            s1 = round((price + 100) / 50) * 50 
+            s2 = s1 + self.spread_width
             return [
-                {"action": "SELL", "otype": "CE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"},
-                {"action": "BUY",  "otype": "CE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL"}
+                {"action": "SELL", "otype": "CE", "strike": s1, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL", "underlying": symbol},
+                {"action": "BUY",  "otype": "CE", "strike": s2, "parent_uuid": parent_uuid, "lifecycle": "POSITIONAL", "underlying": symbol}
             ]
 
         return None
@@ -388,7 +485,10 @@ async def config_subscriber(redis_client):
         "IronCondor": IronCondorStrategy,
         "CreditSpread": CreditSpreadStrategy,
         "DirectionalCredit": DirectionalCreditSpreadStrategy,
-        "TastyTrade0DTE": TastyTrade0DTEStrategy
+        "TastyTrade0DTE": TastyTrade0DTEStrategy,
+        "ElasticHunter": ElasticHunterStrategy,
+        "KineticHunter": KineticHunterStrategy,
+        "PositionalHunter": PositionalHunterStrategy
     }
 
     while True:
@@ -501,7 +601,7 @@ async def _calibrate_vol_context(redis_client):
         logger.warning("⚠️ B2 Vol Context: No symbols calibrated (prev_close data missing). Proceeding with defaults.")
  
  
-async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_client, shm_ticks, shm_alpha_managers, hedge_socket):
+async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_client, shm_ticks, shm_alpha_managers, shm_regime_managers, hedge_socket):
     """Subscribes to market data and runs strategies using SHM for zero-copy lookups."""
     logger.info("Starting Strategy Engine loop... (v5.5 Quantitative Risk Active)")
     
@@ -608,17 +708,31 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                     lot_sizes_cache = {k: int(v) for k, v in lot_sizes_raw.items()}
                 lot_sizes_last_check = time.time()
 
-            # --- Zero-Copy SHM Access for Alpha (Per Asset) ---
+            # --- Zero-Copy SHM Access for Alpha & Regime (Per Asset) ---
             qstate = None
+            regime = None
             if shm_alpha_managers and symbol in shm_alpha_managers:
                 qstate = shm_alpha_managers[symbol].read()
             elif shm_alpha_managers and "GLOBAL" in shm_alpha_managers:
                 qstate = shm_alpha_managers["GLOBAL"].read()
+
+            if shm_regime_managers and symbol in shm_regime_managers:
+                regime = shm_regime_managers[symbol].read()
+            elif "BANKNIFTY" in symbol and "BANKNIFTY" in shm_regime_managers:
+                regime = shm_regime_managers["BANKNIFTY"].read()
+            elif "NIFTY" in symbol and "NIFTY50" in shm_regime_managers:
+                regime = shm_regime_managers["NIFTY50"].read()
             
+            s18_state = regime.get("regime_s18", 0) if regime else 0
+            s27_quality = regime.get("quality_s27", 0.0) if regime else 0.0
             is_toxic = qstate.get("toxic_veto", False) if qstate else False
             alpha_total = qstate.get("s_total", 0.0) if qstate else 0.0
             asto_val = qstate.get("asto", 0.0) if qstate else 0.0
             adx_val = qstate.get("adx", 0.0) if qstate else 0.0
+            vpin_val = qstate.get("vpin", 0.0) if qstate else 0.0
+            iv_rv_val = qstate.get("iv_rv_spread", 0.0) if qstate else 0.0
+            s26_val = regime.get("persistence_s26", 0.0) if regime else 0.0
+            sf_val = qstate.get("smart_flow", 0.0) if qstate else 0.0
 
             for strategy in list(active_strategies.values()):
                 s_id = strategy.strategy_id
@@ -638,10 +752,17 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                     logger.warning(f"🚫 MACRO LOCKDOWN: {s_id} entry blocked.")
                     continue
 
-                # Inject ASTO/ADX/S22 for strategy visibility (Phase 5)
+                # Inject ASTO/ADX/S22/Regime for strategy visibility (Phase 5+)
                 tick["asto"] = asto_val
                 tick["adx"] = adx_val
                 tick["whale_pivot"] = qstate.get("whale_pivot", 0.0) if qstate else 0.0
+                tick["regime_s18"] = s18_state
+                tick["quality_s27"] = s27_quality
+                tick["persistence_s26"] = s26_val
+                tick["iv_rv_spread"] = iv_rv_val
+                tick["vpin"] = vpin_val
+                tick["smart_flow"] = sf_val
+                tick["price_zscore"] = qstate.get("high_z", 0.0) if abs(qstate.get("high_z", 0)) > abs(qstate.get("low_z", 0)) else qstate.get("low_z", 0.0)
                 
                 signal = strategy.on_tick(symbol, tick)
 
@@ -706,21 +827,16 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                             if isinstance(leg, dict): leg["action"] = action
                             else: leg = action
                 
-                    # --- Project K.A.R.T.H.I.K. Sizing Logic ---
-                    # Prioritize Meta-Router calculated lots, fallback to DTE logic
-                    lots_from_router = strategy_states[s_id].get("lots")
-                    if lots_from_router and lots_from_router > 0:
-                        qty = lots_from_router
-                    else:
-                        # Fallback sizing based on DTE - Dynamic [Audit Fix]
-                        meta = INDEX_METADATA.get(symbol, INDEX_METADATA["NIFTY50"])
-                        # Try to find symbol in dynamic lot sizes cache
-                        found_lot_size = lot_sizes_cache.get(symbol) or lot_sizes_cache.get(meta.get("underlying")) or meta.get("lot_size", 50)
-                        
-                        now_dt = datetime.now()
-                        is_expiry = now_dt.strftime("%A") == meta["expiry_day"]
-                        base_qty = int(found_lot_size) * 2  # Default to 2 lots
-                        qty = base_qty if is_expiry else int(base_qty * 0.5)
+                    # --- Project K.A.R.T.H.I.K. Sizing Logic (Institutional Slider) ---
+                    lots_from_router = strategy_states[s_id].get("lots", 1)
+                    # Apply the S27 Quality Multiplier (0.0 to 1.0)
+                    s27_mult = s27_quality / 100.0
+                    qty = max(1, int(lots_from_router * s27_mult))
+                    
+                    # [Veto] If Quality is too low, block entry
+                    if s27_quality < 30.0 and lifecycle != "POSITIONAL":
+                        logger.warning(f"⚠️ QUALITY VETO: {s_id} rejected (S27 {s27_quality:.1f} < 30)")
+                        continue
  
                     if isinstance(leg, str) and "QTY" in leg:
                         parts = leg.split("_")
@@ -756,7 +872,18 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                         "price": price,   
                         "strategy_id": strategy.strategy_id,
                         "execution_type": strategy.execution_type,
-                        "lifecycle_class": leg.get("lifecycle", "KINETIC") if isinstance(leg, dict) else "KINETIC"  # [F4-02]
+                        "lifecycle_class": leg.get("lifecycle", "KINETIC") if isinstance(leg, dict) else "KINETIC",
+                        "regime_snapshot": {
+                            "s18": s18_state,
+                            "s27": s27_quality,
+                            "s26": s26_val,
+                            "vpin": vpin_val,
+                            "alpha": alpha_total,
+                            "iv_rv": iv_rv_val,
+                            "asto": asto_val,
+                            "z_score": tick.get("price_zscore", 0.0),
+                            "whale_pivot": tick.get("whale_pivot", 0.0)
+                        }
                     }
                     
                     # Track dispatch time for phantom detection
@@ -782,9 +909,12 @@ async def start_engine():
     redis_client = redis.from_url(redis_url, decode_responses=True)
     
     # v5.5: Zero-latency Risk & Alpha via SHM (Per Asset) [Audit Fix]
-    from core.shm import ShmManager
+    from core.shm import ShmManager, RegimeShm
     shm_alpha_managers = {
         idx: ShmManager(asset_id=idx, mode='r') for idx in INDEX_METADATA.keys()
+    }
+    shm_regime_managers = {
+        idx: RegimeShm(asset_id=idx, mode='r') for idx in INDEX_METADATA.keys()
     }
     shm_alpha_managers["GLOBAL"] = ShmManager(asset_id="GLOBAL", mode='r')
     
@@ -818,7 +948,7 @@ async def start_engine():
  
     # 3. Recommendation 2: Pre-Flight Warmup
     try:
-        await run_strategies(sub_socket, push_socket, cmd_socket, mq, redis_client, shm_ticks, shm_alpha_managers, hedge_socket)
+        await run_strategies(sub_socket, push_socket, cmd_socket, mq, redis_client, shm_ticks, shm_alpha_managers, shm_regime_managers, hedge_socket)
     finally:
         config_task.cancel()
         await redis_client.aclose()

@@ -31,18 +31,44 @@ services:
       timeout: 5s
       retries: 5
 
-  data_gateway:
+  tick_sensor:
     build:
       context: .
       dockerfile: Dockerfile.local
-    container_name: data_gateway
+    container_name: tick_sensor
+    command: python -m daemons.tick_sensor
+    cpuset: "0"
     env_file: .env
     depends_on:
       - redis
-      - postgres
     volumes:
       - .:/app
       - /dev/shm:/ram_disk
+
+  snapshot_manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: snapshot_manager
+    command: python -m daemons.snapshot_manager
+    env_file: .env
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+      - /dev/shm:/ram_disk
+
+  fii_dii_fetcher:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: fii_dii_fetcher
+    command: python -m daemons.fii_dii_fetcher
+    env_file: .env
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
 
   hmm_engine_nifty:
     build:

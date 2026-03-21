@@ -191,6 +191,14 @@ class LiveExecutionEngine:
             float(execution.get('theta', 0.0)),
             execution['time'], symbol, strategy_id, exec_type, parent_uuid
         )
+        
+        # [Audit-Fix] Component 2: Margin/Quarantine Sync for SELL Proceeds (T+1 Cycle)
+        if execution['action'] == 'SELL':
+            # Proceeds = (Qty * Price) - Fees
+            proceeds = (float(execution['quantity']) * float(execution['price'])) - float(fees)
+            await self.redis.incrbyfloat("QUARANTINE_PREMIUM_LIVE", proceeds)
+            logger.info(f"🛡️ QUARANTINE SYNC: ₹{proceeds:,.2f} locked in QUARANTINE_PREMIUM_LIVE for {symbol}")
+
         # [Audit 8.4] Only update realized PnL delta to avoid overwriting from multiple threads
         self.total_realized_pnl += (realized_pnl - float(record['realized_pnl']))
 
@@ -268,11 +276,17 @@ class LiveExecutionEngine:
                 "parent_uuid": order.get('parent_uuid', 'NONE')
             }
         
-        # [Audit-Fix] API 400 Retry Logic with 0.1% nudge
+        # [Audit-Fix] Component 1: Regime-Aware Aggressive Nudging for Shoonya 400
         error_msg = res.get('emsg', 'Unknown')
         if "400" in error_msg or "REJECTED" in (res.get('stat') or ''):
-            logger.warning(f"⚠️ API REJECTION ({error_msg}). Retrying with 0.1% nudge...")
-            nudge = 0.001
+            # Fetch S18 Regime: Trending/Volatile needs more aggression
+            regime_raw = await self.redis.get("s18_state")
+            regime = int(regime_raw) if regime_raw else 0
+            
+            # 0.1% Base, 0.3% if Trending/Volatile (Regime 1 or 3)
+            nudge = 0.003 if regime in [1, 3] else 0.001
+            logger.warning(f"⚠️ API REJECTION ({error_msg}) in Regime {regime}. Retrying with {nudge*100}% nudge...")
+            
             order['price'] = float(order.get('price', 0)) * (1 + nudge if action == 'B' else 1 - nudge)
             
             # Second attempt
@@ -346,14 +360,15 @@ class LiveExecutionEngine:
         # Lock expires in 10s if not cleared by reconciler (safety fallback)
         await self.redis.setex(lock_key, 10, "LOCKED")
 
-        # --- [Audit-Fix] Block Bridge on Stale Feed (> 1000ms) ---
+        # --- [Audit-Fix] Component 4: Tightened Feed Hard Veto (Spec: Core 3 250ms) ---
         tick_raw = await self.redis.get(f"latest_tick:{order['symbol']}")
         if tick_raw:
             tick = json.loads(tick_raw)
             tick_ts = datetime.fromisoformat(tick.get("timestamp")).astimezone(timezone.utc)
             latency = (datetime.now(timezone.utc) - tick_ts).total_seconds()
-            if latency > 1.0:
-                logger.critical(f"🛑 STALE FEED BLOCK: {order['symbol']} latency {latency:.2f}s > 1s. Aborting.")
+            # [Audit-Fix] 1.0s -> 0.25s (250ms)
+            if latency > 0.25:
+                logger.critical(f"🛑 STALE FEED BLOCK: {order['symbol']} latency {latency:.2f}s > 250ms. Aborting.")
                 await self.redis.delete(lock_key)
                 return
 
@@ -582,6 +597,8 @@ class LiveExecutionEngine:
                                         buy_or_sell=a[0], product_type='I', exchange=ex, tradingsymbol=s, 
                                         quantity=q, disclosedquantity=0, price_type='MKT', price=0, retention='DAY'
                                     ))
+                                    # [Audit-Fix] Component 3: Panic Lock Cleanup
+                                    await self.redis.delete(f"lock:{symbol}")
                                 
                                 if i + SEBI_BATCH_SIZE < len(positions):
                                     logger.info(f"SEBI Panic Batch complete. Waiting {INTER_BATCH_WAIT}s...")
