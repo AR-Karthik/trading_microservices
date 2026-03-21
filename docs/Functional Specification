@@ -1,18 +1,18 @@
 # Module 0 - Part 1: The Quant & Strategic Thesis
 
 ### 1. Philosophical Bedrock: The "Regime-First" Mandate
-Project K.A.R.T.H.I.K. is built on the mathematical reality that market stationarity is a myth. Most retail systems fail by applying fixed logic to a dynamic environment. Our core thesis mandates that **Regime Detection** is the primary filter for all capital allocation. No trade executes unless the market’s "DNA"—measured via Hurst Exponent and HMM States—aligns with the strategy’s theoretical edge.
+Project K.A.R.T.H.I.K. is built on the mathematical reality that market stationarity is a myth. Standard retail systems often fail because they apply static logic (e.g., mean-reversion) to a dynamic environment. Our core thesis mandates that **Regime Detection** is the primary filter for all capital allocation. No trade is permitted to execute unless the market’s "DNA"—measured via Hurst Exponents, HMM States, and ASTO regimes—aligns with the strategy’s theoretical edge.
 
-### 2. The Alpha Surface: Beyond Price Action
-The system trades microstructure imbalances rather than simple patterns. The Alpha Engine decomposes raw data into high-fidelity vectors:
-* **Order Flow Imbalance (OFI):** Detects institutional liquidity pressure before price movement.
-* **Order Flow Toxicity (VPIN):** Identifies informed trading to trigger system-wide vetoes during "Flash Crash" conditions.
+### 2. The Alpha Surface: Microstructure Intelligence
+The system moves beyond simple price action, instead trading high-fidelity microstructure imbalances:
+* **Order Flow Imbalance (OFI):** Measures net liquidity changes at the bid/ask levels to detect institutional pressure before it manifests as price movement.
+* **Order Flow Toxicity (VPIN):** Utilizes Volume-Synchronized Probability of Informed Trading to identify toxic flow and trigger system-wide vetoes during "Flash Crash" conditions.
 * **Volatility Dislocation:** Exploits the spread between Implied Volatility (IV) and Realized Volatility (RV) to ensure theta-harvesting strategies (0DTE/Iron Condors) are only active when statistically overpaid.
 
 ### 3. Strategic Portfolio Construction
-The system maintains a bifurcated strategy suite:
+The system maintains a balanced, bifurcated strategy suite designed to thrive in all market states:
 * **Income Harvesting (Sideways/Ranging):** 0DTE Iron Butterflies and Iron Condors designed to capture rapid time decay with mechanical, Greek-based adjustments.
-* **Volatility Capture (Trending/Volatile):** Gamma Scalping and Kinetic Hunter strategies that utilize underlying futures to hedge delta exposure and capture explosive moves.
+* **Volatility Capture (Trending/Volatile):** Gamma Scalping and Kinetic Hunter strategies that utilize underlying futures to hedge delta exposure and capture explosive realized moves.
 
 ### 4. Sovereign Risk Management
-Project K.A.R.T.H.I.K. treats risk as a "First-Class Citizen". A dedicated **Liquidation Daemon** has sovereign authority to kill any position based on **Triple-Barrier** logic (Take-Profit, Stop-Loss, and Vertical Time Exits), bypassing strategy engines if risk budgets are breached.
+Project K.A.R.T.H.I.K. treats Risk as a "First-Class Citizen". The system operates under a **Sovereign Risk Model** where a dedicated `LiquidationDaemon` has the absolute authority to kill any position based on a **Triple-Barrier** logic (Take-Profit, Stop-Loss, and Vertical Time Exits), bypassing the strategy engine’s own state if risk budgets are breached.
