@@ -631,6 +631,8 @@ class MetaRouter:
         
         iv = float(state.get("iv_atm", 0.18))
         required_margin = intent["lots"] * 150000 * (1.0 + iv)
+        intent["reserved_margin"] = required_margin
+        intent["execution_type"] = exec_type
         
         reserved_code = await self.margin_manager.reserve(required_margin, execution_type=exec_type)
         if reserved_code < 1:
