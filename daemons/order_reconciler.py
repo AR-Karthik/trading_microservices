@@ -65,7 +65,7 @@ class OrderReconciler:
                 to_reconcile = []
                 
                 for p_uuid, data in list(self.inflight_baskets.items()): # [Audit 4.1] list() to prevent runtime error
-                    if now - data["start_time"] > 3.0:
+                    if now - data["start_time"] > 1.0:
                         to_reconcile.append(p_uuid)
                 
                 for p_uuid in to_reconcile:
