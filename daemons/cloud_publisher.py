@@ -356,8 +356,18 @@ class CloudPublisher:
                 try:
                     await self._upload_tick_parquet(now)
                     await self._upload_trades_parquet(now)
+                    
+                    # [Audit-Fix] Advisory 3: Piggyback on EOD Snapshot to backup constituents
+                    if self.firestore_db and self.gcs_client:
+                        doc = await self.firestore_db.collection("system").document("index_constituents").get()
+                        if doc.exists:
+                            data = doc.to_dict()
+                            bucket = self.gcs_client.bucket(self.gcs_bucket)
+                            blob = bucket.blob("config/index_constituents.json")
+                            await asyncio.to_thread(blob.upload_from_string, json.dumps(data, indent=2))
+                            logger.info("✅ Index constituents backed up to GCS (EOD Snapshot).")
                 except Exception as e:
-                    logger.error(f"EOD Parquet export failed: {e}")
+                    logger.error(f"EOD Snapshot logic failed: {e}")
 
                 # Legacy HMM model upload removed: system is now purely deterministic.
 
@@ -373,110 +383,155 @@ class CloudPublisher:
             await asyncio.sleep(30)
 
     async def _upload_tick_parquet(self, snapshot_time: datetime):
-        """Export today's ticks from TimescaleDB to .parquet and upload to GCS."""
+        """Export today's ticks from TimescaleDB to .parquet using chunked streaming."""
         if not self.gcs_client:
             return
 
+        parquet_path = f"/tmp/ticks_{snapshot_time.strftime('%Y-%m-%d')}.parquet"
+        
         try:
             import asyncpg
-            import pandas as pd
+            import pyarrow as pa
+            import pyarrow.parquet as pq
 
             conn = await asyncpg.connect(
                 host=os.getenv("DB_HOST", "localhost"),
                 port=5432,
-                user="trading_user",
-                password="trading_pass",
-                database="trading_db"
+                user=os.getenv("DB_USER"),
+                password=os.getenv("DB_PASS"),
+                database=os.getenv("DB_NAME", "trading_db")
             )
 
-            today_str = snapshot_time.strftime("%Y-%m-%d")
-            # D-37: Enriched market history export
-            rows = await conn.fetch("""
+            # [Performance Audit-Fix] Use Server-Side Cursor for OOM prevention
+            query = """
                 SELECT time, symbol, price, log_ofi_zscore, cvd, vpin, basis_zscore, vol_term_ratio, exit_path_70_progress, asto, asto_regime, asto_multiplier
                 FROM market_history 
                 WHERE time >= $1::date AND time < ($1::date + interval '1 day')
-            """, snapshot_time)
+            """
 
+            # Define schema explicitly for PyArrow
+            schema = pa.schema([
+                ('time', pa.timestamp('us', tz='UTC')),
+                ('symbol', pa.string()),
+                ('price', pa.float64()),
+                ('log_ofi_zscore', pa.float64()),
+                ('cvd', pa.float64()),
+                ('vpin', pa.float64()),
+                ('basis_zscore', pa.float64()),
+                ('vol_term_ratio', pa.float64()),
+                ('exit_path_70_progress', pa.float64()),
+                ('asto', pa.float64()),
+                ('asto_regime', pa.int32()),
+                ('asto_multiplier', pa.float64())
+            ])
+
+            CHUNK_SIZE = 50000
+            writer = pq.ParquetWriter(parquet_path, schema, compression='snappy')
+            
+            async with conn.transaction():
+                chunk = []
+                async for record in conn.cursor(query, snapshot_time):
+                    # Mapping record to dict or list matching schema
+                    chunk.append(dict(record))
+                    if len(chunk) >= CHUNK_SIZE:
+                        table = pa.Table.from_pandas(pd.DataFrame(chunk), schema=schema)
+                        writer.write_table(table)
+                        chunk = []
+                
+                # Flush remaining
+                if chunk:
+                    table = pa.Table.from_pandas(pd.DataFrame(chunk), schema=schema)
+                    writer.write_table(table)
+            
+            writer.close()
             await conn.close()
 
-            if not rows:
-                logger.info("No tick data found for today. Skipping parquet export.")
-                return
-
-            df = pd.DataFrame([dict(r) for r in rows])
-            
-            # Ensure types are correct for BigQuery
-            df['time'] = pd.to_datetime(df['time'])
-            df['symbol'] = df['symbol'].astype(str)
-            for col in ['price', 'log_ofi_zscore', 'cvd', 'vpin', 'basis_zscore', 'vol_term_ratio', 'asto', 'asto_multiplier']:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-            df['asto_regime'] = pd.to_numeric(df['asto_regime'], errors='coerce').fillna(0).astype(int)
-
-
-            parquet_path = f"/tmp/ticks_{today_str}.parquet"
-            df.to_parquet(parquet_path, index=False)
-
-            if not self.gcs_client:
-                logger.error("GCS client not initialized. Skipping tick export.")
-                return
-
+            # Upload to GCS
             bucket = self.gcs_client.bucket(self.gcs_bucket)
-            blob = bucket.blob(f"tick_history/ticks_{today_str}.parquet")
+            blob = bucket.blob(f"tick_history/ticks_{snapshot_time.strftime('%Y-%m-%d')}.parquet")
             blob.upload_from_filename(parquet_path)
-            logger.info(f"✅ Tick data uploaded to GCS: gs://{self.gcs_bucket}/tick_history/ticks_{today_str}.parquet")
+            logger.info(f"✅ Tick data uploaded to GCS (Chunked): {blob.name}")
 
-            os.remove(parquet_path)
+            if os.path.exists(parquet_path):
+                os.remove(parquet_path)
 
         except Exception as e:
-            logger.error(f"Tick Parquet export error: {e}")
+            logger.error(f"Tick Parquet chunked export error: {e}")
+            if os.path.exists(parquet_path): os.remove(parquet_path)
 
     async def _upload_trades_parquet(self, snapshot_time: datetime):
-        """Export today's trades from TimescaleDB to .parquet and upload to GCS."""
+        """Export today's trades from TimescaleDB to .parquet using chunked streaming."""
         if not self.gcs_client:
             return
 
+        parquet_path = f"/tmp/trades_{snapshot_time.strftime('%Y-%m-%d')}.parquet"
+
         try:
             import asyncpg
-            import pandas as pd
+            import pyarrow as pa
+            import pyarrow.parquet as pq
 
             conn = await asyncpg.connect(
                 host=os.getenv("DB_HOST", "localhost"),
                 port=5432,
-                user="trading_user",
-                password="trading_pass",
-                database="trading_db"
+                user=os.getenv("DB_USER"),
+                password=os.getenv("DB_PASS"),
+                database=os.getenv("DB_NAME", "trading_db")
             )
 
-            today_str = snapshot_time.strftime("%Y-%m-%d")
-            # D-37: Expanded columns for trade history consistency
-            rows = await conn.fetch("""
+            query = """
                 SELECT id::text, time, symbol, action, quantity, price, fees, strategy_id, execution_type, audit_tags 
                 FROM trades 
                 WHERE time >= $1::date AND time < ($1::date + interval '1 day')
-            """, snapshot_time)
+            """
+
+            schema = pa.schema([
+                ('id', pa.string()),
+                ('time', pa.timestamp('us', tz='UTC')),
+                ('symbol', pa.string()),
+                ('action', pa.string()),
+                ('quantity', pa.int64()),
+                ('price', pa.float64()),
+                ('fees', pa.float64()),
+                ('strategy_id', pa.string()),
+                ('execution_type', pa.string()),
+                ('audit_tags', pa.string())
+            ])
+
+            writer = pq.ParquetWriter(parquet_path, schema, compression='snappy')
+            CHUNK_SIZE = 10000
+            
+            async with conn.transaction():
+                chunk = []
+                async for record in conn.cursor(query, snapshot_time):
+                    chunk.append(dict(record))
+                    if len(chunk) >= CHUNK_SIZE:
+                        table = pa.Table.from_pandas(pd.DataFrame(chunk), schema=schema)
+                        writer.write_table(table)
+                        chunk = []
+                
+                if chunk:
+                    table = pa.Table.from_pandas(pd.DataFrame(chunk), schema=schema)
+                    writer.write_table(table)
+            
+            writer.close()
             await conn.close()
 
-            if not rows:
-                logger.info("No trades found for today.")
-                return
-
-            df = pd.DataFrame([dict(r) for r in rows])
-            df['time'] = pd.to_datetime(df['time'])
-            
-            parquet_path = f"/tmp/trades_{today_str}.parquet"
-            df.to_parquet(parquet_path, index=False)
-
             bucket = self.gcs_client.bucket(self.gcs_bucket)
-            blob = bucket.blob(f"trade_history/trades_{today_str}.parquet")
+            blob = bucket.blob(f"trade_history/trades_{snapshot_time.strftime('%Y-%m-%d')}.parquet")
             blob.upload_from_filename(parquet_path)
-            logger.info(f"✅ Trade data uploaded to GCS: gs://{self.gcs_bucket}/trade_history/trades_{today_str}.parquet")
+            logger.info(f"✅ Trade data uploaded to GCS (Chunked): {blob.name}")
 
-            os.remove(parquet_path)
+            if os.path.exists(parquet_path):
+                os.remove(parquet_path)
 
         except Exception as e:
-            logger.error(f"Trade Parquet export error: {e}")
+            logger.error(f"Trade Parquet chunked export error: {e}")
+            if os.path.exists(parquet_path): os.remove(parquet_path)
 
-    # Legacy _upload_hmm_model removed (System moved to deterministic ASTO)
+        except Exception as e:
+            logger.error(f"Trade Parquet chunked export error: {e}")
+            if os.path.exists(parquet_path): os.remove(parquet_path)
 
     async def _mark_vm_shutdown_pending(self):
         """Update Firestore to indicate EOD processing is complete."""

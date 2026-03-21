@@ -12,6 +12,8 @@ import os
 import sys
 import time
 import random
+import httpx
+import csv
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import pyotp
@@ -23,9 +25,15 @@ try:
 except ImportError:
     uvloop = None
 
+try:
+    import asyncpg
+    _HAS_ASYNCPG = True
+except ImportError:
+    _HAS_ASYNCPG = False
+
 from core.mq import MQManager, Ports, Topics, NumpyEncoder
 from core.alerts import send_cloud_alert
-from core.shared_memory import TickSharedMemory
+from core.shared_memory import TickSharedMemory, SYMBOL_TO_SLOT
 from NorenRestApiPy.NorenApi import NorenApi
 
 load_dotenv()
@@ -46,13 +54,6 @@ CIRCUIT_BREAKER_MATRIX = {
     20: {"before_1_pm": 0, "before_2_30_pm": 0, "after_2_30_pm": 0},
 }
 
-# [Parity] SHM Slot Mapping (Must match TickSensor)
-SYMBOL_TO_SLOT = {
-    "NIFTY50": 0, "BANKNIFTY": 1, "RELIANCE": 2, "HDFCBANK": 3, "INFY": 4,
-    "TCS": 5, "ICICIBANK": 6, "SENSEX": 7, "ITC": 8, "SBIN": 9,
-    "AXISBANK": 10, "KOTAKBANK": 11, "LT": 12, "INDIAVIX": 13
-}
-
 
 class SnapshotManager:
     def __init__(self):
@@ -68,6 +69,18 @@ class SnapshotManager:
         self.active_option_tokens = {} # [Parity]
         self._sim_ltt_counter = 0     # [Audit-Fix] Persistent LTT for simulation
         
+        # [Audit-Fix] Component 2: REST Gatekeeper (Semaphore)
+        self.rest_semaphore = asyncio.Semaphore(1)
+        self.rest_delay = 0.34
+        self.pool = None # asyncpg pool for Ghost Position Sync
+        self.prev_closes = {} # Ref closes for Circuit Breakers
+        self.atr_values = {} # For ATR-based JIT
+        
+        # Cloud Clients
+        self.firestore_db = None
+        self.gcs_client = None
+        self.gcs_bucket = os.getenv("GCS_MODEL_BUCKET", "karthiks-trading-models")
+        
         # [Parity] Tick SHM (Attach mode)
         try:
             self.shm_ticks = TickSharedMemory(create=False)
@@ -76,25 +89,217 @@ class SnapshotManager:
             self.shm_ticks = None
 
     async def start(self):
-        from core.auth import get_redis_url
+        from core.auth import get_redis_url, get_db_dsn
         self.redis_client = redis.from_url(get_redis_url(), decode_responses=True)
         await self.redis_client.ping()
         
-        logger.info("🚀 SnapshotManager (Slow Lane) active.")
+        # [Audit-Fix] Initialize Cloud Clients for Dynamic Hydration
+        await self._init_cloud_clients()
         
+        # [Audit-Fix] Component 3: Database Pool for Ghost Position Sync
+        if _HAS_ASYNCPG:
+            try:
+                self.pool = await asyncpg.create_pool(get_db_dsn(), min_size=1, max_size=5)
+                logger.info("✅ SnapshotManager connected to TimescaleDB.")
+            except Exception as e:
+                logger.error(f"DB connect failed: {e}")
+
+        logger.info("🚀 SnapshotManager (Slow Lane) active. Beginning Boot-Time Hydration...")
+        
+        # --- STEP 1: HYDRATION (Blocking) ---
+        await self._boot_hydration()
+        
+        logger.info("🌊 Hydration Complete. Launching verifier loops.")
         tasks = [
             self._price_sync_loop(),
-            self._option_chain_scanner(),
-            self._dynamic_subscription_manager(), # [Parity]
-            self._account_sync_loop(),
+            self._option_chain_scanner(),       # Freq: 60s
+            self._dynamic_subscription_manager(),# JIT ATR-based
+            self._account_sync_loop(),          # Freq: 30s -> 60s Refinement
             self._history_sync_scheduler(),
             self._lot_size_scheduler(),
-            self._circuit_breaker_monitor(),
+            self._circuit_breaker_monitor(),    # Uses prev_close
+            self._ghost_position_sync(),        # [New] Safety audit
             self._config_update_listener(),
+            self._persistent_alpha_snapshots(), # [Layer 7]
             self._run_simulator(),
             self._run_heartbeat()
         ]
         await asyncio.gather(*tasks)
+
+    async def _call_api(self, func_name, *args, **kwargs):
+        """[Audit-Fix] Component 2: Centralized REST Gatekeeper (Semaphore + Delay)."""
+        if not self.api:
+            await self._connect_shoonya()
+            
+        async with self.rest_semaphore:
+            func = getattr(self.api, func_name)
+            res = await asyncio.to_thread(func, *args, **kwargs)
+            await asyncio.sleep(self.rest_delay) # Enforce 3 req/sec
+            return res
+
+    async def _boot_hydration(self):
+        """[Audit-Fix] Phase I: Blocking Hydration (Ensures Layers 2/3/4 never see 'None')."""
+        try:
+            # 1. Connect first
+            if not self.sim_mode:
+                await self._connect_shoonya()
+            
+            # 2. Dynamic Constituents (New)
+            await self._hydrate_dynamic_constituents()
+            
+            # 3. Expiries
+            await self._sync_expiries()
+            
+            # 3. Lot/Tick Sizes
+            await self._fetch_and_store_lot_sizes()
+            
+            # 4. History + Prev Day Close + ATR
+            await self._fetch_14d_history()
+            
+            # 5. Initial Account State
+            await self._account_sync_task()
+            
+        except Exception as e:
+            logger.critical(f"🛑 HYDRATION FAILED: {e}")
+            # Keep trying or exit? For Fortress, we retry once then proceed with warnings
+            await asyncio.sleep(5)
+
+    async def _init_cloud_clients(self):
+        """Lazily initialize Google Cloud clients for dynamic hydration fallbacks."""
+        try:
+            from google.cloud import firestore, storage
+            
+            creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if creds_path:
+                if os.path.isdir(creds_path) or (os.path.isfile(creds_path) and os.path.getsize(creds_path) == 0):
+                    logger.error(f"❌ GCP Credentials Error: {creds_path} is invalid! Unsetting.")
+                    os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+            
+            self.firestore_db = firestore.AsyncClient()
+            self.gcs_client = storage.Client()
+            logger.info("✅ SnapshotManager Cloud Clients initialized.")
+        except Exception as e:
+            logger.warning(f"⚠️ Cloud clients disabled: {e}. Running in local-only mode.")
+            self.firestore_db = None
+            self.gcs_client = None
+
+    async def _hydrate_dynamic_constituents(self):
+        """[Audit-Fix] Advisory 3: Dynamic Index Constituents Hydration."""
+        logger.info("📐 Hydrating Dynamic Index Constituents (The Fortress)...")
+        
+        indices = {
+            "NIFTY50": {
+                "search": "Nifty 50", 
+                "csv_url": "https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv",
+                "fallback": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "ITC", "SBIN", "AXISBANK", "KOTAKBANK", "LT"]
+            },
+            "BANKNIFTY": {
+                "search": "Nifty Bank",
+                "csv_url": "https://www.niftyindices.com/IndexConstituent/ind_niftybanklist.csv",
+                "fallback": ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "INDUSINDBK", "AUBL", "FEDERALBNK", "IDFCFIRSTB", "BANDHANBNK"]
+            },
+            "SENSEX": {
+                "search": "S&P BSE SENSEX",
+                "csv_url": "https://docs.google.com/spreadsheets/d/1XlU-uKjT2sB1zY3f3wW5F0g1Q7z1e5N9/export?format=csv",
+                "fallback": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "ITC", "TCS", "LT", "AXISBANK", "SBIN", "KOTAKBANK"]
+            }
+        }
+
+        for idx, cfg in indices.items():
+            constituents = []
+            
+            # Phase 1: Shoonya API
+            try:
+                res = await self._call_api('get_index_constituents', index=cfg['search'])
+                if res and 'values' in res:
+                    constituents = [item['tsym'] for item in res['values'][:10]]
+                    logger.info(f"✅ {idx}: Fetched from Shoonya API.")
+            except Exception as e:
+                logger.debug(f"Shoonya API constituent fetch failed for {idx}: {e}")
+
+            # Phase 2: Official CSV (Direct Source)
+            if not constituents:
+                try:
+                    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'}
+                    async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
+                        resp = await client.get(cfg['csv_url'], timeout=10.0)
+                        if resp.status_code == 200:
+                            text = resp.text
+                            lines = text.splitlines()
+                            
+                            reader = csv.DictReader(lines)
+                            # Normalize headers to find 'Symbol' or 'SCRIP_CODE' (for Sensex)
+                            constituents = []
+                            for row in reader:
+                                symbol = row.get('Symbol') or row.get('SCRIP_CODE') or row.get('SYMBOL')
+                                if symbol: constituents.append(symbol.strip())
+                                if len(constituents) >= 10: break
+                                
+                            if not constituents:
+                                # Last resort: raw parse
+                                constituents = [line.split(',')[2].strip('"').strip() for line in lines[1:11] if len(line.split(',')) > 2]
+                            
+                            if constituents:
+                                logger.info(f"✅ {idx}: Fetched from Official CSV.")
+                except Exception as e:
+                    logger.debug(f"CSV fetch failed for {idx}: {e}")
+
+            # Phase 3: Firestore Fallback
+            if not constituents and self.firestore_db:
+                try:
+                    doc = await self.firestore_db.collection("system").document("index_constituents").get()
+                    if doc.exists:
+                        data = doc.to_dict()
+                        constituents = data.get(idx)
+                        if constituents:
+                            logger.info(f"✅ {idx}: Recovered from Firestore.")
+                except Exception as e:
+                    logger.debug(f"Firestore recovery failed for {idx}: {e}")
+
+            # Phase 4: GCS Fallback
+            if not constituents and self.gcs_client:
+                try:
+                    bucket = self.gcs_client.bucket(self.gcs_bucket)
+                    blob = bucket.blob("config/index_constituents.json")
+                    content = await asyncio.to_thread(blob.download_as_text)
+                    data = json.loads(content)
+                    constituents = data.get(idx)
+                    if constituents:
+                        logger.info(f"✅ {idx}: Recovered from GCS Backup.")
+                except Exception as e:
+                    logger.debug(f"GCS recovery failed for {idx}: {e}")
+
+            # Phase 5: Redis Fallback
+            if not constituents:
+                try:
+                    cached = await self.redis_client.get(f"CONFIG:COMPONENTS:{idx}")
+                    if cached:
+                        constituents = json.loads(cached)
+                        logger.info(f"✅ {idx}: Using Redis Cache.")
+                except Exception as e:
+                    logger.debug(f"Redis cache fallback failed for {idx}: {e}")
+
+            # Phase 6: Hardcoded Fallback
+            if not constituents:
+                constituents = cfg['fallback']
+                logger.warning(f"⚠️ {idx}: All sources failed. Using hardcoded defaults.")
+
+            # --- PERSISTENCE ---
+            await self.redis_client.set(f"CONFIG:COMPONENTS:{idx}", json.dumps(constituents))
+            
+            if self.firestore_db:
+                try:
+                    await self.firestore_db.collection("system").document("index_constituents").set({idx: constituents}, merge=True)
+                except Exception as e:
+                    logger.error(f"Failed to persist {idx} to Firestore: {e}")
+            
+            # Broadcasting update
+            await self.redis_client.publish("system_events", json.dumps({
+                "event": "DYNAMIC_COMPONENTS_UPDATED",
+                "index": idx,
+                "components": constituents,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }))
 
     async def _run_heartbeat(self):
         from core.health import HeartbeatProvider
@@ -145,9 +350,8 @@ class SnapshotManager:
             return
 
         try:
-            if not self.api: await self._connect_shoonya()
             for asset, search in [("NIFTY50", "NIFTY"), ("BANKNIFTY", "BANKNIFTY"), ("SENSEX", "SENSEX")]:
-                res = await asyncio.to_thread(self.api.search_scrip, exchange="NFO", searchtext=search)
+                res = await self._call_api('search_scrip', exchange="NFO", searchtext=search)
                 if res and res.get('stat') == 'Ok':
                     # Extract earliest expiry from search results
                     values = res.get('values', [])
@@ -166,9 +370,8 @@ class SnapshotManager:
         lot_sizes = {"NIFTY50": 75, "BANKNIFTY": 15, "SENSEX": 10} # 2026 Sample Defaults
         try:
             if not self.sim_mode:
-                if not self.api: await self._connect_shoonya()
                 for idx, sym in [("NIFTY50", "NIFTY"), ("BANKNIFTY", "BANKNIFTY"), ("SENSEX", "SENSEX")]:
-                    res = await asyncio.to_thread(self.api.search_scrip, exchange="NFO", searchtext=sym)
+                    res = await self._call_api('search_scrip', exchange="NFO", searchtext=sym)
                     if res and res.get('stat') == 'Ok':
                         for val in res.get('values', []):
                             if 'ls' in val: lot_sizes[idx] = int(val['ls']); break
@@ -187,12 +390,13 @@ class SnapshotManager:
 
     async def _circuit_breaker_monitor(self):
         """[Parity] Full SEBI-mandated circuit breaker logic with time-indexed halts."""
-        logger.info("Full Circuit Breaker monitor active.")
-        # [Parity] Wait for base prices to populate
-        while "NIFTY50" not in self._prices or "BANKNIFTY" not in self._prices:
+        logger.info("Full Circuit Breaker monitor active (Fortress Mode).")
+        # [Audit-Fix] Component 3: Use prev_day_close from hydration
+        while not all(idx in self.prev_closes for idx in ["NIFTY50", "BANKNIFTY"]):
             await asyncio.sleep(2)
-        base_nifty = self._prices["NIFTY50"]
-        base_banknifty = self._prices["BANKNIFTY"]
+        
+        base_nifty = self.prev_closes["NIFTY50"]
+        base_banknifty = self.prev_closes["BANKNIFTY"]
 
         while True:
             try:
@@ -248,12 +452,9 @@ class SnapshotManager:
 
     async def _option_chain_scanner(self):
         """Polls full option chain to identify Walls and request JIT subscriptions."""
-        logger.info("Option chain scanner active.")
+        logger.info("Option chain scanner active (Fortress Mode - 60s).")
         while True:
             try:
-                if not self.api and not self.sim_mode:
-                    await self._connect_shoonya()
-                
                 for asset in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
                     spot = self._prices.get(asset)
                     if not spot: continue
@@ -265,13 +466,12 @@ class SnapshotManager:
                     exch = "BFO" if asset == "SENSEX" else "NFO"
 
                     if self.sim_mode:
-                        # Simulated Wall Logic (Already implemented in TickSensor sim if needed)
                         continue
 
-                    # Fetch a broader chain (+/- 15 strikes)
-                    res = await asyncio.to_thread(self.api.get_option_chain, 
-                                                 exchange=exch, tradingsymbol=shoonya_symbol, 
-                                                 strike=atm, count=15)
+                    # [Audit-Fix] Component 2: Gatekeeper API call
+                    res = await self._call_api('get_option_chain', 
+                                              exchange=exch, tradingsymbol=shoonya_symbol, 
+                                              strike=atm, count=15)
                     
                     if res and res.get('stat') == 'Ok':
                         values = res.get('values', [])
@@ -292,18 +492,20 @@ class SnapshotManager:
                         pcr = await self._calculate_pcr(shoonya_symbol, valid_strikes, expiry)
                         if pcr:
                             await self.redis_client.set(f"live_pcr:{asset}", str(round(pcr, 2)))
-                            logger.info(f"📈 {asset} PCR: {pcr:.2f}")
 
-                        # JIT Subscription requests
+                        # [Audit-Fix] Component 4: ATR-based JIT Subscription Window
+                        atr = self.atr_values.get(asset, 300.0)
+                        jit_limit = 1.5 * atr
+                        
                         for v in valid_strikes:
                             strike_val = float(v.get('strprc', 0))
-                            if abs(strike_val - spot) < 300: # JIT Window
+                            if abs(strike_val - spot) < jit_limit: 
                                 await self.redis_client.publish("tick_sensor:subscriptions", json.dumps({
                                     "action": "subscribe", "symbol": f"{exch}|{v['token']}", "tsym": v['tsym']
                                 }))
             except Exception as e:
                 logger.error(f"Option scanner error: {e}")
-            await asyncio.sleep(30) # Poll every 30s instead of 10s for stability
+            await asyncio.sleep(60) # Reduced frequency for REST stability
 
     async def _dynamic_subscription_manager(self):
         """[Parity] Periodically refreshes ATM option subscriptions based on spot price."""
@@ -341,8 +543,7 @@ class SnapshotManager:
                 self.active_option_tokens[fake_token] = search_text
                 return
 
-            if not self.api: await self._connect_shoonya()
-            res = await asyncio.to_thread(self.api.search_scrip, exchange=exch, searchtext=search_text)
+            res = await self._call_api('search_scrip', exchange=exch, searchtext=search_text)
             if res and res.get('stat') == 'Ok':
                 val = res.get('values', [{}])[0]
                 token = val.get('token')
@@ -430,46 +631,80 @@ class SnapshotManager:
 
     async def _account_sync_loop(self):
         """Polls margin and positions, calculating regulatory components for SystemController."""
-        from core.auth import HEDGE_RESERVE_PCT # Assuming it's in core or hardcode 0.15
-        RES_PCT = 0.15 
-
         while True:
             try:
-                if not self.api and not self.sim_mode: await self._connect_shoonya()
-                if self.sim_mode:
-                    await self.redis_client.set("ACCOUNT:MARGIN:AVAILABLE", "1000000.0")
-                    # Mock regulatory components
-                    await self.redis_client.set("CASH_COMPONENT_LIVE", "425000.0")
-                    await self.redis_client.set("COLLATERAL_COMPONENT_LIVE", "425000.0")
-                    await self.redis_client.set("HEDGE_RESERVE_LIVE", "150000.0")
-                    await asyncio.sleep(30); continue
-
-                # 1. Margin Limits
-                limits = await asyncio.to_thread(self.api.get_limits)
-                if limits and limits.get('stat') == 'Ok':
-                    total_cash = float(limits.get('cash', 0))
-                    used = float(limits.get('marginused', 0))
-                    await self.redis_client.set("ACCOUNT:MARGIN:AVAILABLE", str(total_cash))
-                    await self.redis_client.set("ACCOUNT:MARGIN:USED", str(used))
-                    
-                    # Regulatory splits for SystemController
-                    eff = total_cash * (1 - RES_PCT)
-                    await self.redis_client.set("CASH_COMPONENT_LIVE", f"{eff * 0.5:.2f}")
-                    await self.redis_client.set("COLLATERAL_COMPONENT_LIVE", f"{eff * 0.5:.2f}")
-                    await self.redis_client.set("HEDGE_RESERVE_LIVE", f"{total_cash * RES_PCT:.2f}")
-
-                # 2. Positions (Truth Map for Ghost Sync)
-                positions = await asyncio.to_thread(self.api.get_positions)
-                if isinstance(positions, list):
-                    truth_map = {p['tsym']: int(p.get('netqty', 0)) for p in positions if int(p.get('netqty', 0)) != 0}
-                    if truth_map:
-                        await self.redis_client.delete("broker_positions") # Refresh hash
-                        await self.redis_client.hset("broker_positions", mapping=truth_map)
-                        logger.debug(f"Synced {len(truth_map)} positions to Redis.")
-
+                await self._account_sync_task()
             except Exception as e:
                 logger.error(f"Account sync error: {e}")
-            await asyncio.sleep(30)
+            await asyncio.sleep(60) # Reduced frequency for stability
+
+    async def _account_sync_task(self):
+        """[Audit-Fix] Single pass account sync, used by hydration and loop."""
+
+        if self.sim_mode:
+            await self.redis_client.set("ACCOUNT:MARGIN:AVAILABLE", "1000000.0")
+            await self.redis_client.set("CASH_COMPONENT_LIVE", "425000.0")
+            await self.redis_client.set("COLLATERAL_COMPONENT_LIVE", "425000.0")
+            await self.redis_client.set("HEDGE_RESERVE_LIVE", "150000.0")
+            return
+
+        # 1. Margin Limits
+        limits = await self._call_api('get_limits')
+        if limits and limits.get('stat') == 'Ok':
+            total_cash = float(limits.get('cash', 0))
+            used = float(limits.get('marginused', 0))
+            await self.redis_client.set("ACCOUNT:MARGIN:AVAILABLE", str(total_cash))
+            await self.redis_client.set("ACCOUNT:MARGIN:USED", str(used))
+            
+            # Regulatory splits for SystemController
+            eff = total_cash * (1 - HEDGE_RESERVE_PCT)
+            await self.redis_client.set("CASH_COMPONENT_LIVE", f"{eff * 0.5:.2f}")
+            await self.redis_client.set("COLLATERAL_COMPONENT_LIVE", f"{eff * 0.5:.2f}")
+            await self.redis_client.set("HEDGE_RESERVE_LIVE", f"{total_cash * HEDGE_RESERVE_PCT:.2f}")
+
+        # 2. Positions (Truth Map for Ghost Sync)
+        positions = await self._call_api('get_positions')
+        if isinstance(positions, list):
+            truth_map = {p['tsym']: int(p.get('netqty', 0)) for p in positions if int(p.get('netqty', 0)) != 0}
+            if truth_map:
+                # [Audit-Fix] Redis Atomic Overwrite: Use RENAME to prevent 'GHOST_DETECTED' race condition
+                await self.redis_client.hset("broker_positions_tmp", mapping=truth_map)
+                await self.redis_client.rename("broker_positions_tmp", "broker_positions")
+                logger.debug(f"Synced {len(truth_map)} positions to Redis (Atomic).")
+            else:
+                # If no positions, clear the map safely
+                await self.redis_client.delete("broker_positions")
+
+    async def _ghost_position_sync(self):
+        """[Audit-Fix] Component 3: Professional Safety Audit (Broker vs DB)."""
+        if self.sim_mode or not self.pool: return
+        logger.info("Ghost Position Sync active (60s frequency).")
+        
+        while True:
+            try:
+                # 1. Get broker truth from Redis (just updated by account sync)
+                truth_map_raw = await self.redis_client.hgetall("broker_positions")
+                truth_map = {k: int(v) for k, v in truth_map_raw.items()}
+                
+                # 2. Get DB truth
+                async with self.pool.acquire() as conn:
+                    db_positions = await conn.fetch("SELECT symbol, SUM(quantity) as qty FROM portfolio GROUP BY symbol")
+                    db_map = {p['symbol']: int(p['qty']) for p in db_positions if int(p['qty']) != 0}
+                
+                # 3. Compare: Broker has it, DB doesn't?
+                for sym, t_qty in truth_map.items():
+                    d_qty = db_map.get(sym, 0)
+                    if t_qty != 0 and d_qty == 0:
+                        logger.critical(f"👻 GHOST ALERT: Broker sees {t_qty} of {sym} but DB is FLAT.")
+                        await self.redis_client.publish("system_events", json.dumps({
+                            "event": "GHOST_DETECTED",
+                            "symbol": sym,
+                            "broker_qty": t_qty,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }))
+            except Exception as e:
+                logger.error(f"Ghost sync error: {e}")
+            await asyncio.sleep(60)
 
     async def _history_sync_scheduler(self):
         """Hydrates 14-day history for indices."""
@@ -493,6 +728,10 @@ class SnapshotManager:
                 base = 22000.0 if asset == "NIFTY50" else (47500.0 if asset == "BANKNIFTY" else 72000.0)
                 mock_closes = [base + random.uniform(-200, 200) for _ in range(14)]
                 await self.redis_client.set(f"history_14d:{asset}", json.dumps(mock_closes))
+                
+                # [Audit-Fix] Simulation Deadlock: Populate local state to bypass CB/JIT blocking loops
+                self.prev_closes[asset] = mock_closes[-1]
+                self.atr_values[asset] = mock_closes[-1] * 0.01 # Mock ATR: 1% of spot
             self._history_synced = True
             return
 
@@ -507,15 +746,43 @@ class SnapshotManager:
                 end_time = datetime.now().timestamp()
                 start_time = end_time - (20 * 86400) # 20 days buffer
                 
-                ret = await asyncio.to_thread(self.api.get_time_price_series,
+                ret = await self._call_api('get_time_price_series',
                     exchange=idx['exch'], token=idx['token'], 
                     starttime=start_time, endtime=end_time, interval=None
                 )
                 
                 if ret and isinstance(ret, list):
-                    closes = [float(c.get('into', c.get('c', 0))) for c in ret[-14:]]
+                    closes = [float(c.get('intc', c.get('c', 0))) for c in ret]
+                    if closes:
+                        # [Audit-Fix] Store prev_close for CB baseline
+                        self.prev_closes[idx['id']] = closes[-1]
+                        
+                        # [Audit-Fix] Calculate EMA-based 14-day ATR (Wilder's Smoothing)
+                        # ATR_t = (ATR_t-1 * 13 + TR_t) / 14
+                        highs = [float(c.get('inth', c.get('h', 0))) for c in ret]
+                        lows = [float(c.get('intl', c.get('l', 0))) for c in ret]
+                        
+                        tr = [max(h-l, abs(h-prev_c), abs(l-prev_c)) 
+                              for h, l, prev_c in zip(highs[1:], lows[1:], closes[:-1])]
+                        
+                        if len(tr) >= 14:
+                            # Seed with SMA of first 14 TRs
+                            current_atr = sum(tr[:14]) / 14
+                            # Smooth for remaining TRs
+                            for i in range(14, len(tr)):
+                                current_atr = (current_atr * 13 + tr[i]) / 14
+                            atr = current_atr
+                        elif tr:
+                            # Standard SMA fallback if data is short
+                            atr = sum(tr) / len(tr)
+                        else:
+                            atr = closes[-1] * 0.01 # fallback 1%
+                            
+                        self.atr_values[idx['id']] = atr
+                        await self.redis_client.set(f"ATR:{idx['id']}", str(round(atr, 2)))
+
                     await self.redis_client.set(f"history_14d:{idx['id']}", json.dumps(closes))
-                    logger.info(f"✅ History Sync: Stored 14D history for {idx['id']}")
+                    logger.info(f"✅ History Sync: Stored 14D history/ATR for {idx['id']}")
             
         except Exception as e:
             logger.error(f"History fetch failed: {e}")
@@ -532,6 +799,50 @@ class SnapshotManager:
             )
         except Exception as e:
             logger.error(f"Rest login failed: {e}")
+
+    async def _persistent_alpha_snapshots(self):
+        """[Layer 7] Pulse task: Persists global signal state to TimescaleDB every 10s."""
+        logger.info("Alpha Snapshotter active. Monitoring signal pulse...")
+        while True:
+            try:
+                await asyncio.sleep(10.0)
+                if not self.pool: continue
+
+                # Fetch global snapshot from Redis
+                # HeuristicEngine writes to 'MARKET_SIGNAL_SNAPSHOT'
+                raw = await self.redis_client.get("MARKET_SIGNAL_SNAPSHOT")
+                if not raw: continue
+                
+                snapshot = json.loads(raw)
+                timestamp = datetime.now(timezone.utc)
+                
+                async with self.pool.acquire() as conn:
+                    # Prepare batch for mass insert
+                    batch = []
+                    for symbol, data in snapshot.items():
+                        batch.append((
+                            timestamp,
+                            symbol,
+                            float(data.get('price', 0.0)),
+                            float(data.get('s_total', 0.0)),
+                            float(data.get('asto', 0.0)),
+                            int(data.get('regime_s18', 0)),
+                            float(data.get('quality_s27', 0.0))
+                        ))
+                    
+                    if batch:
+                        await conn.executemany(
+                            """
+                            INSERT INTO market_snapshots (time, symbol, price, s_total, asto, regime_s18, quality_s27)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            ON CONFLICT (time, symbol) DO NOTHING
+                            """,
+                            batch
+                        )
+                # logger.debug(f"📸 Alpha Snapshot saved for {len(batch)} assets.")
+            except Exception as e:
+                logger.error(f"Alpha Snapshot error: {e}")
+                await asyncio.sleep(5.0)
 
 if __name__ == "__main__":
     if uvloop: uvloop.install()

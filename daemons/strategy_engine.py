@@ -11,12 +11,13 @@ import sys
 import pandas as pd
 import os
 from redis import asyncio as redis
+import math
 from datetime import datetime, timezone
 from core.logger import setup_logger
 from core.mq import MQManager, Ports, RedisLogger, Topics, NumpyEncoder  # [R2-01] Added NumpyEncoder
 from core.greeks import BlackScholes
 import re
-from core.shared_memory import TickSharedMemory
+from core.shared_memory import TickSharedMemory, SYMBOL_TO_SLOT
 from core.shm import ShmManager, SignalVector, RegimeShm, RegimeVector
 from core.margin import AsyncMarginManager
 
@@ -69,6 +70,10 @@ class BaseStrategy:
     def on_tick(self, symbol: str, data: dict) -> str | list | None:
         """Standard interface for all strategies. data contains price, oi, etc."""
         raise NotImplementedError
+
+    def check_exit(self, symbol: str, data: dict) -> str | list | None:
+        """[Audit-Fix] Alpha-Death Exit: Exits based on math failure, not price stops."""
+        return None
 
     def is_active_now(self):
         """Checks if the strategy should be active based on its schedule."""
@@ -208,6 +213,18 @@ class ElasticHunterStrategy(BaseStrategy):
             return [{"action": action, "symbol": symbol, "parent_uuid": parent_uuid, "lifecycle": "ELASTIC"}]
         return None
 
+    def check_exit(self, symbol: str, data: dict) -> list | None:
+        """Elastic Exit: Kill trade if price touches VWAP (Mean Reversion complete)."""
+        if self.positions.get(symbol, 0) == 0: return None
+        price = data.get("price", 0.0)
+        vwap = data.get("vwap", price)
+        # Check for crossover
+        pos = self.positions[symbol]
+        if (pos > 0 and price >= vwap) or (pos < 0 and price <= vwap):
+            logger.info(f"🎯 ELASTIC EXIT: Price reached Mean (VWAP). Closing {self.strategy_id} for {symbol}.")
+            return [{"action": "SELL" if pos > 0 else "BUY", "symbol": symbol, "lifecycle": "ELASTIC", "reason": "VWAP_TOUCH"}]
+        return None
+
 class KineticHunterStrategy(BaseStrategy):
     """
     S01: Trend Movement Specialist. 
@@ -225,6 +242,20 @@ class KineticHunterStrategy(BaseStrategy):
         
         # Trend check: |ASTO| > 70 and Smart Flow alignment
         if abs(asto) > 70 and abs(smart_flow) > 20:
+            # [Audit-Fix] Power Five Pulse Gate (Lead-Lag Confirmation)
+            # Verify 3/5 top heavyweights are aligned with the index move
+            hw_alphas = data.get("hw_alphas", [])
+            if len(hw_alphas) >= 5:
+                # RELIANCE, HDFCBANK, ICICIBANK, INFY, TCS are indices 0-4
+                power_five = hw_alphas[:5]
+                bullish_count = sum(1 for a in power_five if a > 10) # 10 as minimum alpha pulse
+                bearish_count = sum(1 for a in power_five if a < -10)
+                
+                if asto > 70 and bullish_count < 3:
+                    return None # Fails lead-lag confirmation
+                if asto < -70 and bearish_count < 3:
+                    return None
+            
             # Direction check: All 3 signals must align
             is_bullish = (asto > 70 and smart_flow > 20 and whale_p > 0)
             is_bearish = (asto < -70 and smart_flow < -20 and whale_p < 0)
@@ -233,6 +264,16 @@ class KineticHunterStrategy(BaseStrategy):
                 parent_uuid = f"KINE_{uuid.uuid4().hex[:8]}"
                 action = "BUY" if is_bullish else "SELL"
                 return [{"action": action, "symbol": symbol, "parent_uuid": parent_uuid, "lifecycle": "KINETIC"}]
+        return None
+
+    def check_exit(self, symbol: str, data: dict) -> list | None:
+        """Kinetic Exit: Kill trade if Whale Pivot (S22) flips (Alpha Death)."""
+        if self.positions.get(symbol, 0) == 0: return None
+        pos = self.positions[symbol]
+        whale_p = data.get("whale_pivot", 0.0)
+        if (pos > 0 and whale_p < 0) or (pos < 0 and whale_p > 0):
+            logger.info(f"🏹 KINETIC EXIT: Whale Pivot (S22) flipped. Momentum dead for {symbol}.")
+            return [{"action": "SELL" if pos > 0 else "BUY", "symbol": symbol, "lifecycle": "KINETIC", "reason": "S22_FLIP"}]
         return None
 
 class PositionalHunterStrategy(BaseStrategy):
@@ -601,7 +642,7 @@ async def _calibrate_vol_context(redis_client):
         logger.warning("⚠️ B2 Vol Context: No symbols calibrated (prev_close data missing). Proceeding with defaults.")
  
  
-async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_client, shm_ticks, shm_alpha_managers, shm_regime_managers, hedge_socket):
+async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_client, shm_ticks, shm_alpha_managers, shm_regime_managers, hedge_socket, asset_filter=None):
     """Subscribes to market data and runs strategies using SHM for zero-copy lookups."""
     logger.info("Starting Strategy Engine loop... (v5.5 Quantitative Risk Active)")
     
@@ -623,6 +664,7 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
     
     # Track real-time lot overrides from Meta-Router
     strategy_states = collections.defaultdict(lambda: {"lots": 1, "active": True})
+    last_sequence_ids = collections.defaultdict(int)
     margin_manager = AsyncMarginManager(redis_client)
  
     async def handle_commands():
@@ -677,6 +719,9 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                 last_shm_sync = time.time()
  
             symbol = tick_msg.get("symbol")
+            if asset_filter and symbol != asset_filter:
+                # [Audit-Fix] Multi-Process Isolation: Skip if not the target asset
+                continue
             
             # --- Zero-Copy SHM Access ---
             tick = tick_msg
@@ -685,7 +730,21 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                 if shm_tick: tick = shm_tick  
             
             price = tick.get("price")
+            curr_seq_id = tick.get("sequence_id", 0)
             
+            # --- [Audit-Fix] Sequence Reset Detector ---
+            last_seq_id = last_sequence_ids.get(symbol, 0)
+            if curr_seq_id < last_seq_id:
+                logger.warning(f"🔄 GATEWAY_RESTART detected for {symbol}: Sequence reset ({last_seq_id} -> {curr_seq_id}). Resetting internal trackers.")
+                # Opportunity to reset sensitive indicators if needed
+                last_sequence_ids[symbol] = curr_seq_id
+            elif 0 < curr_seq_id <= last_seq_id:
+                # Potential duplicate or out-of-order packet (if not a reset)
+                # In a high-frequency context, we might skip this to avoid stale signals
+                continue
+            else:
+                last_sequence_ids[symbol] = curr_seq_id
+
             # [Audit-Fix] Refresh Risk Caches & Get SHM Alpha (Per Asset)
             if time.time() - halt_kinetic_last_check > 5:
                 halt_kinetic_val = await redis_client.get("HALT_KINETIC")
@@ -723,16 +782,29 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
             elif "NIFTY" in symbol and "NIFTY50" in shm_regime_managers:
                 regime = shm_regime_managers["NIFTY50"].read()
             
-            s18_state = regime.get("regime_s18", 0) if regime else 0
-            s27_quality = regime.get("quality_s27", 0.0) if regime else 0.0
-            is_toxic = qstate.get("toxic_veto", False) if qstate else False
-            alpha_total = qstate.get("s_total", 0.0) if qstate else 0.0
-            asto_val = qstate.get("asto", 0.0) if qstate else 0.0
-            adx_val = qstate.get("adx", 0.0) if qstate else 0.0
-            vpin_val = qstate.get("vpin", 0.0) if qstate else 0.0
-            iv_rv_val = qstate.get("iv_rv_spread", 0.0) if qstate else 0.0
-            s26_val = regime.get("persistence_s26", 0.0) if regime else 0.0
-            sf_val = qstate.get("smart_flow", 0.0) if qstate else 0.0
+            # [Audit-Fix] Handshake Collision (Object vs Dict)
+            s18_state = regime.regime_s18 if regime else 0
+            s27_quality = regime.quality_s27 if regime else 0.0
+            is_toxic = bool(qstate.veto) if qstate else False # SignalVector uses 'veto' field
+            alpha_total = float(qstate.s_total) if qstate else 0.0
+            asto_val = float(qstate.asto) if qstate else 0.0
+            adx_val = float(qstate.adx) if qstate else 0.0
+            vpin_val = float(qstate.vpin) if qstate else 0.0
+            iv_rv_val = float(qstate.iv_rv_spread) if qstate else 0.0
+            s26_val = float(regime.persistence_s26) if regime else 0.0
+            sf_val = float(qstate.smart_flow) if qstate else 0.0
+            hw_alphas = list(qstate.hw_alpha) if qstate else []
+
+            # --- [Audit-Fix] Phasic Signal Decay (Latency-Weighted Alpha) ---
+            latency_ms = float(tick.get("latency_ms", 0.0))
+            if latency_ms > 50:
+                # Alpha has a half-life. Decay starts after 50ms of lag.
+                # Factor: e^(-0.005 * latency) -> 100ms lag = ~60% alpha retention
+                decay_factor = math.exp(-0.005 * (latency_ms - 50))
+                alpha_total *= decay_factor
+                asto_val *= decay_factor
+                if latency_ms > 200:
+                    logger.warning(f"📉 ALPHA DECAY: {latency_ms:.0f}ms lag detected. Signal force reduced to {decay_factor:.1%} for {symbol}.")
 
             for strategy in list(active_strategies.values()):
                 s_id = strategy.strategy_id
@@ -762,9 +834,16 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                 tick["iv_rv_spread"] = iv_rv_val
                 tick["vpin"] = vpin_val
                 tick["smart_flow"] = sf_val
-                tick["price_zscore"] = qstate.get("high_z", 0.0) if abs(qstate.get("high_z", 0)) > abs(qstate.get("low_z", 0)) else qstate.get("low_z", 0.0)
+                tick["hw_alphas"] = hw_alphas # [Audit-Fix] Passed for Power Five Gate
+                tick["vwap"] = float(await redis_client.get(f"VWAP:{symbol}") or tick.get("price", 0.0)) # For Elastic exit
+                tick["price_zscore"] = qstate.high_z if abs(qstate.high_z) > abs(qstate.low_z) else qstate.low_z
                 
-                signal = strategy.on_tick(symbol, tick)
+                # [Audit-Fix] Alpha-Death Exit Check
+                exit_signal = strategy.check_exit(symbol, tick)
+                if exit_signal:
+                    signal = exit_signal
+                else:
+                    signal = strategy.on_tick(symbol, tick)
 
                 if not signal: continue
                 
@@ -870,6 +949,7 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                         "order_type": "MARKET",
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "price": price,   
+                        "inception_spot": 0.0, # Placeholder
                         "strategy_id": strategy.strategy_id,
                         "execution_type": strategy.execution_type,
                         "lifecycle_class": leg.get("lifecycle", "KINETIC") if isinstance(leg, dict) else "KINETIC",
@@ -885,6 +965,17 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
                             "whale_pivot": tick.get("whale_pivot", 0.0)
                         }
                     }
+                    
+                    # [Audit-Fix] Baseline Spot Injection for Zero-DTE/Liquidation (Layer 6 Audit)
+                    underlying = "NIFTY50"
+                    if "BANKNIFTY" in symbol: underlying = "BANKNIFTY"
+                    elif "SENSEX" in symbol: underlying = "SENSEX"
+                    
+                    if shm_ticks and underlying in SYMBOL_TO_SLOT:
+                        idx_shm = shm_ticks.read_tick(SYMBOL_TO_SLOT[underlying])
+                        if idx_shm:
+                            order["inception_spot"] = float(idx_shm.get("price", 0.0))
+                            logger.info(f"🎯 INCEPTION_SPOT CAPTURED: {underlying} @ {order['inception_spot']}")
                     
                     # Track dispatch time for phantom detection
                     dispatch_meta = order.copy()
@@ -903,6 +994,23 @@ async def run_strategies(sub_socket, push_socket, cmd_socket, mq_manager, redis_
             await asyncio.sleep(0.1)
  
 async def start_engine():
+    import argparse
+    parser = argparse.ArgumentParser(description="Project K.A.R.T.H.I.K. Strategy Engine")
+    parser.add_argument("--asset", type=str, help="Specific index to manage (e.g. NIFTY50)")
+    parser.add_argument("--core", type=int, help="CPU core to bridge (Core Pinning)")
+    parser.add_argument("--shadow", action="store_true", help="Run in shadow mode")
+    args = parser.parse_args()
+
+    # [Audit-Fix] Core Pinning for zero-jitter execution
+    if args.core is not None:
+        try:
+            import psutil
+            p = psutil.Process()
+            p.cpu_affinity([args.core])
+            logger.info(f"🎯 CORE PINNED: Strategy Engine locked to Core {args.core}")
+        except Exception as e:
+            logger.warning(f"⚠️ Core Pinning failed: {e}. psutil might be missing.")
+
     mq = MQManager()
     from core.auth import get_redis_url
     redis_url = get_redis_url()
@@ -910,11 +1018,14 @@ async def start_engine():
     
     # v5.5: Zero-latency Risk & Alpha via SHM (Per Asset) [Audit Fix]
     from core.shm import ShmManager, RegimeShm
+    
+    # [Audit-Fix] Multi-Process Isolation: Only load managers for the target asset
+    target_assets = [args.asset] if args.asset else INDEX_METADATA.keys()
     shm_alpha_managers = {
-        idx: ShmManager(asset_id=idx, mode='r') for idx in INDEX_METADATA.keys()
+        idx: ShmManager(asset_id=idx, mode='r') for idx in target_assets
     }
     shm_regime_managers = {
-        idx: RegimeShm(asset_id=idx, mode='r') for idx in INDEX_METADATA.keys()
+        idx: RegimeShm(asset_id=idx, mode='r') for idx in target_assets
     }
     shm_alpha_managers["GLOBAL"] = ShmManager(asset_id="GLOBAL", mode='r')
     
@@ -948,7 +1059,7 @@ async def start_engine():
  
     # 3. Recommendation 2: Pre-Flight Warmup
     try:
-        await run_strategies(sub_socket, push_socket, cmd_socket, mq, redis_client, shm_ticks, shm_alpha_managers, shm_regime_managers, hedge_socket)
+        await run_strategies(sub_socket, push_socket, cmd_socket, mq, redis_client, shm_ticks, shm_alpha_managers, shm_regime_managers, hedge_socket, asset_filter=args.asset)
     finally:
         config_task.cancel()
         await redis_client.aclose()

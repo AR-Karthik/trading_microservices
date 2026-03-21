@@ -129,6 +129,7 @@ class LiveExecutionEngine:
         strategy_id = execution['strategy_id']
         exec_type = execution.get('execution_type', 'Actual') # We force Actual here
         parent_uuid = execution.get('parent_uuid', 'NONE')
+        inception_spot = float(execution.get('inception_spot', 0.0))
         qty = float(execution['quantity']) if execution['action'] == 'BUY' else -float(execution['quantity'])
         price = float(execution['price'])
         
@@ -144,9 +145,9 @@ class LiveExecutionEngine:
                 INSERT INTO portfolio (
                     symbol, strategy_id, parent_uuid, underlying, lifecycle_class, 
                     expiry_date, quantity, avg_price, initial_credit, short_strikes, 
-                    delta, theta, execution_type, updated_at, has_calendar_risk
+                    delta, theta, inception_spot, execution_type, updated_at, has_calendar_risk
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                 """,
                 symbol, strategy_id, parent_uuid,
                 execution.get('underlying'),
@@ -157,6 +158,7 @@ class LiveExecutionEngine:
                 json.dumps(execution.get('short_strikes', {})),
                 float(execution.get('delta', 0.0)), 
                 float(execution.get('theta', 0.0)),
+                inception_spot,
                 exec_type, execution['time'],
                 execution.get('has_calendar_risk', False)
             )
@@ -183,13 +185,15 @@ class LiveExecutionEngine:
         await conn.execute(
             """
             UPDATE portfolio
-            SET quantity = $1, avg_price = $2, realized_pnl = $3, delta = $4, theta = $5, updated_at = $6
-            WHERE symbol = $7 AND strategy_id = $8 AND execution_type = $9 AND parent_uuid = $10
+            SET quantity = $1, avg_price = $2, realized_pnl = $3, delta = $4, theta = $5, 
+                updated_at = $6, inception_spot = COALESCE(NULLIF($7, 0.0), inception_spot)
+            WHERE symbol = $8 AND strategy_id = $9 AND execution_type = $10 AND parent_uuid = $11
             """,
             new_qty, new_avg_price, realized_pnl, 
             float(execution.get('delta', 0.0)),
             float(execution.get('theta', 0.0)),
-            execution['time'], symbol, strategy_id, exec_type, parent_uuid
+            execution['time'], inception_spot,
+            symbol, strategy_id, exec_type, parent_uuid
         )
         
         # [Audit-Fix] Component 2: Margin/Quarantine Sync for SELL Proceeds (T+1 Cycle)
@@ -229,8 +233,6 @@ class LiveExecutionEngine:
             except Exception as e:
                 logger.error(f"Liveliness error: {e}")
                 await asyncio.sleep(5.0)
-            return True
-        return False
 
     async def execute_live_order(self, order: dict) -> Optional[dict]:
         """Dispatches real network requests to Shoonya routing engine."""
@@ -273,7 +275,10 @@ class LiveExecutionEngine:
                 "fees": float(order.get('fees', 20.0)),
                 "strategy_id": order['strategy_id'],
                 "execution_type": "Actual",
-                "parent_uuid": order.get('parent_uuid', 'NONE')
+                "parent_uuid": order.get('parent_uuid', 'NONE'),
+                "latency_ms": order.get("latency_ms", 0.0),
+                "sequence_id": order.get("sequence_id", 0),
+                "inception_spot": order.get("inception_spot", 0.0)
             }
         
         # [Audit-Fix] Component 1: Regime-Aware Aggressive Nudging for Shoonya 400
@@ -309,7 +314,10 @@ class LiveExecutionEngine:
                     "fees": float(order.get('fees', 20.0)),
                     "strategy_id": order['strategy_id'],
                     "execution_type": "Actual",
-                    "parent_uuid": order.get('parent_uuid', 'NONE')
+                    "parent_uuid": order.get('parent_uuid', 'NONE'),
+                    "latency_ms": order.get("latency_ms", 0.0),
+                    "sequence_id": order.get("sequence_id", 0),
+                    "inception_spot": order.get("inception_spot", 0.0)
                 }
 
         logger.error(f"❌ Live Order Rejected by Broker: {res}")
@@ -394,12 +402,12 @@ class LiveExecutionEngine:
             local coll = tonumber(redis.call('get', coll_key) or '0')
 
             if cash >= amount then
-                redis.call('decrby', cash_key, amount)
+                redis.call('set', cash_key, tostring(cash - amount))
                 return 1
             elseif (cash + coll) >= amount then
                 local from_coll = amount - cash
                 redis.call('set', cash_key, '0')
-                redis.call('decrby', coll_key, from_coll)
+                redis.call('set', coll_key, tostring(coll - from_coll))
                 return 1
             else
                 return 0
@@ -424,16 +432,22 @@ class LiveExecutionEngine:
                 async with conn.transaction():
                     # [R2-10] Include audit_tags matching paper_bridge fix
                     regime_raw = await self.redis.get("hmm_regime") or "UNKNOWN"
-                    audit_tags = json.dumps({"regime": regime_raw, "execution_type": "Actual"})
+                    audit_tags = json.dumps({
+                        "regime": regime_raw, 
+                        "execution_type": "Actual",
+                        "s27": order.get("audit_tags", {}).get("s27", 0.0),
+                        "vpin": order.get("audit_tags", {}).get("vpin", 0.0)
+                    })
                     await conn.execute(
                         """
-                        INSERT INTO trades (id, time, symbol, action, quantity, price, fees, strategy_id, execution_type, audit_tags)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        INSERT INTO trades (id, time, symbol, action, quantity, price, fees, strategy_id, execution_type, audit_tags, latency_ms, sequence_id)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                         """,
                         str(uuid.uuid4()),
                         execution['time'], execution['symbol'], execution['action'],
                         execution['quantity'], execution['price'], execution['fees'], 
-                        execution['strategy_id'], execution['execution_type'], audit_tags
+                        execution['strategy_id'], execution['execution_type'], audit_tags,
+                        execution['latency_ms'], execution['sequence_id']
                     )
                     await self.update_portfolio(conn, execution, execution['fees'])
 
@@ -621,34 +635,96 @@ class LiveExecutionEngine:
         """Phase 13.3: Rapid Liquidation of all Live legs in a basket."""
         if not parent_uuid or parent_uuid == "NONE": return
         
-        logger.critical(f"🚨 LIVE ROLLBACK: Closing all positions for {parent_uuid}")
+        logger.warning(f"🚨 LIVE ROLLBACK triggered for basket {parent_uuid}. Liquidation started.")
         async with self.pool.acquire() as conn:
-            # Query our internal truth for this basket
-            positions = await conn.fetch(
-                "SELECT symbol, quantity FROM portfolio WHERE parent_uuid = $1 AND quantity != 0 AND execution_type = 'Actual'",
+            # 1. Find all legs currently in portfolio for this basket
+            rows = await conn.fetch(
+                "SELECT symbol, quantity, strategy_id, execution_type FROM portfolio WHERE parent_uuid = $1 AND quantity != 0 AND execution_type = 'Actual'",
                 parent_uuid
             )
             
-            for pos in positions:
-                action = "SELL" if pos['quantity'] > 0 else "BUY"
-                qty = abs(pos['quantity'])
-                symbol = pos['symbol']
+            for row in rows:
+                sym = row["symbol"]
+                qty = float(row["quantity"])
+                # To close, we need opposite action
+                action = "SELL" if qty > 0 else "BUY"
+                abs_qty = abs(qty)
                 
-                logger.critical(f"Rollback Fire: {action} {qty} {symbol}")
-                # [Audit 9.3] Identify exchange dynamically
-                rollback_ex = self._get_exchange(symbol)
+                logger.info(f"Rollback: Closing {abs_qty} {sym} to net zero.")
                 
-                # Dispatch market order to broker
+                # Fetch actual market price (best effort)
+                market_price = 0.0
+                try:
+                    state_raw = await self.redis.get(f"latest_market_state:{sym}")
+                    if state_raw:
+                        state = json.loads(state_raw)
+                        market_price = float(state.get("price", 0.0))
+                except Exception: pass
+
+                # Execute Market Order at Broker
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, lambda a=action, s=symbol, q=qty, ex=rollback_ex: self.api.place_order(
-                    buy_or_sell=a[0], product_type='I', exchange=ex, tradingsymbol=s, 
-                    quantity=q, disclosedquantity=0, price_type='MKT', price=0, retention='DAY'
-                ))
-            
-            # Clear them from portfolio
-            await conn.execute("UPDATE portfolio SET quantity = 0, avg_price = 0 WHERE parent_uuid = $1 AND execution_type = 'Actual'", parent_uuid)
-            
-        logger.info(f"✅ Live Rollback complete for {parent_uuid}")
+                exchange = self._get_exchange(sym)
+                try:
+                    res = await loop.run_in_executor(None, lambda a=action, s=sym, q=abs_qty, e=exchange: self.api.place_order(
+                        buy_or_sell=a[0], product_type='I', exchange=e, tradingsymbol=s, 
+                        quantity=q, disclosedquantity=0, price_type='MKT', price=0, retention='DAY'
+                    ))
+                    logger.info(f"Rollback {action} for {sym}: {res}")
+                except Exception as e:
+                    logger.error(f"Rollback order failed for {sym}: {e}")
+
+                # Update DB state regardless (or verify via reconciler)
+                execution = {
+                    "id": str(uuid.uuid4()),
+                    "time": datetime.now(timezone.utc),
+                    "symbol": sym,
+                    "action": action,
+                    "quantity": abs_qty,
+                    "price": market_price,
+                    "fees": 20.0,
+                    "strategy_id": row["strategy_id"],
+                    "execution_type": "Actual",
+                    "parent_uuid": parent_uuid
+                }
+                
+                async with conn.transaction():
+                    await conn.execute(
+                        "INSERT INTO trades (id, time, symbol, action, quantity, price, fees, strategy_id, execution_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                        execution['id'], execution['time'], execution['symbol'], execution['action'],
+                        execution['quantity'], execution['price'], execution['fees'], execution['strategy_id'], execution['execution_type']
+                    )
+                    await self.update_portfolio(conn, execution, 20.0)
+        
+        logger.info(f"✅ Live Rollback complete for {parent_uuid}. Portfolio flushed.")
+
+    async def rejection_listener(self):
+        """[Layer 7] Listens for REJECTION_EVENT pulses from MetaRouter."""
+        sub = self.mq.create_subscriber(Ports.TRADE_EVENTS, topics=["REJECTION."])
+        logger.info("Live Rejection listener active. Journaling vetoed trades...")
+        while True:
+            try:
+                topic, event = await self.mq.recv_json(sub)
+                if not event: continue
+                
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO rejections (time, asset, strategy_id, reason, alpha, vpin)
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        """,
+                        datetime.fromisoformat(event['time']).astimezone(timezone.utc),
+                        event['asset'],
+                        event['strategy_id'],
+                        event['reason'],
+                        float(event.get('alpha', 0.0)),
+                        float(event.get('vpin', 0.0))
+                    )
+                logger.warning(f"📒 LIVE REJECTION JOURNALED: {event['asset']} | {event['reason']}")
+            except zmq.Again:
+                continue
+            except Exception as e:
+                logger.error(f"Rejection listener error: {e}")
+                await asyncio.sleep(1)
 
     async def cmd_listener(self):
         """Listens for systemic commands including Rollbacks via SYSTEM_CMD."""
@@ -701,6 +777,7 @@ async def main():
                 engine.run(pull_socket),
                 engine.panic_listener(),
                 engine.cmd_listener(),       # Phase 13.3
+                engine.rejection_listener(),   # [Layer 7]
                 engine._publish_liveliness(), # [Audit-Fix] Component 5
                 _run_heartbeat(redis_client), # Phase 9: UI & Observability
             )

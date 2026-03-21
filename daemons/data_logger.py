@@ -156,6 +156,7 @@ class DataLogger:
                         logger.info(f"FLUSHED {len(data_to_insert)} records to market_history.")
             except Exception as e:
                 logger.error(f"Failed to flush batch: {e}")
+                raise e
 
 if __name__ == "__main__":
     if sys.platform == "win32":

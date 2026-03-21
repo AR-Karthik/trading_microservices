@@ -308,9 +308,7 @@ class LiquidationDaemon:
         while True:
             try:
                 topic, tick = await self.mq.recv_json(market_sub)
-            except zmq.Again:
-                await asyncio.sleep(0.01)
-                continue
+                
                 if topic and tick and self.orphaned_positions:
                     incoming_symbol = str(topic).split(".")[-1]
                     
@@ -342,6 +340,9 @@ class LiquidationDaemon:
                             if incoming_symbol in pos_symbol: # Simple prefix match
                                 await self._evaluate_barriers(pos_symbol, tick, latest_state, is_index_tick=True)
 
+            except zmq.Again:
+                await asyncio.sleep(0.01)
+                continue
             except Exception as e:
                 logger.error(f"Market monitor error: {e}")
                 await asyncio.sleep(0.5)
@@ -823,38 +824,44 @@ class LiquidationDaemon:
         """
         if is_index_tick:
             # 2. Underlying Move Stop (0.5% from inception)
-            price = float(tick.get("price", 0.0))
-            inception_spot = float(pos.get("inception_spot", entry))
+            idx_price = float(tick.get("price", 0.0))
+            # [Audit-Fix] [Inception Ghost] NEVER fallback to premium-based 'entry' for spot comparison
+            inception_spot = float(pos.get("inception_spot", 0.0))
+            
             if inception_spot > 0:
-                move_pct = abs(price - inception_spot) / inception_spot * 100
+                move_pct = abs(idx_price - inception_spot) / inception_spot * 100
                 if move_pct > 0.5:
                     exit_reason = f"ZERO_DTE_STOP: Spot moved {move_pct:.2f}% > 0.5% from inception"
-                    await self._record_barrier_exit(symbol, "ZERO_DTE_STOP", exit_reason, price, entry)
-                    await self._attempt_exit(pos, symbol, price, exit_reason)
+                    await self._record_barrier_exit(symbol, "ZERO_DTE_STOP", exit_reason, idx_price, inception_spot)
+                    await self._attempt_exit(pos, symbol, idx_price, exit_reason)
                     return
+            else:
+                # [Audit-Fix] If baseline is missing, we wait for the Strategy Engine update to propagate
+                # We log at debug level to avoid spamming while older trades bleed out
+                if int(time.time()) % 10 == 0:
+                    logger.debug(f"⚠️ ZERO_DTE: Missing inception_spot baseline for {symbol}. Skipping move-barrier.")
             return
 
-        # Price-based barriers on the symbol itself
-        price = float(tick.get("price", 0.0))
-        entry = float(pos.get("price", 0.0))
-        inception_spot = float(pos.get("inception_spot", entry))
+        # Price-based barriers on the symbol itself (The Option Premium)
+        prem_price = float(tick.get("price", 0.0))
+        # For premium-based barriers, the 'entry' premium is the correct baseline
+        prem_entry = float(pos.get("price", 0.0))
         
         # 1. Credit-based Take Profit (50%)
         initial_credit = float(pos.get("initial_credit", 0.0))
         if initial_credit > 0:
-            current_value = price
-            if current_value / initial_credit <= 0.50:  # 50% decayed = 50% profit
-                exit_reason = f"ZERO_DTE_TP: Value {current_value:.2f} <= 50% of credit {initial_credit:.2f}"
-                await self._record_barrier_exit(symbol, "ZERO_DTE_TP", exit_reason, price, entry)
-                await self._attempt_exit(pos, symbol, price, exit_reason)
+            if prem_price / initial_credit <= 0.50:  # 50% decayed = 50% profit
+                exit_reason = f"ZERO_DTE_TP: Value {prem_price:.2f} <= 50% of credit {initial_credit:.2f}"
+                await self._record_barrier_exit(symbol, "ZERO_DTE_TP", exit_reason, prem_price, prem_entry)
+                await self._attempt_exit(pos, symbol, prem_price, exit_reason)
                 return
 
         # 3. Fallback to kinetic barriers for time-based stall
         elapsed = time.time() - pos.get("entry_time", time.time())
         if elapsed > 300:  # 5 min stall for 0DTE
             exit_reason = f"ZERO_DTE_STALL: {elapsed:.0f}s > 300s"
-            await self._record_barrier_exit(symbol, "ZERO_DTE_STALL", exit_reason, price, entry)
-            await self._attempt_exit(pos, symbol, price, exit_reason)
+            await self._record_barrier_exit(symbol, "ZERO_DTE_STALL", exit_reason, prem_price, prem_entry)
+            await self._attempt_exit(pos, symbol, prem_price, exit_reason)
 
     async def _execute_hedge_waterfall(self, pos: dict, delta: float, rv: float):
         """Hedge Waterfall Protocol (Spec 11.4)"""

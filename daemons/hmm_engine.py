@@ -68,8 +68,10 @@ class HeuristicEngine:
         self.iv_val = 0.15       # Implied Volatility of At-The-Money Strikes
         self.vpin_val = 0.0      # Order Flow Toxicity volume indicator
         self.ofi_z = 0.0         # Order Flow Imbalance
+        self.day_high = 0.0      # [Layer 3] Intraday High
+        self.day_low = 0.0       # [Layer 3] Intraday Low
         self.stale_override = False  # Failsafe threshold flag for stale data
-        self.last_regime_ts = 0.0    # Time-gate to prevent regime oscillation flutter
+        self.current_regime_int = 0  # 0:NEUTRAL, 1:TRENDING, 2:RANGING, 3:VOLATILE
         
         # Performance Synthesis
         self.regime_history = deque(maxlen=100) # For persistence calculation
@@ -93,15 +95,21 @@ class HeuristicEngine:
             # 1. Primary: Constant ingestion from SignalVector SHM
             sig = self.shm_signals.read()
             if sig:
-                self.rv_val = float(sig.get("rv", self.rv_val))
-                self.adx_val = float(sig.get("adx", self.adx_val))
-                self.vpin_val = float(sig.get("vpin", self.vpin_val))
-                self.last_pcr = float(sig.get("pcr", self.last_pcr))
-                self.pcr_roc = float(sig.get("pcr_roc", 0.0))
-                self.ofi_z = float(sig.get("ofi_zscore", 0.0))
-                self.iv_rv_spread = float(sig.get("iv_rv_spread", 0.0))
-                self.iv_val = float(sig.get("iv_atm", 0.18))
-                self.stale_override = sig.get("stale_flag", False)
+                # 1. Pull from SignalVector object attributes (Not .get())
+                self.rv_val = float(sig.rv)
+                self.adx_val = float(sig.adx)
+                self.vpin_val = float(sig.vpin)
+                self.last_pcr = float(sig.pcr)
+                self.pcr_roc = float(sig.pcr_roc)
+                self.ofi_z = float(sig.ofi_z)
+                self.iv_rv_spread = float(sig.iv_rv_spread)
+                self.iv_val = float(sig.iv_atm)
+                
+                # 2. Sync raw peaks for ADX (Use day_high/low, NOT high_z)
+                self.day_high = float(sig.day_high) 
+                self.day_low = float(sig.day_low)   
+                
+                self.stale_override = bool(sig.stale_flag)
                 return # Successful SHM read - no need for Redis poll
             
             # 2. Fallback: Standardize parameters from Redis if SHM stall detected
@@ -111,7 +119,14 @@ class HeuristicEngine:
                 self.history_14d = json.loads(history_raw)
                 rv_closes = self.history_14d[-11:] if len(self.history_14d) >= 11 else self.history_14d
                 self.rv_val = self._calculate_realized_vol(rv_closes)
-                self.adx_val = self._calculate_adx_approximation(self.history_14d)
+                
+                # Fetch Intraday wicks for high-fidelity ADX
+                h_raw = await self.r.get(f"DAY_HIGH:{self.asset_id}")
+                l_raw = await self.r.get(f"DAY_LOW:{self.asset_id}")
+                self.day_high = float(h_raw) if h_raw else self.history_14d[-1]
+                self.day_low = float(l_raw) if l_raw else self.history_14d[-1]
+                
+                self.adx_val = self._calculate_adx_approximation(self.history_14d, self.day_high, self.day_low)
             
             pcr_raw = await self.r.get(f"live_pcr:{self.asset_id}")
             if pcr_raw: self.last_pcr = float(pcr_raw)
@@ -132,46 +147,68 @@ class HeuristicEngine:
         rv = np.std(log_returns) * np.sqrt(252)
         return float(rv)
 
-    def _calculate_adx_approximation(self, closes: list[float]) -> float:
-        """Simplified 14-day Trend Strength approximation."""
-        if len(closes) < 14: return 20.0 # Default weak trend
+    def _calculate_adx_approximation(self, closes: list[float], intraday_high: float, intraday_low: float) -> float:
+        """[Layer 3] High-Fidelity Trend Strength using Intraday Wicks."""
+        if len(closes) < 14: return 20.0
         
-        # Simple high-low range trend strength
-        highs = np.array(closes) # In this model we only have closes
-        lows = np.array(closes)
+        # Build O/H/L/C proxy for the trend window
+        # We use closes for history, but use the provided wicks for the current 'candle'
+        c_arr = np.array(closes)
+        h_arr = np.array(closes) # Default history high to close
+        l_arr = np.array(closes) # Default history low to close
         
-        # Real ADX requires H/L/C, but with just Daily Closes we use absolute momentum
-        diffs = np.diff(closes)
-        ups = np.sum(diffs[diffs > 0])
-        downs = np.abs(np.sum(diffs[diffs < 0]))
+        # Inject intraday wicks into the final element
+        h_arr[-1] = max(h_arr[-1], intraday_high)
+        l_arr[-1] = min(l_arr[-1], intraday_low)
         
-        if (ups + downs) < 1e-9: return 0.0  # [C1-06] Epsilon division guard
-        adx = (abs(ups - downs) / (ups + downs)) * 100
-        return float(adx)
+        up_move = h_arr[1:] - h_arr[:-1]
+        down_move = l_arr[:-1] - l_arr[1:]
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        # True Range approximation
+        tr = np.maximum(h_arr[1:] - l_arr[1:], 
+                        np.maximum(np.abs(h_arr[1:] - c_arr[:-1]), 
+                                   np.abs(l_arr[1:] - c_arr[:-1])))
+        
+        tr_sum = np.sum(tr[-14:])
+        if tr_sum < 1e-9: return 0.0
+        
+        plus_di = 100 * (np.sum(plus_dm[-14:]) / tr_sum)
+        minus_di = 100 * (np.sum(minus_dm[-14:]) / tr_sum)
+        
+        div = plus_di + minus_di
+        dx = 100 * (np.abs(plus_di - minus_di) / div) if div > 0 else 0
+        return float(dx)
 
     def classify_regime(self) -> int:
         """
-        [Audit-Fix] Precision Priority Cascade (Deterministic Verdict)
-        Returns:
-            0 (NEUTRAL), 1 (TRENDING), 2 (RANGING), 3 (VOLATILE)
+        [Layer 3 Audit] State-Based Hysteresis Cascade.
+        Prevents flickering by using adaptive entry/exit thresholds.
         """
-        # [C1-05] Block on stale feed or high toxicity
-        if self.stale_override:
+        curr = self.current_regime_int
+        
+        # [C1-05] Block on stale feed or high toxicity (Safety overrides everything)
+        if self.stale_override or self.vpin_val > 0.8 or self.rv_val > 0.50:
             return 3 # VOLATILE/SAFETY_HALT
 
-        # Gate 1: Safety (VPIN/RV)
-        if self.vpin_val > 0.8 or self.rv_val > 0.50:
-            return 3 # VOLATILE
+        # --- TRENDING (Regime 1) ---
+        # Enter if ADX > 25, Stay until ADX < 20
+        if curr == 1:
+            if self.adx_val > 20: return 1
+        else:
+            if self.adx_val > 25: return 1
 
-        # Gate 2: Trend (ADX)
-        if self.adx_val > 25:
-            return 1 # TRENDING
+        # --- RANGING (Regime 2) ---
+        # Enter if IV-RV edge exists and ADX is low
+        # Stay until edge disappears or Trend takes over
+        if curr == 2:
+            if self.iv_rv_spread > 0.01 and self.adx_val < 22: return 2
+        else:
+            if self.iv_rv_spread > 0.03 and self.adx_val < 20: return 2
 
-        # Gate 3: Edge (IV-RV Spread) - 3.0 percentage points
-        if self.iv_rv_spread > 0.03 and self.adx_val < 20:
-            return 2 # RANGING
-
-        # Gate 4: Default
+        # --- DEFAULT (Regime 0) ---
         return 0 # NEUTRAL
 
     async def run(self):
@@ -198,20 +235,25 @@ class HeuristicEngine:
                     await self._fetch_parameters()
                     param_sync_tick = 0
 
-                # [C1-04] Time-gate regime updates to every 5 seconds
-                now_ts = time.time()
-                if (now_ts - self.last_regime_ts) < 5.0:
-                    continue
-                self.last_regime_ts = now_ts
-
-                # Determine deterministic regime integer
+                # Determine deterministic regime integer with hysteresis
                 s18_val = self.classify_regime()
+                self.current_regime_int = s18_val
                 self.regime_history.append(s18_val)
                 
                 # S26: Persistence (% of recent history in this state)
                 s26_val = (list(self.regime_history).count(s18_val) / len(self.regime_history)) * 100.0
-                # S27: Quality (Confidence based on ADX strength)
-                s27_val = min(100.0, (self.adx_val / 50.0) * 100.0)
+                
+                # S27: Multi-Factor Quality (Confidence Depth)
+                if s18_val == 1: # TRENDING
+                    s27_val = min(100.0, (self.adx_val / 50.0) * 100.0)
+                elif s18_val == 2: # RANGING
+                    # High quality range = Low RV relative to historical norm (proxy 0.15)
+                    s27_val = min(100.0, (0.15 / max(0.01, self.rv_val)) * 100.0)
+                elif s18_val == 3: # VOLATILE
+                    # Toxicity certainty based on VPIN height
+                    s27_val = min(100.0, self.vpin_val * 100.0)
+                else: # NEUTRAL
+                    s27_val = 50.0
                 
                 # Map to legacy strings for dashboard/paper compat
                 regime_map = {0: "NEUTRAL", 1: "TRENDING", 2: "RANGING", 3: "VOLATILE"}

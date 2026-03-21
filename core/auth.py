@@ -33,3 +33,5 @@ def get_db_config():
         "database": os.getenv("DB_NAME", "trading_db"),
         "port": 5432
     }
+
+HEDGE_RESERVE_PCT = 0.15 # [Parity] 15% margin reserve for hedge legs

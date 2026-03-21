@@ -15,6 +15,7 @@ ATR_SL_MULTIPLIER          = 1.0     # Mirrors liquidation_daemon constant for s
 DEFAULT_HURST_THRESHOLD    = 0.55
 DEFAULT_HYBRID_CONFIDENCE  = 0.70
 DEFAULT_VPIN_TOXICITY      = 0.82
+LATENCY_MS_THRESHOLD       = 500.0 # [Advisory 1] Reduce size if lag > 500ms
 HEDGE_RESERVE_PCT          = 0.15  # [C2-01] 15% of capital reserved for hedging
 
 # [Audit-Fix] LUA Script for atomic margin reservation
@@ -36,7 +37,6 @@ import logging
 import os
 import sys
 import uuid
-import time
 import re
 from datetime import datetime, timezone
 
@@ -120,18 +120,29 @@ class BaseStrategyLogic:
             unit_size = max_risk / (atr * ATR_SL_MULTIPLIER)
 
             # ── Step B: Kelly Multiplier ──────────────────────────────────────
-            b = 1.5
+            # [Audit-Fix] Dynamic Kelly b-Ratio (Payout-aware)
+            # Strategy Engines can pass 'expected_payoff' in regime_context
+            b = float(regime_context.get("expected_payoff", 1.5))
             kelly_f = p - ((1.0 - p) / b)
             half_kelly = max(0.01, 0.5 * kelly_f)
 
             # [Audit-Fix] S27 Quality Integration (The "Fortress" final lot calculation)
             s27_quality = float(regime_context.get("s27_quality", 100.0)) / 100.0
-            final_lots: float = round(float(unit_size * half_kelly * s27_quality), 4)
+
+            # [Advisory 1] Latency Veto/Reduction
+            latency_ms = float(state.get("latency_ms", 0.0))
+            latency_multiplier = 1.0
+            if latency_ms > LATENCY_MS_THRESHOLD:
+                latency_multiplier = 0.5
+                logger.warning(f"⚠️ LATENCY RISK: {latency_ms:.0f}ms @ {self.asset_id}. Reducing size to 50%.")
+
+            final_lots: float = round(float(unit_size * half_kelly * s27_quality * latency_multiplier), 4)
 
             return {
                 "asset": self.asset_id,
                 "regime": r_type,
                 "lots": final_lots,         # ATR-normalized lot count
+                "latency_ms": latency_ms,   # [Parity] Propagate for UI
                 "weight": float(half_kelly), # Raw Half-Kelly fraction (used by heat constraint)
                 "unit_size": float(unit_size),
                 "atr_used": float(atr),
@@ -198,6 +209,8 @@ class MetaRouter:
         if not test_mode:
             # [Audit 2.1] MetaRouter is the primary binder for SYSTEM_CMD (PUB)
             self.cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD, bind=True)
+            # [Layer 7] Observation Journal Publisher
+            self.trade_pub = self.mq.create_publisher(Ports.TRADE_EVENTS)
             # [Audit 3.3] Event-Driven: Subscribe to Market State directly to bypass Redis lag
             self.state_sub = self.mq.create_subscriber(Ports.MARKET_STATE, topics=["STATE."])
             from core.auth import get_redis_url
@@ -251,6 +264,7 @@ class MetaRouter:
         
         # [Audit-Fix] Position Ceiling Tracker
         self.parent_tracker = {} # asset -> set of active parent_uuids
+        self.last_rejection_ts = {} # [Layer 7] Internal Rejection cache to prevent spamming
     
     async def _sync_settings(self):
         """Syncs engine mode and parameters from Redis (upstream Firestore)."""
@@ -310,8 +324,8 @@ class MetaRouter:
             bank_price = float(market_state.get("BANKNIFTY", {}).get("price", 0) or 0)
             if nifty_price > 0 and bank_price > 0:
                 # Compute daily returns divergence (simplified as price-level ratio deviation)
-                nifty_ret = float(market_state.get("NIFTY50", {}).get("daily_return_pct", 0) or 0)
-                bank_ret = float(market_state.get("BANKNIFTY", {}).get("daily_return_pct", 0) or 0)
+                nifty_ret = float(await self._redis.get("change_pct:NIFTY50") or 0.0)
+                bank_ret = float(await self._redis.get("change_pct:BANKNIFTY") or 0.0)
                 if abs(nifty_ret - bank_ret) > 2.0:
                     logger.warning(f"PRICE DIVERGENCE VETO: NIFTY={nifty_ret:.1f}% vs BANK={bank_ret:.1f}%")
                     return True
@@ -422,36 +436,45 @@ class MetaRouter:
             current_regime = ctx.get("regime", "WAITING")
             if allowed_regimes and current_regime not in allowed_regimes:
                 logger.info(f"REGIME_LOCK: {strat_id} blocked in {current_regime} (allowed: {allowed_regimes})")
+                await self._log_rejection(asset, strat_id, f"REGIME_LOCK:{current_regime}", state.get("s_total", 0.0))
                 active_dec["lots"] = 0
 
             # [C2-02] VPIN Toxicity Veto for POSITIONAL entries
             vpin_val = float(state.get("vpin", 0.0))
             if vpin_val > self.vpin_toxicity and active_dec.get("lifecycle_class") == "POSITIONAL":
                 logger.warning(f"🛑 VPIN VETO: {vpin_val:.2f} > {self.vpin_toxicity}. Blocking POSITIONAL for {asset}.")
+                await self._log_rejection(asset, strat_id, "VPIN_TOXICITY", state.get("s_total", 0.0))
                 active_dec["lots"] = 0
 
             # [V-02] Low Vol Trap Veto: block POSITIONAL if IV < 12%
-            iv_val = float(await self._redis.get(f"LIVE_IV:{asset}") or 0.15) if self._redis else 0.15
+            iv_val = float(await self._redis.get(f"iv_atm:{asset}") or 0.15) if self._redis else 0.15
             if iv_val < 0.12 and active_dec.get("lifecycle_class") == "POSITIONAL":
                 logger.warning(f"🛑 LOW_VOL_TRAP: IV {iv_val:.2%} < 12%. Blocking POSITIONAL for {asset}.")
+                await self._log_rejection(asset, strat_id, "IV_LOW_VOL_TRAP", state.get("s_total", 0.0))
                 active_dec["lots"] = 0
 
             # [C2-07] ASTO Shield Veto: block Iron Condor entry if |ASTO| > 60
             asto_val = float(state.get("asto", 0.0))
             if abs(asto_val) > 60 and active_dec.get("lifecycle_class") == "POSITIONAL":
                 logger.warning(f"🛡️ ASTO SHIELD VETO: |{asto_val:.1f}| > 60. Blocking POSITIONAL entry for {asset}.")
+                await self._log_rejection(asset, strat_id, "ASTO_SHIELD_VETO", state.get("s_total", 0.0))
                 active_dec["lots"] = 0
 
             # [Audit-Fix 2.0] State 3 (Volatile) Nuclear Option
             current_s18 = int(ctx.get("s18_int", 0))
             if current_s18 == 3:
                 logger.critical(f"🚨 HMM STATE 3 (VOLATILE) DETECTED for {asset}: Fortress lockdown. Zeroing all new entry lots.")
+                await self._log_rejection(asset, strat_id, "HMM_STATE_3_LOCKDOWN", state.get("s_total", 0.0))
                 active_dec["lots"] = 0
+                # [Audit-Fix] Signal Liquidation Daemon to tighten trailing stops
+                await self._redis.set(f"SIGNAL:FORCE_TIGHTEN:{asset}", "True", ex=300) # 5m veto
+                asyncio.create_task(send_cloud_alert(f"🚨 STATE 3 VETO: Tightening trailing stops for {asset}.", alert_type="CRITICAL"))
 
             # [Audit-Fix] Tasty 0DTE Edge Gate (S12)
             iv_rv_spread = float(state.get("iv_rv_spread", 0.0))
             if active_dec.get("lifecycle_class") == "ZERO_DTE" and iv_rv_spread < 0.05:
                 logger.warning(f"📉 TASTY VETO: {asset} 0DTE requested but IV-RV spread ({iv_rv_spread:.2%}) < 5% trigger.")
+                await self._log_rejection(asset, strat_id, "TASTY_IV_RV_VETO", state.get("s_total", 0.0))
                 active_dec["lots"] = 0
 
             # [Audit-Fix] Position Ceiling: Cap max concurrent parent_uuids to 5 per index
@@ -460,6 +483,7 @@ class MetaRouter:
                 # Periodic cleanup of tracker (simple TTL logic)
                 if len(self.parent_tracker[asset]) >= 5:
                     logger.warning(f"🛡️ POSITION CEILING: {asset} already has {len(self.parent_tracker[asset])} active parents. Blocking new entry.")
+                    await self._log_rejection(asset, strat_id, "POSITION_CEILING", state.get("s_total", 0.0))
                     active_dec["lots"] = 0
                 else:
                     self.parent_tracker[asset].add(active_dec["parent_uuid"])
@@ -511,6 +535,8 @@ class MetaRouter:
         total_margin_required = sum(cmd.get("lots", 0) * 100000 for cmd in all_commands) # Approx margin
         if self.cash_component < (total_margin_required * 0.5):
             logger.critical(f"🛑 REGULATORY VETO: Cash {self.cash_component} < 50% of Margin {total_margin_required}")
+            for cmd in all_commands:
+                await self._log_rejection(cmd['asset'], cmd.get('strategy_id'), "REGULATORY_CASH_VETO", 0.0)
             all_commands = [] # Block all new entries
             asyncio.create_task(send_cloud_alert("🛑 SEBI VETO: Cash-to-Collateral Ratio Breach.", alert_type="CRITICAL"))
 
@@ -537,6 +563,7 @@ class MetaRouter:
                     # Normalized ATR < 0.15 is considered 'Dead Air'
                     if cmd.get("atr", 1.0) < 0.15:
                         logger.warning(f"⚠️ LOW_VOL_TRAP: {cmd['asset']} ATR < 0.15. Vetoing new size.")
+                        await self._log_rejection(cmd['asset'], cmd.get('strategy_id'), "ATR_LOW_VOL_VETO", cmd.get("s_total", 0.0))
                         cmd["lots"] = 0
 
             # 2. VIX Spike Veto (> 15% 5m expansion)
@@ -545,7 +572,8 @@ class MetaRouter:
             if vix_spike == "True":
                 logger.critical("🚨 VIX_SPIKE_VETO: Rapid volatility expansion pulse. Freezing all entries.")
                 for cmd in all_commands:
-                    if isinstance(cmd, dict):
+                    if isinstance(cmd, dict) and cmd.get("lots", 0) > 0:
+                        await self._log_rejection(cmd['asset'], cmd.get('strategy_id'), "VIX_SPIKE_VETO", 0.0)
                         cmd["lots"] = 0
 
             # 3. Macro Event Lockdown (Global Guard)
@@ -553,7 +581,8 @@ class MetaRouter:
             if macro_lockdown == "True":
                 logger.warning("🔒 MACRO_EVENT_LOCKDOWN: Global freeze active via SysAdmin.")
                 for cmd in all_commands:
-                    if isinstance(cmd, dict):
+                    if isinstance(cmd, dict) and cmd.get("lots", 0) > 0:
+                        await self._log_rejection(cmd['asset'], cmd.get('strategy_id'), "MACRO_LOCKDOWN_VETO", 0.0)
                         cmd["lots"] = 0
 
             # ── A1: Global Portfolio Heat Constraint ───────────────────────────
@@ -562,10 +591,16 @@ class MetaRouter:
             if total_heat > self.heat_limit and total_heat > 0:
                 scale = self.heat_limit / total_heat
                 all_commands = [
-                    {**cmd, "weight": round(cmd.get("weight", 0) * scale, 4)}
+                    {**cmd, 
+                     "weight": round(cmd.get("weight", 0) * scale, 4),
+                     "lots": round(cmd.get("lots", 0) * scale, 4)} # [Audit-Fix] Scale ACTUAL LOTS
                     if isinstance(cmd, dict) else cmd
                     for cmd in all_commands
                 ]
+                for cmd in all_commands:
+                    if isinstance(cmd, dict) and cmd.get("lots", 0) > 0:
+                        await self._log_rejection(cmd['asset'], cmd.get('strategy_id'), f"HEAT_CAP_SCALED:{scale:.2f}", cmd.get("s_total", 0.0))
+                
                 logger.warning(
                     f"🔥 PORTFOLIO HEAT CAP: total_f={total_heat:.3f} > limit={self.heat_limit:.3f}. "
                     f"Scaling all weights by {scale:.3f}."
@@ -605,20 +640,24 @@ class MetaRouter:
                 # [Audit-Fix] Pre-Flight Margin Reservation via LUA
                 if cmd.get("lots", 0) > 0:
                     asset = cmd["asset"]
-                    # Approximate margin: 1.25L per lot
-                    margin_per_lot = 125000.0
+                    
+                    # [Audit-Fix] Volatility-Adjusted Margin Proxy (Base * (1 + VIX))
+                    # Fallback to 1.25L Base if IV unavailable
+                    iv_atm = float(market_state.get(asset, {}).get("iv_atm", 0.18))
+                    margin_per_lot = 125000.0 * (1.0 + iv_atm)
+                    
                     total_req = cmd["lots"] * margin_per_lot
                     
-                    # Try to reserve from CASH_COMPONENT_LIVE
+                    # Try to reserve from CASH_COMPONENT_LIVE (Standard String Key)
                     # Note: LUA script returns 1 for success, 0 for fail
                     reserved = await self._lua_reserve(keys=["CASH_COMPONENT_LIVE"], args=[str(total_req)])
                     
                     if not reserved:
-                        logger.error(f"🛑 ATOMIC MARGIN REJECTION: Insufficient cash for {asset} ({cmd['lots']} lots).")
+                        logger.error(f"🛑 ATOMIC MARGIN REJECTION: Insufficient cash for {asset} ({cmd['lots']} lots @ ₹{margin_per_lot:.0f} margin).")
                         cmd["lots"] = 0
                         continue
                     else:
-                        logger.info(f"✅ MARGIN RESERVED: ₹{total_req:.2f} allocated for {asset}.")
+                        logger.info(f"✅ MARGIN RESERVED: ₹{total_req:.2f} allocated for {asset} (VIX-Adj Margin: ₹{margin_per_lot:.0f}).")
 
                 # [R2-04] Fixed: send_json signature is (socket, topic, data)
                 await self.mq.send_json(self.cmd_pub, cmd["asset"], cmd)
@@ -898,6 +937,30 @@ class MetaRouter:
             except Exception as e:
                 logger.error(f"Router Exception: {e}")
                 await asyncio.sleep(1)
+
+    async def _log_rejection(self, asset, strategy_id, reason, alpha):
+        """[Layer 7] Dispatches REJECTION_EVENT to Bridge for journaling."""
+        if self.test_mode:
+            return 
+            
+        # Throttling rejections to 1 per 5s per asset/reason to avoid DB flood
+        key = f"{asset}:{reason}"
+        if time.time() - self.last_rejection_ts.get(key, 0) < 5:
+            return
+        self.last_rejection_ts[key] = time.time()
+
+        payload = {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "asset": asset,
+            "strategy_id": strategy_id,
+            "reason": reason,
+            "alpha": float(alpha or 0.0),
+            "vpin": float(await self._redis.get(f"vpin:{asset}") or 0.0),
+            "latency_ms": float(await self._redis.get(f"latency:{asset}") or 0.0)
+        }
+        # Publish to Ports.TRADE_EVENTS with REJECTION. topic
+        await self.mq.send_json(self.trade_pub, f"REJECTION.{asset}", payload)
+        logger.debug(f"📤 REJECTION PULSE: {asset} | {reason}")
 
 if __name__ == "__main__":
     if uvloop:

@@ -394,9 +394,18 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         result["hurst"] = snapshot.get("hurst_val", 0.5) # Hurst is slow, calculated in main
         result["kaufman_er"] = calculate_kaufman_er(prices, snapshot.get("er_window", 10))
         
-        # ADX requires H/L/C - if not provided, we proxy with close-only simplified version
-        # In this TBT stream, we treat each tick as C, and simulate H/L if needed
-        result["adx"] = calculate_adx(prices, prices*1.001, prices*0.999, 14) 
+        # ADX requires H/L/C
+        # [Audit Layer 3] Use Session High/Low + Day High/Low for high-fidelity trend strength
+        s_high = snapshot.get("session_high", spot)
+        s_low = snapshot.get("session_low", spot)
+        d_high = snapshot.get("day_high", s_high)
+        d_low = snapshot.get("day_low", s_low)
+
+        # Build local context high/low/close for ADX (Simplified 14-tick context)
+        # We use the prices_series but inject the latest high-fidelity wicks at the end
+        h_arr = np.concatenate([prices[:-1], [max(prices[-1], s_high, d_high)]])
+        l_arr = np.concatenate([prices[:-1], [min(prices[-1], s_low, d_low)]])
+        result["adx"] = calculate_adx(h_arr, l_arr, prices, 14) 
 
         # ── Smart Flow (Composite CMF + MFI) ──────────────────────────────
         vols = np.array(snapshot.get("vol_series", [1.0] * len(prices)))
@@ -459,17 +468,18 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         else:
             z_vol = 0.0
             
-        # Get High/Low from price series in snapshot for precise ASTO
-        prices = np.array(snapshot.get("price_series", [spot]))
-        # We use the most recent 10 ticks (ATR-10 context) to find local H/L
-        window_prices = prices[-10:] if len(prices) >= 10 else prices
-        curr_high = float(np.max(window_prices))
-        curr_low = float(np.min(window_prices))
+        # [Audit Layer 3] Use Session High/Low for zero-latency ASTO bands
+        curr_high = snapshot.get("session_high", spot)
+        curr_low = snapshot.get("session_low", spot)
 
         asto_raw, asto_regime, m_adaptive = engine.compute(curr_high, curr_low, spot, z_vol)
         result["asto"] = float(asto_raw)
         result["asto_regime"] = int(asto_regime)
         result["asto_multiplier"] = float(m_adaptive)
+        
+        # [Layer 3 Wick Mapping] Export raw wicks
+        result["day_high"] = float(d_high)
+        result["day_low"] = float(d_low)
 
 
         return result
@@ -604,6 +614,10 @@ class MarketSensor:
             sym: collections.deque(maxlen=900) for sym in all_assets
         }
 
+        # [Audit Layer 3] Session-derived wicks for zero-latency math
+        self.session_high: dict[str, float] = collections.defaultdict(lambda: -1.0)
+        self.session_low: dict[str, float] = collections.defaultdict(lambda: 1e9)
+
         # VPIN State (SRS Phase 2) - Asset Scoped
         self.vpin_bucket_size = 5000  # [D-01] Spec: 5000 volume units per bucket, was 100
         self.vpin_current_vol: dict[str, int] = collections.defaultdict(int)
@@ -645,6 +659,11 @@ class MarketSensor:
         self._last_wall_pub = 0.0
         self.off_hour_sim = os.getenv("ENABLE_OFF_HOUR_SIMULATOR", "false").lower() == "true"
         self._sim_snap_prices: dict[str, float] = {}   # [Audit-Fix] For IV stabilization
+        
+        # [Audit-Fix] Signal State Persistence
+        self.last_sign: dict[str, float] = collections.defaultdict(float) # Lee-Ready Tie-Breaker
+        self.last_sequence_id: dict[str, int] = collections.defaultdict(int)
+        self.prev_quotes: dict[str, dict] = collections.defaultdict(dict) # For OFI Liquidity Flow
 
     # Removed redundant compute process methods
 
@@ -725,7 +744,11 @@ class MarketSensor:
         elif ltp < mid:
             sign = -1.0 # Aggressive Sell
         else:
-            sign = 0.0     # Neutral / Mid-quote bounce
+            # [Audit-Fix] Lee-Ready Tie-Breaker: Use last known sign (Tick Rule)
+            sign = self.last_sign.get(tick.get("symbol", ""), 0.0)
+        
+        if sign != 0:
+            self.last_sign[tick.get("symbol", "")] = sign
 
         if self.use_rust:
             rt = tick_engine.TickData(
@@ -740,21 +763,42 @@ class MarketSensor:
         return sign * volume
 
     def _ofi(self, tick: dict) -> float:
-        """Order Flow Imbalance (OFI) calculation."""
-        # Simplified OFI: (bid_size - ask_size) * price_change_direction
-        # A more robust OFI would involve tracking order book changes
+        """
+        [Audit-Fix] Order Flow Imbalance (OFI) - Liquidity Flow Standard.
+        Measures changes in liquidity (quantity added/removed) rather than just static depth.
+        """
+        symbol = tick.get("symbol", "NIFTY50")
+        bid = tick.get("bid", 0.0)
+        ask = tick.get("ask", 0.0)
         bid_size = tick.get("bid_size", 0)
         ask_size = tick.get("ask_size", 0)
-        last_price = tick.get("price", 0.0)
-        prev_price = self.tick_store[tick.get("symbol", "NIFTY50")][-1].get("price", last_price) if self.tick_store[tick.get("symbol", "NIFTY50")] else last_price
-
-        price_change_direction = 0
-        if last_price > prev_price:
-            price_change_direction = 1
-        elif last_price < prev_price:
-            price_change_direction = -1
-
-        return (bid_size - ask_size) * price_change_direction
+        
+        prev = self.prev_quotes.get(symbol, {})
+        prev_bid = prev.get("bid", bid)
+        prev_ask = prev.get("ask", ask)
+        prev_bid_size = prev.get("bid_size", bid_size)
+        prev_ask_size = prev.get("ask_size", ask_size)
+        
+        # 1. Delta Bid (Liquidity added at or above the previous bid)
+        if bid > prev_bid:
+            delta_bid = bid_size
+        elif bid == prev_bid:
+            delta_bid = bid_size - prev_bid_size
+        else:
+            delta_bid = -prev_bid_size
+            
+        # 2. Delta Ask (Liquidity added at or below the previous ask)
+        if ask < prev_ask:
+            delta_ask = ask_size
+        elif ask == prev_ask:
+            delta_ask = ask_size - prev_ask_size
+        else:
+            delta_ask = -prev_ask_size
+            
+        # Store for next tick
+        self.prev_quotes[symbol] = {"bid": bid, "ask": ask, "bid_size": bid_size, "ask_size": ask_size}
+        
+        return float(delta_bid - delta_ask)
 
     def _update_cvd(self, tick: dict, symbol: str):
         """Cumulative Volume Delta update using Lee-Ready classification."""
@@ -786,13 +830,21 @@ class MarketSensor:
         elif sign < 0:
             self.vpin_sell_vol[symbol] += volume
             
-        # When bucket fills, calculate VPIN and reset
-        if self.vpin_current_vol[symbol] >= self.vpin_bucket_size:
-            vpin_val = abs(self.vpin_buy_vol[symbol] - self.vpin_sell_vol[symbol]) / self.vpin_current_vol[symbol]
+        # [Audit-Fix] VPIN Bucket Overflow: Use 'while' to drain excessive volume in large ticks
+        while self.vpin_current_vol[symbol] >= self.vpin_bucket_size:
+            # Calculate ratio based on bucket size, not total volume (to maintain precision)
+            # We use a proportional split for the current bucket
+            ratio = self.vpin_bucket_size / self.vpin_current_vol[symbol]
+            b_buy = self.vpin_buy_vol[symbol] * ratio
+            b_sell = self.vpin_sell_vol[symbol] * ratio
+            
+            vpin_val = abs(b_buy - b_sell) / self.vpin_bucket_size
             self.vpin_series[symbol].append(vpin_val)
-            self.vpin_current_vol[symbol] = 0
-            self.vpin_buy_vol[symbol] = 0
-            self.vpin_sell_vol[symbol] = 0
+            
+            # Substract bucket_size and move remainder to next interval
+            self.vpin_current_vol[symbol] -= self.vpin_bucket_size
+            self.vpin_buy_vol[symbol] -= b_buy
+            self.vpin_sell_vol[symbol] -= b_sell
 
     async def _drain_compute_output(self):
         """Non-blocking drain of compute_out queue into latest_signals."""
@@ -811,8 +863,53 @@ class MarketSensor:
             except queue.Empty:
                 break
 
+    def _handle_sequence_reset(self, symbol: str):
+        """
+        Clears only the 'differential' buffers that rely on tick-to-tick continuity.
+        Historical price deques remain intact for trend continuity.
+        """
+        self.prev_quotes.pop(symbol, None) # Resets OFI baseline
+        self.last_sign.pop(symbol, None)   # Resets Lee-Ready tie-breaker
+        # VPIN stays as-is (it will just complete a slightly 'dirty' bucket)
+
     async def _initialize_redis_state(self):
-        """Pre-seeds Redis with UNKNOWN state on boot to avoid nil errors."""
+        """[Audit-Fix] Adaptive Alpha: Hydrate dynamic components and VWAP state from Redis."""
+        logger.info("📐 MarketSensor: Adopting session's dynamic constituent profile...")
+        
+        # 1. Fetch dynamic components for each index
+        global INDEX_COMPONENTS
+        updated_any = False
+        for idx in self.all_indices:
+            try:
+                cached = await self._redis.get(f"CONFIG:COMPONENTS:{idx}")
+                if cached:
+                    components = json.loads(cached)
+                    INDEX_COMPONENTS[idx] = components
+                    updated_any = True
+                    logger.info(f"✅ {idx}: Adopted {len(components)} dynamic constituents.")
+            except Exception as e:
+                logger.warning(f"Failed to load dynamic components for {idx}: {e}")
+
+        if updated_any:
+            # Update buffers for any NEW symbols found in dynamic components
+            new_heavyweights = set()
+            for components in INDEX_COMPONENTS.values():
+                new_heavyweights.update(components)
+            
+            all_assets = self.all_indices + list(new_heavyweights)
+            for sym in all_assets:
+                if sym not in self.hw_prices:
+                    self.hw_prices[sym] = collections.deque(maxlen=500)
+                    self.ofi_series[sym] = collections.deque(maxlen=200)
+                    self.cvd_series[sym] = collections.deque(maxlen=200)
+                    self.basis_series[sym] = collections.deque(maxlen=500)
+                    self.spot_15m_series[sym] = collections.deque(maxlen=900)
+                    self.vpin_series[sym] = collections.deque(maxlen=50)
+                    self.iv_history[sym] = collections.deque(maxlen=100)
+                    self.pcr_history[sym] = collections.deque(maxlen=100)
+            logger.info(f"📐 Alpha Surface recalibrated for {len(all_assets)} assets.")
+
+        # 2. SEBI/VWAP State Recovery
         assets = ["NIFTY50", "BANKNIFTY", "SENSEX"]
         for asset in assets:
             if not await self._redis.exists(f"latest_market_state:{asset}"):
@@ -826,6 +923,15 @@ class MarketSensor:
                 }
                 await self._redis.set(f"latest_market_state:{asset}", json.dumps(initial_state, cls=NumpyEncoder))
                 logger.info(f"Initialized Redis state for {asset}")
+            
+            # [Audit-Fix] VWAP Hydration (Cold Start Fix)
+            # Fetch persisted PV and Vol from Redis if they exist
+            pv = await self._redis.get(f"VWAP_PV:{asset}")
+            vol = await self._redis.get(f"VWAP_VOL:{asset}")
+            if pv and vol:
+                self.vwap_cum_pv[asset] = float(pv)
+                self.vwap_cum_vol[asset] = float(vol)
+                logger.info(f"Hydrated VWAP for {asset}: {self.vwap_cum_pv[asset] / self.vwap_cum_vol[asset]:.2f}")
 
     async def run(self):
         # Initialize Redis state for each symbol on boot
@@ -837,9 +943,9 @@ class MarketSensor:
             pass
 
         # ── Phase 9: UI & Observability heartbeat ──
-        from core.health import HeartbeatProvider
-        self.hb = HeartbeatProvider("MarketSensor", self._redis)
-        asyncio.create_task(self.hb.run_heartbeat())
+        # [Audit-Fix] Already initialized in start() method. Bypassing to avoid race condition.
+        # self.hb = HeartbeatProvider("MarketSensor", self._redis)
+        # asyncio.create_task(self.hb.run_heartbeat())
 
         logger.info("MarketSensor active. Subscribing to tick data...")
         asyncio.create_task(send_cloud_alert("👁️ MARKET SENSOR: Active. Computing microstructure features and correlations.", alert_type="SYSTEM"))
@@ -855,7 +961,26 @@ class MarketSensor:
                         continue
 
                     symbol = tick.get("symbol", "NIFTY50")
+                    
+                    # [Fortress] Sequence Reset Detector (Audit 2.3)
+                    incoming_seq = tick.get("sequence_id", 0)
+                    last_seq = self.last_sequence_id.get(symbol, 0)
+
+                    if incoming_seq < last_seq - 100:
+                        logger.warning(f"🔄 GATEWAY RESET DETECTED for {symbol}: {last_seq} -> {incoming_seq}. Re-centering buffers.")
+                        self._handle_sequence_reset(symbol)
+
+                    self.last_sequence_id[symbol] = incoming_seq
+
                     price = tick.get("price", 0.0)
+
+                    # [Audit Layer 3] Running Session High/Low
+                    # Initialize if first tick for symbol
+                    if symbol not in self.session_high:
+                        self.session_high[symbol] = price
+                        self.session_low[symbol] = price
+                    self.session_high[symbol] = max(self.session_high[symbol], price)
+                    self.session_low[symbol] = min(self.session_low[symbol], price)
 
                     # Store tick
                     self.tick_store[symbol].append(tick)
@@ -914,6 +1039,10 @@ class MarketSensor:
                             "day_open": float(day_open) if day_open else price,
                             "ce_oi": float(ce_oi) if ce_oi else 0.0,
                             "pe_oi": float(pe_oi) if pe_oi else 0.0,
+                            "session_high": self.session_high[symbol],
+                            "session_low": self.session_low[symbol],
+                            "day_high": float(tick.get("day_high", self.session_high[symbol])),
+                            "day_low": float(tick.get("day_low", self.session_low[symbol])),
                             "ofi_series": list(self.ofi_series[symbol]),
                             "hw_prices": {k: list(v) for k, v in self.hw_prices.items() if len(v) >= 10},
                             "cvd_series": list(self.cvd_series[symbol]),
@@ -975,7 +1104,8 @@ class MarketSensor:
 
     async def _publish_market_state(self, symbol: str, price: float):
         """Assembles and publishes the full market state vector."""
-        sig = self._latest_signals
+        market_signal_state = {}
+        sig = self._latest_signals.get(symbol, {})
 
         # Retrieve FII bias and Sentiment from Redis
         try:
@@ -1009,15 +1139,16 @@ class MarketSensor:
         flow_toxicity_veto = sig.get("flow_toxicity_veto", False)
 
         # [Fast Lane] Extract Depth & Calculate Pressure Gauge (S04)
-        tb = float(tick.get("total_buy_qty", 0))
-        ts = float(tick.get("total_sell_qty", 0))
+        last_tick = self.tick_store[symbol][-1] if self.tick_store[symbol] else {}
+        tb = float(last_tick.get("total_buy_qty", 0))
+        ts = float(last_tick.get("total_sell_qty", 0))
         pressure = (tb - ts) / (tb + ts) if (tb + ts) > 0 else 0.0
 
         # [Slow Lane] Fetch Walls from Redis
         call_wall = await self._redis.get(f"CALL_WALL:{symbol}") or "—"
         put_wall = await self._redis.get(f"PUT_WALL:{symbol}") or "—"
 
-        state = {
+        market_signal_state = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol,
             "price": price,
@@ -1039,6 +1170,8 @@ class MarketSensor:
             "iv_rv_spread": sig.get("iv_rv_spread", 0.0),
             "high_z": sig.get("high_z", 0.0),
             "low_z": sig.get("low_z", 0.0),
+            "day_high": sig.get("day_high", price),
+            "day_low": sig.get("day_low", price),
             "smart_flow": sig.get("smart_flow", 0.0),
             "pcr_roc": sig.get("pcr_roc", 0.0),
             "log_ofi_zscore": sig.get("log_ofi_zscore", 0.0),
@@ -1065,6 +1198,7 @@ class MarketSensor:
             "rsi": float(sig.get("rsi", 50.0)),
             "pcr": curr_pcr,
             "change_pct": float(sig.get("change_pct", 0.0)),
+            "latency_ms": float(last_tick.get("latency_ms", 0.0)),
             "time_of_day": datetime.now().strftime("%H:%M:%S")
         }
 
@@ -1074,24 +1208,27 @@ class MarketSensor:
         stale_flag = (time.time() - self._last_tick_ts.get(symbol, 0) > 10)
         heartbeat = time.time()
         
-        state["raw_veto"] = bool(raw_veto)
-        state["stale_data_flag"] = bool(stale_flag)
-        state["heartbeat"] = heartbeat
+        market_signal_state["raw_veto"] = bool(raw_veto)
+        market_signal_state["stale_data_flag"] = bool(stale_flag)
+        market_signal_state["heartbeat"] = heartbeat
 
         # Update histories for next snapshot
-        self.iv_history[symbol].append(state["iv_atm"])
-        self.pcr_history[symbol].append(state["pcr"])
+        self.iv_history[symbol].append(market_signal_state["iv_atm"])
+        self.pcr_history[symbol].append(market_signal_state["pcr"])
 
         # ── [Hedge Hybrid] Three-State Deterministic Model (S22 & MARKET_STATE) ──
-        asto = float(state.get("asto", 0.0))
+        asto = float(market_signal_state.get("asto", 0.0))
         abs_asto = abs(asto)
         
         # 1. Update Anchored VWAP (resets at sensor start)
-        tick = self.tick_store[symbol][-1] if self.tick_store[symbol] else {}
-        vol = float(tick.get("last_volume", 1))
+        vol = float(last_tick.get("last_volume", 1))
         
         self.vwap_cum_pv[symbol] = self.vwap_cum_pv.get(symbol, 0.0) + (price * vol)
         self.vwap_cum_vol[symbol] = self.vwap_cum_vol.get(symbol, 0.0) + vol
+        
+        # [Audit-Fix] Persist VWAP state to Redis for crash durability
+        await self._redis.set(f"VWAP_PV:{symbol}", str(self.vwap_cum_pv[symbol]))
+        await self._redis.set(f"VWAP_VOL:{symbol}", str(self.vwap_cum_vol[symbol]))
         
         vwap = self.vwap_cum_pv[symbol] / self.vwap_cum_vol[symbol] if self.vwap_cum_vol[symbol] > 0 else price
         
@@ -1109,8 +1246,8 @@ class MarketSensor:
             s22 = -1.0
         
         # [Audit-Fix] Naming alignment with Dashboard (Plural)
-        state["whales_pivot"] = s22 # Plural for main.py
-        state["whale_pivot"] = s22  # Singular for SignalVector SHM
+        market_signal_state["whales_pivot"] = s22 # Plural for main.py
+        market_signal_state["whale_pivot"] = s22  # Singular for SignalVector SHM
 
         # 4. Update MARKET_STATE with Hysteresis - Asset Scoped [Audit Fix]
         current_state = str(await self._redis.get(f"MARKET_STATE:{symbol}") or "NEUTRAL")
@@ -1124,7 +1261,7 @@ class MarketSensor:
         else: # abs_asto < 70
             new_state = "NEUTRAL"
             
-        state["market_state"] = new_state
+        market_signal_state["market_state"] = new_state
         self.market_states[symbol] = new_state
         await self._redis.set(f"MARKET_STATE:{symbol}", new_state)
         
@@ -1163,7 +1300,7 @@ class MarketSensor:
         # ── Multi-Index Signal Publication ──────────────────────────
         if symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
             # Target 1 = entry + 1.5 * ATR, Target 2 = entry + 3 * ATR
-            atr = float(state.get("atr", 20.0))
+            atr = float(market_signal_state.get("atr", 20.0))
             entry_val = await self._redis.get(f"entry_price:{symbol}")
             entry = float(entry_val) if entry_val else price
             
@@ -1178,7 +1315,7 @@ class MarketSensor:
             dist_current = abs(price - entry)
             progress = min(100.0, max(0.0, (dist_current / dist_total) * 100.0)) if dist_total > 0 else 0.0
             
-            state["exit_path_70_30"] = {
+            market_signal_state["exit_path_70_30"] = {
                 "tp1": round(float(tp1), 2),
                 "tp2": round(float(tp2), 2),
                 "progress": round(float(progress), 2)
@@ -1197,36 +1334,40 @@ class MarketSensor:
                 nd_sensex = float(await self._redis.get("net_delta_sensex") or 0.0)
 
                 signals = SignalVector(
-                    s_total=state["s_total"],
-                    vpin=state["vpin"],
-                    ofi_z=state["log_ofi_zscore"],
-                    vanna=state.get("vanna", 0.0),
-                    charm=state.get("charm", 0.0),
-                    s_env=state.get("s_env", 0.0),
-                    s_str=state.get("s_str", 0.0),
-                    s_div=state.get("s_div", 0.0),
-                    rv=state["rv"],
-                    adx=state["adx"],
-                    pcr=state.get("pcr", curr_pcr),
-                    asto=state["asto"],
-                    asto_regime=state["asto_regime"],
-                    whale_pivot=state["whale_pivot"],
+                    s_total=market_signal_state["s_total"],
+                    vpin=market_signal_state["vpin"],
+                    ofi_z=market_signal_state["log_ofi_zscore"],
+                    vanna=market_signal_state.get("vanna", 0.0),
+                    charm=market_signal_state.get("charm", 0.0),
+                    s_env=market_signal_state.get("s_env", 0.0),
+                    s_str=market_signal_state.get("s_str", 0.0),
+                    s_div=market_signal_state.get("s_div", 0.0),
+                    rv=market_signal_state["rv"],
+                    adx=market_signal_state["adx"],
+                    pcr=market_signal_state.get("pcr", curr_pcr),
+                    asto=market_signal_state["asto"],
+                    asto_regime=market_signal_state["asto_regime"],
+                    whale_pivot=market_signal_state["whale_pivot"],
                     net_delta_nifty=nd_nifty,
                     net_delta_banknifty=nd_bank,
                     net_delta_sensex=nd_sensex,
                     # Extended Fields
-                    high_z=state["high_z"],
-                    low_z=state["low_z"],
-                    iv_percentile=state["iv_percentile"],
-                    iv_rv_spread=state["iv_rv_spread"],
-                    smart_flow=state["smart_flow"],
+                    high_z=sig.get("high_z", 0.0),
+                    low_z=sig.get("low_z", 0.0),
+                    iv_percentile=sig.get("iv_percentile", 50.0),
+                    iv_rv_spread=sig.get("iv_rv_spread", 0.0),
+                    smart_flow=sig.get("smart_flow", 0.0),
                     buy_p=tb,
                     sell_p=ts,
-                    pcr_roc=state["pcr_roc"],
-                    hb_ts=state["heartbeat"],
-                    veto=bool(state.get("flow_toxicity_veto", False)),
-                    raw_veto=state["raw_veto"],
-                    stale_flag=state["stale_data_flag"],
+                    pcr_roc=sig.get("pcr_roc", 0.0),
+                    iv_atm=market_signal_state.get("iv_atm", 0.0),
+                    latency_ms=market_signal_state.get("latency_ms", 0.0),
+                    day_high=sig.get("day_high", price),
+                    day_low=sig.get("day_low", price),
+                    hb_ts=market_signal_state.get("heartbeat", 0.0),
+                    veto=bool(market_signal_state.get("flow_toxicity_veto", False)),
+                    raw_veto=market_signal_state.get("raw_veto", False),
+                    stale_flag=market_signal_state.get("stale_data_flag", False),
                     hw_alpha=hw_list
                 )
                 
@@ -1239,53 +1380,54 @@ class MarketSensor:
                     self.shm_global.write(signals)
             
             # 3. Publish over ZeroMQ [Audit 2.2: Fix parameter order]
-            await self.mq.send_json(self.pub, f"{Topics.MARKET_STATE}.{symbol}", state)
+            if hasattr(self, 'pub') and self.pub:
+                await self.mq.send_json(self.pub, f"{Topics.MARKET_STATE}.{symbol}", market_signal_state)
             
             # Persist state by symbol
-            await self._redis.set(f"latest_market_state:{symbol}", json.dumps(state, cls=NumpyEncoder))
+            await self._redis.set(f"latest_market_state:{symbol}", json.dumps(market_signal_state, cls=NumpyEncoder))
             if symbol == "NIFTY50":
-                await self._redis.set("latest_market_state", json.dumps(state, cls=NumpyEncoder))
+                await self._redis.set("latest_market_state", json.dumps(market_signal_state, cls=NumpyEncoder))
 
             # [Audit-Fix] Walls are now managed by SnapshotManager (Slow Lane)
             # MarketSensor simply consumes them from Redis for the dashboard state
-            pass
 
             # Persist history for UI charts
-            await self._persist_signal_history(state)
+            await self._persist_signal_history(market_signal_state)
             
             # Publish individual signals for strategy guards (Partitioned by Asset)
-            await self._redis.set(f"dispersion_coeff:{symbol}", str(state["dispersion_coeff"]))
-            await self._redis.set(f"log_ofi_zscore:{symbol}", str(state["log_ofi_zscore"]))
-            await self._redis.set(f"cvd_absorption:{symbol}", "1" if state["cvd_absorption"] else "0")
-            await self._redis.set(f"cvd_flip_ticks:{symbol}", str(state["cvd_flip_ticks"]))
-            await self._redis.set(f"price_dislocation:{symbol}", "1" if state["price_dislocation"] else "0")
-            await self._redis.set(f"gex_sign:{symbol}", state["gex_sign"])
-            await self._redis.set(f"atr:{symbol}", str(state["atr"]))
-            await self._redis.set(f"asto:{symbol}", str(state["asto"]))
-            await self._redis.set(f"asto_regime:{symbol}", str(state["asto_regime"]))
-            await self._redis.set(f"flow_toxicity_veto:{symbol}", "1" if state["flow_toxicity_veto"] else "0")
-            await self._redis.set(f"rsi:{symbol}", str(state["rsi"]))
-            await self._redis.set(f"pcr:{symbol}", str(state["pcr"]))
-            await self._redis.set(f"change_pct:{symbol}", str(state["change_pct"]))
-            await self._redis.set(f"current_dte:{symbol}", str(state.get("dte", 2)))
+            await self._redis.set(f"dispersion_coeff:{symbol}", str(market_signal_state["dispersion_coeff"]))
+            await self._redis.set(f"log_ofi_zscore:{symbol}", str(market_signal_state["log_ofi_zscore"]))
+            await self._redis.set(f"cvd_absorption:{symbol}", "1" if market_signal_state["cvd_absorption"] else "0")
+            await self._redis.set(f"cvd_flip_ticks:{symbol}", str(market_signal_state["cvd_flip_ticks"]))
+            await self._redis.set(f"price_dislocation:{symbol}", "1" if market_signal_state["price_dislocation"] else "0")
+            await self._redis.set(f"gex_sign:{symbol}", market_signal_state["gex_sign"])
+            await self._redis.set(f"atr:{symbol}", str(market_signal_state["atr"]))
+            await self._redis.set(f"asto:{symbol}", str(market_signal_state["asto"]))
+            await self._redis.set(f"asto_regime:{symbol}", str(market_signal_state["asto_regime"]))
+            await self._redis.set(f"flow_toxicity_veto:{symbol}", "1" if market_signal_state["flow_toxicity_veto"] else "0")
+            await self._redis.set(f"rsi:{symbol}", str(market_signal_state["rsi"]))
+            await self._redis.set(f"pcr:{symbol}", str(market_signal_state["pcr"]))
+            await self._redis.set(f"change_pct:{symbol}", str(market_signal_state["change_pct"]))
+            await self._redis.set(f"iv_atm:{symbol}", str(market_signal_state["iv_atm"]))
+            await self._redis.set(f"current_dte:{symbol}", str(market_signal_state.get("dte", 2)))
             
             # Legacy compatibility for NIFTY50
             if symbol == "NIFTY50":
-                await self._redis.set("dispersion_coeff", str(state["dispersion_coeff"]))
-                await self._redis.set("log_ofi_zscore", str(state["log_ofi_zscore"]))
-                await self._redis.set("cvd_absorption", "1" if state["cvd_absorption"] else "0")
-                await self._redis.set("cvd_flip_ticks", str(state["cvd_flip_ticks"]))
-                await self._redis.set("gex_sign", state["gex_sign"])
-                await self._redis.set("atr", str(state["atr"]))
-                await self._redis.set("rv", str(state["rv"]))
-                await self._redis.set("asto", str(state["asto"]))
-                await self._redis.set("asto_regime", str(state["asto_regime"]))
-                await self._redis.set("current_dte", str(state.get("dte", 2)))
+                await self._redis.set("dispersion_coeff", str(market_signal_state["dispersion_coeff"]))
+                await self._redis.set("log_ofi_zscore", str(market_signal_state["log_ofi_zscore"]))
+                await self._redis.set("cvd_absorption", "1" if market_signal_state["cvd_absorption"] else "0")
+                await self._redis.set("cvd_flip_ticks", str(market_signal_state["cvd_flip_ticks"]))
+                await self._redis.set("gex_sign", market_signal_state["gex_sign"])
+                await self._redis.set("atr", str(market_signal_state["atr"]))
+                await self._redis.set("rv", str(market_signal_state["rv"]))
+                await self._redis.set("asto", str(market_signal_state["asto"]))
+                await self._redis.set("asto_regime", str(market_signal_state["asto_regime"]))
+                await self._redis.set("current_dte", str(market_signal_state.get("dte", 2)))
             
             # COMPOSITE_ALPHA: partitioned and flat legacy
-            await self._redis.set(f"COMPOSITE_ALPHA:{symbol}", str(state["s_total"]))
+            await self._redis.set(f"COMPOSITE_ALPHA:{symbol}", str(market_signal_state["s_total"]))
             if symbol == "NIFTY50":
-                await self._redis.set("COMPOSITE_ALPHA", str(state["s_total"]))
+                await self._redis.set("COMPOSITE_ALPHA", str(market_signal_state["s_total"]))
 
             # HMM_REGIME: pull from partitioned regime hash [Audit 3.1: Standardize NIFTY50]
             hmm_raw = await self._redis.hget("hmm_regime_state", symbol)
@@ -1302,12 +1444,12 @@ class MarketSensor:
         if not self.test_mode:
             # GAP FIX: Store individual heavyweight Z-scores for API / Power Five
             if symbol in TOP_10_HEAVYWEIGHTS:
-                hw_z = state.get("log_ofi_zscore", 0.0)
+                hw_z = market_signal_state.get("log_ofi_zscore", 0.0)
                 # Store in a dedicated hash for the API
                 await self._redis.hset("power_five_matrix", symbol, json.dumps({
                     "price": price,
                     "z_score": round(hw_z, 2),
-                    "timestamp": state["timestamp"]
+                    "timestamp": market_signal_state["timestamp"]
                 }, cls=NumpyEncoder))
 
     async def _persist_signal_history(self, state: dict):

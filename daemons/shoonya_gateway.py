@@ -3,8 +3,10 @@ import json
 import logging
 import os
 import hashlib
+import time
 import pyotp
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import redis.asyncio as redis
 from dotenv import load_dotenv
 
@@ -12,7 +14,7 @@ from core.mq import MQManager, Ports, RedisLogger
 from core.health import HeartbeatProvider
 from core.alerts import send_cloud_alert
 from NorenRestApiPy.NorenApi import NorenApi
-from core.shared_memory import TickSharedMemory, MAX_SLOTS
+from core.shared_memory import TickSharedMemory, MAX_SLOTS, SYMBOL_TO_SLOT
 
 try:
     import uvloop
@@ -31,12 +33,12 @@ class TokenBucketRateLimiter:
         self.rate = rate
         self.per = per
         self.tokens = rate
-        self.last_refill = asyncio.get_event_loop().time()
+        self.last_refill = time.monotonic()
     
     async def acquire(self):
         while self.tokens < 1:
             await asyncio.sleep(0.1)
-            now = asyncio.get_event_loop().time()
+            now = time.monotonic()
             elapsed = now - self.last_refill
             self.tokens = min(self.rate, self.tokens + elapsed * (self.rate / self.per))
             self.last_refill = now
@@ -85,11 +87,15 @@ class ShoonyaDataStreamer:
         
         # Shared Memory Setup
         self.shm = TickSharedMemory(create=True)
-        self.symbol_slots = {}
-        self.next_slot = 0
 
         # [Audit-Fix] Component 3: JIT Rate Limiter for search_scrip
         self.search_rate_limiter = TokenBucketRateLimiter(rate=1, per=1.0)
+        self.sequence_id = 0 # [Audit-Fix] Monotonic counter for temporal precision
+        
+        # [Audit-Fix] Component 7: Feed Watchdog (Liveliness Trap)
+        self.last_feed_time = {"NIFTY50": time.time(), "BANKNIFTY": time.time()}
+        self._day_highs = {}
+        self._day_lows = {}
 
     def event_handler_feed_update(self, tick_data):
         """Callback fired by Shoonya WebSocket on every price tick."""
@@ -110,10 +116,28 @@ class ShoonyaDataStreamer:
             price = float(tick_data['lp'])
             volume = int(tick_data.get('v', 0))
             
+            # Persistent high/low guard
+            curr_high = float(tick_data.get('h', self._day_highs.get(symbol, price)))
+            curr_low = float(tick_data.get('l', self._day_lows.get(symbol, price)))
+            self._day_highs[symbol] = max(curr_high, price)
+            self._day_lows[symbol] = min(curr_low, price)
+            
             # [Audit-Fix] Component 1 & 2: Latency Anchor (LTT) and Institutional Flow (OI)
             exchange_ts = tick_data.get('ltt') # Last Traded Time from Shoonya
             oi = int(tick_data.get('oi', 0))
 
+            # Latency Calculation (Current Time - Last Traded Time)
+            now_ts = time.time()
+            feed_time = float(tick_data.get('ft', now_ts))
+            latency_ms = (now_ts - feed_time) * 1000
+
+            # [Audit-Fix] Component 6: Temporal Precision (Sequence ID)
+            self.sequence_id += 1
+            
+            # [Audit-Fix] Feed Watchdog: Update arrival time for core indices
+            if symbol in self.last_feed_time:
+                self.last_feed_time[symbol] = now_ts
+            
             # Simplified payload matching our internal microservice format
             payload = {
                 "symbol": symbol,
@@ -122,6 +146,10 @@ class ShoonyaDataStreamer:
                 "oi": oi,
                 "exchange_ts": exchange_ts,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "sequence_id": self.sequence_id,
+                "latency_ms": max(0, latency_ms),
+                "day_high": self._day_highs[symbol],
+                "day_low": self._day_lows[symbol],
                 "type": "TICK"
             }
             
@@ -138,22 +166,17 @@ class ShoonyaDataStreamer:
     async def _broadcast_tick(self, symbol, payload):
         """Asynchronously blasts the tick data to Redis, Shared Memory, and ZeroMQ."""
         # 1. Shared Memory Zero-Copy Write
-        if symbol not in self.symbol_slots:
-            if self.next_slot < MAX_SLOTS:
-                self.symbol_slots[symbol] = self.next_slot
-                await self.redis.hset("shm_slots", symbol, self.next_slot)
-                self.next_slot += 1
-            else:
-                logger.warning(f"Shared memory full! Cannot allocate slot for {symbol}")
-        
-        if symbol in self.symbol_slots:
-            slot = self.symbol_slots[symbol]
+        if symbol in SYMBOL_TO_SLOT:
+            slot = SYMBOL_TO_SLOT[symbol]
             # [Audit-Fix] Component 4: SHM Heartbeat Synchronization
             # Pass high-res microsecond epoch for staleness detection
             hires_ts = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
             self.shm.write_tick(slot, symbol, payload['price'], payload['volume'], 
                                 timestamp=datetime.fromisoformat(payload['timestamp']).timestamp(),
-                                hires_ts=hires_ts)
+                                hires_ts=hires_ts,
+                                sequence_id=payload['sequence_id'],
+                                high=payload['day_high'],
+                                low=payload['day_low'])
 
         # 2. Update latest state for Dashboard API (Legacy/Fallback)
         await self.redis.set(f"latest_tick:{symbol}", json.dumps(payload))
@@ -169,7 +192,7 @@ class ShoonyaDataStreamer:
         # We can now just send the topic or a minimal payload since data is in SHM
         await self.mq_manager.send_json(self.pub_socket, topic, payload)
         
-        logger.debug(f"Broadcasted live {symbol} @ {payload['price']} [SHM Slot {self.symbol_slots.get(symbol)}]")
+        logger.debug(f"Broadcasted live {symbol} @ {payload['price']} [SHM Slot {SYMBOL_TO_SLOT.get(symbol)}]")
 
     def open_callback(self):
         """Callback fired when WebSocket opens."""
@@ -188,17 +211,35 @@ class ShoonyaDataStreamer:
         # 2. Dynamically fetch deployed symbols from Redis, resolve NFO tokens, and subscribe
         async def _subscribe_dynamic():
             try:
+                # [Audit-Fix] Reboot Integrity: Guard against "Ghost Positions"
+                # A. Scan active strategies for planned deployments
                 active_strats = await self.redis.hgetall("active_strategies")
                 for strat_id_b, config_b in active_strats.items():
                     config = json.loads(config_b)
                     if config.get("enabled", True):
                         for symbol in config.get("symbols", []):
-                            # Example: If a strategy deployed "NIFTY24FEB26C22000"
-                            resolved_token = get_token(symbol)
-                            if resolved_token:
-                                self.api.subscribe(f"NFO|{resolved_token}")
-                                self.active_tokens[resolved_token] = symbol
-                                logger.info(f"Subscribed to Dynamic NFO|{resolved_token} for {symbol}")
+                            token, exch = await self._resolve_symbol_to_token(symbol)
+                            if token and exch:
+                                self.api.subscribe(f"{exch}|{token}")
+                                self.active_tokens[token] = symbol
+                                logger.info(f"Subscribed to Dynamic {exch}|{token} for {symbol}")
+
+                # B. Scan broker-reported truth map for already held positions (Reboot Safety)
+                held_positions = await self.redis.hgetall("broker_positions")
+                if not held_positions:
+                    logger.warning("⚠️ REBOOT INTEGRITY: 'broker_positions' not found in Redis. Skipping position-aware subscription.")
+                else:
+                    for symbol, qty_str in held_positions.items():
+                        try:
+                            if int(qty_str) != 0:
+                                token, exch = await self._resolve_symbol_to_token(symbol)
+                                if token and exch:
+                                    self.api.subscribe(f"{exch}|{token}")
+                                    self.active_tokens[token] = symbol
+                                    logger.info(f"🛡️ REBOOT INTEGRITY: Restored subscription for held position {symbol} ({exch}|{token})")
+                        except Exception as e:
+                            logger.error(f"Failed to restore subscription for position {symbol}: {e}")
+
             except Exception as e:
                 logger.error(f"Error subscribing to dynamic tokens: {e}")
                 
@@ -228,6 +269,10 @@ class ShoonyaDataStreamer:
             asyncio.create_task(self.hb.run_heartbeat())
             
             asyncio.create_task(send_cloud_alert("🌐 SHOONYA GATEWAY: Active and streaming live market data.", alert_type="SYSTEM"))
+            
+            # 2. Start Feed Watchdog for market-hours liveliness monitoring
+            asyncio.create_task(self._feed_watchdog_loop())
+
             self.api.start_websocket(
                 order_update_callback=lambda x: None, 
                 subscribe_callback=self.event_handler_feed_update, 
@@ -261,27 +306,114 @@ class ShoonyaDataStreamer:
         async for message in pubsub.listen():
             if message["type"] == "message":
                 try:
-                    data = message["data"].decode('utf-8') if isinstance(message["data"], bytes) else message["data"]
-                    logger.info(f"⚡ JIT Subscription Request Received: {data}")
+                    raw_data = message["data"].decode('utf-8') if isinstance(message["data"], bytes) else message["data"]
+                    logger.info(f"⚡ JIT Subscription Request Received: {raw_data}")
                     
-                    if "|" in data:
-                        # Direct exchange|token format
-                        exch, token = data.split("|")
-                        self.api.subscribe(data)
-                        # We don't always know the symbol here, so we might need a lookup
-                        # but Shoonya uses tokens in its 'tk' field anyway.
-                    else:
-                        # Symbol format - resolve to token
-                        token, exch = await self._resolve_symbol_to_token(data)
-                        if token and exch:
-                            self.api.subscribe(f"{exch}|{token}")
-                            self.active_tokens[token] = data
-                            logger.info(f"Subscribed to {data} ({exch}|{token})")
+                    # Support both legacy string-only and new JSON-action formats
+                    action = "subscribe"
+                    data = raw_data
+                    
+                    try:
+                        json_msg = json.loads(raw_data)
+                        if isinstance(json_msg, dict) and "action" in json_msg:
+                            action = json_msg["action"].lower()
+                            data = json_msg.get("symbol") or json_msg.get("data")
+                    except json.JSONDecodeError:
+                        pass # Carry on with legacy format
+                    
+                    if not data:
+                        logger.warning("Empty data in JIT message")
+                        continue
+
+                    if action == "subscribe":
+                        if "|" in data:
+                            self.api.subscribe(data)
                         else:
-                            logger.warning(f"Could not resolve token for symbol: {data}")
+                            token, exch = await self._resolve_symbol_to_token(data)
+                            if token and exch:
+                                self.api.subscribe(f"{exch}|{token}")
+                                self.active_tokens[token] = data
+                                logger.info(f"Subscribed to {data} ({exch}|{token})")
+                    
+                    elif action == "unsubscribe":
+                        exch_token = data if "|" in data else None
+                        if not exch_token:
+                            token, exch = await self._resolve_symbol_to_token(data)
+                            if token and exch:
+                                exch_token = f"{exch}|{token}"
+                        
+                        if exch_token:
+                            self.api.unsubscribe(exch_token)
+                            # Remove from active_tokens for cleanup
+                            token = exch_token.split("|")[-1]
+                            self.active_tokens.pop(token, None)
+                            logger.info(f"🗑️ Unsubscribed from {data} ({exch_token})")
                             
                 except Exception as e:
                     logger.error(f"Error in JIT subscription listener: {e}")
+
+    async def _feed_watchdog_loop(self):
+        """
+        Monitors NIFTY50 and BANKNIFTY feed arrival.
+        If data stalls for > 2s during market hours, forces a reconnect.
+        """
+        logger.info("🛡️ FEED WATCHDOG: Monitoring Nifty/BankNifty liveliness (2s threshold).")
+        while True:
+            await asyncio.sleep(1)
+            
+            if not self._is_market_hours():
+                continue
+                
+            now = time.time()
+            for symbol, last_time in self.last_feed_time.items():
+                staleness = now - last_time
+                if staleness > 2.0:
+                    logger.warning(f"⚠️ FEED_STALLED: {symbol} has not ticked in {staleness:.1f}s. Forcing WebSocket RECONNECT.")
+                    # Trigger Shoonya library's internal reconnect by closing
+                    try:
+                        self.api.close_websocket()
+                    except Exception as e:
+                        logger.error(f"Failed to close websocket during stall: {e}")
+                    
+                    # Reset timestamps to avoid immediate re-trigger during connection attempt
+                    for s in self.last_feed_time:
+                        self.last_feed_time[s] = now
+                    break
+
+    def _is_market_hours(self) -> bool:
+        """Returns True if current time is within Indian Market Hours (09:15-15:30 IST)."""
+        now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+        # Market open: 09:15, close: 15:30
+        if now_ist.weekday() >= 5: # Saturday/Sunday
+            return False
+            
+        market_start = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_end = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+        
+        return market_start <= now_ist <= market_end
+
+    def _get_exchange_for_symbol(self, symbol: str) -> str:
+        """Heuristic to determine exchange based on symbol pattern."""
+        if symbol.startswith("BSE:"):
+            return "BSE"
+        if any(idx in symbol for idx in ["SENSEX", "BANKEX"]):
+            # If it has a date/strike (e.g. SENSEX26MAR72000CE), it's BFO
+            # If it's just 'SENSEX', it's BSE (Index) - Note: Shoonya Index TSym is often just 'SENSEX'
+            if any(char.isdigit() for char in symbol):
+                return "BFO"
+            return "BSE"
+        if any(s in symbol for s in ["RELIANCE", "HDFCBANK", "INFY", "TCS", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "LT"]):
+            return "NSE"
+        # Standard NSE options are NFO
+        if any(idx in symbol for idx in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]):
+            return "NFO"
+        return "NFO" # Default to NFO for most F&O strings
+
+    async def _resolve_local_token(self, symbol: str) -> tuple[str | None, str | None]:
+        """Helper to resolve token from local Redis/Master file via executor."""
+        exch = self._get_exchange_for_symbol(symbol)
+        token = await self.loop.run_in_executor(None, lambda: get_token(symbol, exchange=exch))
+        return token, exch
 
     async def _resolve_symbol_to_token(self, symbol: str) -> tuple[str | None, str | None]:
         """Resolves a trading symbol to a token and exchange using Shoonya search_scrip with JIT Protection."""
@@ -289,13 +421,18 @@ class ShoonyaDataStreamer:
         cached_data = await self.redis.hget("token_lookup", symbol)
         if cached_data:
             return tuple(cached_data.split("|"))
+        
+        # Try local master first
+        token, exch = await self._resolve_local_token(symbol)
+        if token and exch:
+            # Cache it
+            await self.redis.hset("token_lookup", symbol, f"{token}|{exch}")
+            return token, exch
 
-        # [Audit-Fix] Component 5: Robust BFO/NSE Routing
-        exch = "NFO"
-        if any(idx in symbol for idx in ["SENSEX", "BANKEX"]): 
-            exch = "BFO"
-        elif any(s in symbol for s in ["RELIANCE", "HDFCBANK", "INFY", "TCS", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "LT"]):
-            exch = "NSE"
+        # If local master fails, try API search
+        exch = self._get_exchange_for_symbol(symbol)
+        if symbol.startswith("BSE:"):
+            symbol = symbol.replace("BSE:", "")
             
         try:
             # [Audit-Fix] Component 3a: JIT Rate Limiting for API key safety

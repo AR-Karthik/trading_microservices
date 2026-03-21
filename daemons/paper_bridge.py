@@ -58,6 +58,8 @@ async def init_db(pool):
                 strategy_id TEXT,
                 execution_type TEXT NOT NULL DEFAULT 'Paper',
                 audit_tags JSONB DEFAULT '{}',
+                latency_ms NUMERIC(10, 2),
+                sequence_id BIGINT,
                 PRIMARY KEY (id, time)
             );
         """)
@@ -90,9 +92,10 @@ async def init_db(pool):
                 realized_pnl NUMERIC(15, 2) DEFAULT 0.0,
                 delta NUMERIC(15, 4) DEFAULT 0.0,
                 theta NUMERIC(15, 4) DEFAULT 0.0,
+                inception_spot NUMERIC(15, 2) DEFAULT 0.0,
                 execution_type TEXT NOT NULL DEFAULT 'Paper',
                 updated_at TIMESTAMPTZ NOT NULL,
-                PRIMARY KEY (symbol, strategy_id, parent_uuid, execution_type)  -- [F6-01]
+                PRIMARY KEY (symbol, strategy_id, parent_uuid, execution_type)
             );
         """)
 
@@ -109,6 +112,37 @@ async def init_db(pool):
             logger.info("portfolio index created.")
         except Exception as e:
             logger.error(f"❌ Failed to create portfolio index: {e}")
+
+        # [Layer 7] Rejection Journal Table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS rejections (
+                time TIMESTAMPTZ NOT NULL,
+                asset TEXT NOT NULL,
+                strategy_id TEXT,
+                reason TEXT,
+                alpha NUMERIC(15, 4),
+                vpin NUMERIC(10, 4),
+                PRIMARY KEY (time, asset)
+            );
+        """)
+
+        # [Layer 7] Alpha Snapshots Table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_snapshots (
+                time TIMESTAMPTZ NOT NULL,
+                symbol TEXT NOT NULL,
+                price NUMERIC(15, 2),
+                s_total NUMERIC(15, 4),
+                asto NUMERIC(15, 4),
+                regime_s18 INTEGER,
+                quality_s27 NUMERIC(15, 4),
+                PRIMARY KEY (time, symbol)
+            );
+        """)
+        try:
+            await conn.execute("SELECT create_hypertable('market_snapshots', 'time', if_not_exists => TRUE);")
+            await conn.execute("SELECT create_hypertable('rejections', 'time', if_not_exists => TRUE);")
+        except: pass
 
 class PaperBridge:
     def __init__(self, mq, pool, redis_client):
@@ -139,6 +173,7 @@ class PaperBridge:
         price = float(execution['price'])
         exec_type = execution.get('execution_type', 'Paper')
         parent_uuid = execution.get('parent_uuid', 'NONE')
+        inception_spot = float(execution.get('inception_spot', 0.0))
         
         # [Audit-Fix] Component 1: Redis Cash & Quarantine Sync
         total_outflow = (abs(qty) * price) + fees
@@ -161,9 +196,9 @@ class PaperBridge:
                 INSERT INTO portfolio (
                     symbol, strategy_id, parent_uuid, underlying, lifecycle_class, 
                     expiry_date, quantity, avg_price, initial_credit, short_strikes, 
-                    delta, theta, execution_type, updated_at, has_calendar_risk
+                    delta, theta, inception_spot, execution_type, updated_at, has_calendar_risk
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                 """,
                 symbol, strategy_id, parent_uuid, 
                 execution.get('underlying'), 
@@ -174,6 +209,7 @@ class PaperBridge:
                 json.dumps(execution.get('short_strikes', {})),
                 float(execution.get('delta', 0.0)),
                 float(execution.get('theta', 0.0)),
+                inception_spot,
                 exec_type, execution['time'],
                 execution.get('has_calendar_risk', False)
             )
@@ -201,14 +237,15 @@ class PaperBridge:
             """
             UPDATE portfolio
             SET quantity = $1, avg_price = $2, realized_pnl = $3, delta = $4, theta = $5, 
-                short_strikes = $6, updated_at = $7
-            WHERE symbol = $8 AND strategy_id = $9 AND execution_type = $10 AND parent_uuid = $11
+                short_strikes = $6, updated_at = $7, inception_spot = COALESCE(NULLIF($8, 0.0), inception_spot)
+            WHERE symbol = $9 AND strategy_id = $10 AND execution_type = $11 AND parent_uuid = $12
             """,
             new_qty, new_avg_price, realized_pnl, 
             float(execution.get('delta', 0.0)),
             float(execution.get('theta', 0.0)),
             json.dumps(execution.get('short_strikes', {})),
-            execution['time'], symbol, strategy_id, exec_type, parent_uuid
+            execution['time'], inception_spot,
+            symbol, strategy_id, exec_type, parent_uuid
         )
         # Update PnL cache per asset [Audit Fix]
         underlying = execution.get('underlying') or symbol.split()[0]
@@ -280,6 +317,9 @@ class PaperBridge:
                     "parent_uuid": order.get('parent_uuid', 'NONE'),
                     "delta": order.get('delta', 0.0),
                     "theta": order.get('theta', 0.0),
+                    "inception_spot": order.get('inception_spot', 0.0),
+                    "latency_ms": order.get('latency_ms', 0.0),
+                    "sequence_id": order.get('sequence_id', 0),
                     "short_strikes": order.get("short_strikes", {})
                 }
                 
@@ -287,11 +327,17 @@ class PaperBridge:
                     async with conn.transaction():
                         # [F4-01] Include audit_tags with heuristic state at time of trade
                         regime_raw = await self.redis.get("hmm_regime") or "UNKNOWN"
-                        audit_tags = json.dumps({"regime": regime_raw, "execution_type": execution.get('execution_type', 'Paper')})
+                        audit_tags = json.dumps({
+                            "regime": regime_raw, 
+                            "execution_type": execution.get('execution_type', 'Paper'),
+                            "s27": order.get("audit_tags", {}).get("s27", 0.0),
+                            "vpin": order.get("audit_tags", {}).get("vpin", 0.0)
+                        })
                         await conn.execute(
-                            "INSERT INTO trades (id, time, symbol, action, quantity, price, fees, strategy_id, execution_type, audit_tags) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                            "INSERT INTO trades (id, time, symbol, action, quantity, price, fees, strategy_id, execution_type, audit_tags, latency_ms, sequence_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                             execution['id'], execution['time'], execution['symbol'], execution['action'],
-                            execution['quantity'], execution['price'], execution['fees'], execution['strategy_id'], execution['execution_type'], audit_tags
+                            execution['quantity'], execution['price'], execution['fees'], execution['strategy_id'], execution['execution_type'], audit_tags,
+                            execution['latency_ms'], execution['sequence_id']
                         )
                         await self.update_portfolio(conn, execution, fees)
                 
@@ -405,6 +451,35 @@ class PaperBridge:
         await self.update_portfolio(conn, execution, 20.0)
         logger.info(f"Targeted Liq: {action} {abs_qty} {sym} @ {market_price}")
 
+    async def rejection_listener(self):
+        """[Layer 7] Listens for REJECTION_EVENT pulses from MetaRouter."""
+        sub = self.mq.create_subscriber(Ports.TRADE_EVENTS, topics=["REJECTION."])
+        logger.info("Paper Rejection listener active. Journaling vetoed trades...")
+        while True:
+            try:
+                topic, event = await self.mq.recv_json(sub)
+                if not event: continue
+                
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO rejections (time, asset, strategy_id, reason, alpha, vpin)
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        """,
+                        datetime.fromisoformat(event['time']).astimezone(timezone.utc),
+                        event['asset'],
+                        event['strategy_id'],
+                        event['reason'],
+                        float(event.get('alpha', 0.0)),
+                        float(event.get('vpin', 0.0))
+                    )
+                logger.warning(f"📒 REJECTION JOURNALED: {event['asset']} | {event['reason']}")
+            except zmq.Again:
+                continue
+            except Exception as e:
+                logger.error(f"Rejection listener error: {e}")
+                await asyncio.sleep(1)
+
     async def panic_listener(self):
         """Phase 13.3: Listens for Global Square Off commands via Redis PubSub."""
         pubsub = self.redis.pubsub()
@@ -500,6 +575,7 @@ async def main():
         await asyncio.gather(
             bridge.execute_orders(pull_socket),
             bridge.panic_listener(),
+            bridge.rejection_listener(),
             _run_heartbeat(r)
         )
     else:

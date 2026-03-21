@@ -37,6 +37,10 @@ class SignalVector:
     buy_p: float = 0.0
     sell_p: float = 0.0
     pcr_roc: float = 0.0
+    iv_atm: float = 0.0  # [Audit-Fix] Added IV to SHM vector
+    latency_ms: float = 0.0 # [Advisory 1]
+    day_high: float = 0.0 # [Layer 3 Wick Mapping] Raw Price
+    day_low: float = 0.0  # [Layer 3 Wick Mapping] Raw Price
     hb_ts: float = 0.0
     veto: bool = False
     raw_veto: bool = False
@@ -58,8 +62,8 @@ class ShmManager:
     # Pre-allocate 1KB memory map buffer size for current and future structural scaling
     SIZE = 1024 
     # Data packing format matching SignalVector attributes
-    # 27 doubles, 3 booleans, 10 doubles (hw), 1 double (crc)
-    STRUCT_FORMAT = "ddddddddddddddddddddddddddd???ddddddddddd" 
+    # 31 doubles (ts + 30 sig), 3 booleans, 10 doubles (hw), 1 double (crc)
+    STRUCT_FORMAT = "ddddddddddddddddddddddddddddddd???ddddddddddd" 
 
     def __init__(self, asset_id: str = "GLOBAL", mode='r'):
         self.mode = mode
@@ -93,14 +97,14 @@ class ShmManager:
             ts = time.time()
             hw_a = signals.hw_alpha if signals.hw_alpha and len(signals.hw_alpha) == 10 else [0.0]*10
             
-            # Calculate primitive checksum for data integrity verification
             crc = (signals.s_total + signals.vpin + signals.ofi_z + signals.vanna + 
                    signals.charm + signals.s_env + signals.s_str + signals.s_div + 
                    signals.rv + signals.adx + signals.pcr + signals.asto + signals.asto_regime +
                    signals.whale_pivot +
                    signals.net_delta_nifty + signals.net_delta_banknifty + signals.net_delta_sensex +
                    signals.high_z + signals.low_z + signals.iv_percentile + signals.iv_rv_spread +
-                   signals.smart_flow + signals.buy_p + signals.sell_p + signals.pcr_roc + signals.hb_ts +
+                   signals.smart_flow + signals.buy_p + signals.sell_p + signals.pcr_roc + 
+                   signals.iv_atm + signals.hb_ts + signals.latency_ms + signals.day_high + signals.day_low +
                    sum(hw_a) + 
                    (100.0 if signals.veto else 0.0) + (100.0 if signals.raw_veto else 0.0) + (100.0 if signals.stale_flag else 0.0))
             
@@ -112,7 +116,8 @@ class ShmManager:
                 signals.asto, signals.asto_regime, signals.whale_pivot,
                 signals.net_delta_nifty, signals.net_delta_banknifty, signals.net_delta_sensex,
                 signals.high_z, signals.low_z, signals.iv_percentile, signals.iv_rv_spread,
-                signals.smart_flow, signals.buy_p, signals.sell_p, signals.pcr_roc, signals.hb_ts,
+                signals.smart_flow, signals.buy_p, signals.sell_p, signals.pcr_roc, 
+                signals.iv_atm, signals.hb_ts, signals.latency_ms, signals.day_high, signals.day_low,
                 signals.veto, signals.raw_veto, signals.stale_flag,
                 *hw_a, crc
             )
@@ -121,8 +126,8 @@ class ShmManager:
         except Exception as e:
             logger.error(f"SHM write error: {e}")
 
-    def read(self) -> dict | None:
-        """Reads, deserializes, and validates the shared memory buffer into a signal dictionary."""
+    def read(self) -> SignalVector | None:
+        """Reads, deserializes, and validates the shared memory buffer into a SignalVector instance."""
         if not self.shm: return None
         try:
             self.shm.seek(0)
@@ -134,14 +139,14 @@ class ShmManager:
             # 1 to 18 (Existing Doubles)
             s_total, vpin, ofiz, vanna, charm, senv, sstr, sdiv = read_data[1:9]
             rv, adx, pcr, asto, asto_reg, wh_p, nd_nift, nd_bn, nd_sen = read_data[9:18]
-            # 18 to 27 (New Doubles)
-            hi_z, lo_z, iv_p, iv_rv, sf, bp, sp, p_roc, hb = read_data[18:27]
-            # 27 to 30 (Booleans)
-            veto, r_veto, s_flag = read_data[27:30]
-            # 30 to 40 (HW Alphas)
-            hw_alphas = list(read_data[30:40])
-            # 40 (CRC)
-            crc = read_data[40]
+            # 18 to 31 (New Doubles)
+            hi_z, lo_z, iv_p, iv_rv, sf, bp, sp, p_roc, iv_atm, hb, lat, d_hi, d_lo = read_data[18:31]
+            # 31 to 34 (Booleans)
+            veto, r_veto, s_flag = read_data[31:34]
+            # 34 to 44 (HW Alphas)
+            hw_alphas = list(read_data[34:44])
+            # 44 (CRC)
+            crc = read_data[44]
             
             # Reject payload if delta from write timestamp exceeds 1.0 second
             if time.time() - ts > 1.0:
@@ -150,23 +155,23 @@ class ShmManager:
             # Validate checksum sum against the stored CRC value to ensure atomic read
             check_val = (s_total + vpin + ofiz + vanna + charm + senv + sstr + sdiv + 
                          rv + adx + pcr + asto + asto_reg + wh_p + nd_nift + nd_bn + nd_sen +
-                         hi_z + lo_z + iv_p + iv_rv + sf + bp + sp + p_roc + hb +
+                         hi_z + lo_z + iv_p + iv_rv + sf + bp + sp + p_roc + iv_atm + hb + lat + d_hi + d_lo +
                          sum(hw_alphas) + 
                          (100.0 if veto else 0.0) + (100.0 if r_veto else 0.0) + (100.0 if s_flag else 0.0))
             
             if abs(crc - check_val) > 1e-4:
                 return None
                 
-            return {
-                "s_total": s_total, "vpin": vpin, "ofi_zscore": ofiz, "vanna": vanna, "charm": charm,
-                "s_env": senv, "s_str": sstr, "s_div": sdiv, "rv": rv, "adx": adx, "pcr": pcr,
-                "asto": asto, "asto_regime": asto_reg, "whale_pivot": wh_p,
-                "net_delta_nifty": nd_nift, "net_delta_banknifty": nd_bn, "net_delta_sensex": nd_sen,
-                "high_z": hi_z, "low_z": lo_z, "iv_percentile": iv_p, "iv_rv_spread": iv_rv,
-                "smart_flow": sf, "buy_p": bp, "sell_p": sp, "pcr_roc": p_roc, "hb_ts": hb,
-                "toxic_veto": veto, "raw_veto": r_veto, "stale_flag": s_flag,
-                "hw_alpha": hw_alphas, "timestamp": ts, "source": "SHM"
-            }
+            return SignalVector(
+                s_total=s_total, vpin=vpin, ofi_z=ofiz, vanna=vanna, charm=charm,
+                s_env=senv, s_str=sstr, s_div=sdiv, rv=rv, adx=adx, pcr=pcr,
+                asto=asto, asto_regime=asto_reg, whale_pivot=wh_p,
+                net_delta_nifty=nd_nift, net_delta_banknifty=nd_bn, net_delta_sensex=nd_sen,
+                high_z=hi_z, low_z=lo_z, iv_percentile=iv_p, iv_rv_spread=iv_rv,
+                smart_flow=sf, buy_p=bp, sell_p=sp, pcr_roc=p_roc, iv_atm=iv_atm, hb_ts=hb,
+                latency_ms=lat, day_high=d_hi, day_low=d_lo, veto=veto, raw_veto=r_veto, stale_flag=s_flag,
+                hw_alpha=hw_alphas
+            )
         except Exception as e:
             logger.error(f"SHM read error: {e}")
             return None

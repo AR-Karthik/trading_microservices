@@ -12,6 +12,7 @@ import os
 import sys
 import time
 import threading
+import collections
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import pyotp
@@ -26,7 +27,7 @@ except ImportError:
 
 from core.mq import MQManager, Ports, Topics, NumpyEncoder
 from core.alerts import send_cloud_alert
-from core.shared_memory import TickSharedMemory
+from core.shared_memory import TickSharedMemory, SYMBOL_TO_SLOT
 from NorenRestApiPy.NorenApi import NorenApi
 
 load_dotenv()
@@ -53,8 +54,6 @@ TOKEN_TO_SYMBOL = {
 TICK_SIZES = {"NIFTY50": 0.05, "BANKNIFTY": 0.05, "SENSEX": 1.00, "DEFAULT": 0.05}
 TICK_RATIOS = {"NIFTY50": 1.0, "BANKNIFTY": 0.5, "SENSEX": 0.25, "DEFAULT": 1.0}
 
-# [Parity] SHM Slot Mapping
-SYMBOL_TO_SLOT = {s: i for i, s in enumerate(TOKEN_TO_SYMBOL.values())}
 INITIAL_SUBSCRIPTIONS = [f"NSE|{k}" if k != "1" else f"BSE|{k}" for k in TOKEN_TO_SYMBOL.keys()]
 
 class TickSensor:
@@ -71,8 +70,14 @@ class TickSensor:
         self._last_tick_ts = {}        # [Parity]
         self._prices = {}              # [Parity]
         self._oi = {}                  # [Parity]
+        self._day_highs = {}           # [Audit-Fix] Layer 1 Memory Loss Guard
+        self._day_lows = {}            # [Audit-Fix] Layer 1 Memory Loss Guard
         self._data_flow_alert_sent = False
         self._sim_ltt_counter = 0      # [Audit-Fix] Persistent LTT for simulation
+        self.sequence_id = 0          # [Audit-Fix] Monotonic counter for temporal precision
+        
+        # [Advisory 2] OI Smoothing Buffer
+        self._oi_diff_buffers = collections.defaultdict(lambda: collections.deque(maxlen=5))
         
         self.sim_mode = os.getenv("SIMULATION_MODE", "false").lower() == "true"
         self.off_hour_sim = os.getenv("ENABLE_OFF_HOUR_SIMULATOR", "false").lower() == "true"
@@ -119,6 +124,24 @@ class TickSensor:
             
             # Subscribe to INDIA VIX specifically
             self.api.subscribe("NSE|26017")
+
+            # [Audit-Fix] Reboot Safety: Sync subscriptions with broker positions from Redis
+            async def _sync_positions():
+                try:
+                    positions = await self.redis_client.hgetall("broker_positions")
+                    if positions:
+                        for symbol, qty_str in positions.items():
+                            if int(qty_str) != 0:
+                                res = await self._resolve_symbol_to_exch_token(symbol)
+                                if res:
+                                    exch_token, tsym = res
+                                    self.active_tokens[exch_token.split('|')[1]] = tsym
+                                    self.api.subscribe(exch_token)
+                                    logger.info(f"🛡️ REBOOT SAFETY: Subscribed to held position {tsym} ({exch_token})")
+                except Exception as e:
+                    logger.error(f"Failed to sync positions on WS open: {e}")
+
+            asyncio.run_coroutine_threadsafe(_sync_positions(), self.loop)
 
         while True:
             if not self.sim_mode and not self.off_hour_sim:
@@ -193,12 +216,39 @@ class TickSensor:
             asyncio.create_task(send_cloud_alert(f"✅ DATA INGESTION {source}: Market ticks active.", alert_type="INFO"))
             self._data_flow_alert_sent = True
 
+        # [Advisory 1] Latency Calculation (datetime.now() - exchange_ts)
+        try:
+            now_utc = datetime.now(timezone.utc)
+            if 'ft' in raw:
+                # ft is unix timestamp (preferred)
+                exch_dt = datetime.fromtimestamp(float(raw['ft']), tz=timezone.utc)
+            elif 'ltt' in raw:
+                # ltt is "HH:MM:SS" (local IST)
+                now_ist = datetime.now(IST)
+                exch_dt = datetime.strptime(raw['ltt'], "%H:%M:%S").replace(
+                    year=now_ist.year, month=now_ist.month, day=now_ist.day, tzinfo=IST
+                )
+            else:
+                exch_dt = now_utc
+
+            latency_ms = (now_utc - exch_dt.astimezone(timezone.utc)).total_seconds() * 1000
+            # Guard against clock skew or future-dated ticks
+            latency_ms = max(0.0, latency_ms)
+        except Exception as e:
+            logger.error(f"Latency calc error: {e}")
+            latency_ms = 0.0
+
+        # [Audit-Fix] Component 6: Temporal Precision (Sequence ID)
+        self.sequence_id += 1
+
         # [Parity] Exchange Timestamp
         exchange_ts = raw.get('ft') or raw.get('ltt') or datetime.now().strftime("%H:%M:%S")
 
         tick = {
             "symbol": symbol,
             "price": price,
+            "day_high": float(raw.get('h', self._day_highs.get(symbol, price))),
+            "day_low": float(raw.get('l', self._day_lows.get(symbol, price))),
             "prev_price": prev_price,
             "volume": int(raw.get('v', 0)),
             "oi": curr_oi,
@@ -206,22 +256,37 @@ class TickSensor:
             "total_buy_qty": int(raw.get('tb', 0)),
             "total_sell_qty": int(raw.get('ts', 0)),
             "exchange_ts": exchange_ts,
+            "latency_ms": latency_ms,
             "bid": float(raw.get('bp1', price)),
             "ask": float(raw.get('sp1', price)),
             "bid_vol": int(raw.get('bq1', 0)),
             "ask_vol": int(raw.get('sq1', 0)),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": now_utc.isoformat(),
+            "sequence_id": self.sequence_id,
             "source": "WS",
             "type": "TICK"
         }
 
-        # [Parity] Support for legacy PCR/Pressure Gauge keys
+        # [Audit-Fix] Update persistent memory with newest high/low peaks
+        self._day_highs[symbol] = max(tick["day_high"], price)
+        self._day_lows[symbol] = min(tick["day_low"], price)
+        # Ensure tick reflects the latest updated peak for downstream
+        tick["day_high"] = self._day_highs[symbol]
+        tick["day_low"] = self._day_lows[symbol]
+
+        # [Advisory 2] OI Acceleration Smoothing (5-tick rolling average)
         oi_diff = tick["oi"] - tick["prev_oi"]
-        if abs(oi_diff) > 500:
-            tick["oi_accel"] = float(oi_diff)
-            await self.redis_client.set(f"OI_ACCEL:{symbol}", str(oi_diff))
+        self._oi_diff_buffers[symbol].append(oi_diff)
+        
+        if len(self._oi_diff_buffers[symbol]) >= 1:
+            avg_oi_accel = sum(self._oi_diff_buffers[symbol]) / len(self._oi_diff_buffers[symbol])
+            # Only report significant acceleration to reduce baseline noise
+            tick["oi_accel"] = float(avg_oi_accel) if abs(avg_oi_accel) > 500 else 0.0
         else:
             tick["oi_accel"] = 0.0
+
+        if tick["oi_accel"] != 0:
+            await self.redis_client.set(f"OI_ACCEL:{symbol}", str(tick["oi_accel"]))
 
         await self.redis_client.setnx(f"DAY_OPEN:{symbol}", str(price))
 
@@ -247,14 +312,18 @@ class TickSensor:
         # [Parity] Update last tick time for Watchdog
         self._last_tick_ts[symbol] = time.time()
 
-        # [Parity] Write to Shared Memory
-        if self.shm_ticks and symbol in SYMBOL_TO_SLOT:
-
         # [Parity] Write to Shared Memory for Ultra-Low Latency consumers
         if self.shm_ticks and symbol in SYMBOL_TO_SLOT:
             slot = SYMBOL_TO_SLOT[symbol]
             ts_float = datetime.fromisoformat(tick["timestamp"]).timestamp()
-            self.shm_ticks.write_tick(slot, symbol, price, volume, ts_float)
+            self.shm_ticks.write_tick(
+                slot, symbol, price, tick["volume"], 
+                ts_float, 
+                latency_ms=tick["latency_ms"], 
+                sequence_id=self.sequence_id,
+                high=tick["day_high"],
+                low=tick["day_low"]
+            )
 
     async def _subscription_listener(self):
         """Listens for dynamic subscription requests from SnapshotManager."""
@@ -280,21 +349,29 @@ class TickSensor:
 
     async def _reconnect_watchdog(self):
         """[Parity] Monolithic Watchdog: Throttled alerts, silent resets, and SYSTEM_EVENTS."""
-        logger.info("Staleness watchdog active (threshold: 10s).")
-        await asyncio.sleep(10)
+        logger.info("🛡️ TICK WATCHDOG: Monitoring liveliness (Dynamic thresholds).")
+        await asyncio.sleep(5)
         
         while True:
             try:
                 now = time.time()
+                is_mkt = self._is_market_hours()
+                
                 for symbol, last_ts in list(self._last_tick_ts.items()):
-                    age_ms = (now - last_ts) * 1000
-                    if age_ms > 10000: # 10s threshold
+                    staleness = now - last_ts
+                    
+                    # [Audit-Fix] Aggressive 2s threshold for core indices during market hours
+                    threshold = 10.0
+                    if is_mkt and symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
+                        threshold = 2.0
+                        
+                    if staleness > threshold:
                         if symbol in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
                             if (now - self._last_stale_alert_ts) > 30: # 30s throttle
-                                logger.warning(f"🚨 FEED STALL: {symbol} is {age_ms/1000:.0f}s stale!")
+                                logger.warning(f"🚨 FEED STALL: {symbol} is {staleness:.1f}s stale! (Threshold: {threshold}s)")
                                 await self._force_socket_reset(symbol, silent=False)
                                 if not self.sim_mode:
-                                    asyncio.create_task(send_cloud_alert(f"⚠️ FEED STALL: {symbol} (>{age_ms/1000:.0f}s). Resetting...", alert_type="WARNING"))
+                                    asyncio.create_task(send_cloud_alert(f"⚠️ FEED STALL: {symbol} (>{staleness:.1f}s). Resetting...", alert_type="WARNING"))
                                 self._last_stale_alert_ts = now
                         else:
                             await self._force_socket_reset(symbol, silent=True)
@@ -315,6 +392,39 @@ class TickSensor:
         await self.redis_client.publish("system_events", json.dumps({
             "event": "FEED_RESET", "symbol": symbol, "timestamp": datetime.now(timezone.utc).isoformat(), "silent": silent
         }))
+
+    def _is_market_hours(self) -> bool:
+        """Returns True if current time is within Indian Market Hours (09:15-15:30 IST)."""
+        now_ist = datetime.now(IST)
+        if now_ist.weekday() >= 5: return False # Sat/Sun
+        market_start = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_end = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+        return market_start <= now_ist <= market_end
+
+    async def _resolve_symbol_to_exch_token(self, symbol: str) -> tuple[str, str] | None:
+        """Helper for Reboot Safety: Resolves symbol to exch|token and tsym."""
+        # Check local mapping first
+        for tk, sym in TOKEN_TO_SYMBOL.items():
+            if sym == symbol:
+                exch = "BSE" if tk == "1" else "NSE"
+                return f"{exch}|{tk}", sym
+        
+        # Try Redis master lookup (populated by SnapshotManager)
+        # We check NFO first as it's the most common for dynamic positions (Options)
+        try:
+            from utils.shoonya_master import get_token
+            # Identify exchange heuristic (copied from ShoonyaGateway)
+            exch = "NFO"
+            if any(idx in symbol for idx in ["SENSEX", "BANKEX"]):
+                exch = "BFO" if any(c.isdigit() for c in symbol) else "BSE"
+            elif any(s in symbol for s in ["RELIANCE", "HDFCBANK", "INFY", "TCS", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "LT"]):
+                exch = "NSE"
+            
+            token = await asyncio.to_thread(get_token, symbol, exchange=exch)
+            if token:
+                return f"{exch}|{token}", symbol
+        except: pass
+        return None
 
     async def _run_simulator(self):
         """[Audit-Fix] High-Frequency Off-Hour Simulator for Fast Lane parity."""
