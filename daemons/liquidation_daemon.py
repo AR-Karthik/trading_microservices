@@ -24,6 +24,8 @@ load_dotenv()
 from core.db_retry import with_db_retry
 from core.greeks import BlackScholes
 from core.shm import ShmManager, SignalVector, RegimeShm, RegimeVector
+from core.mq import MQManager, Ports, Topics
+import numpy as np
 
 logging.basicConfig(
     level=logging.INFO,
@@ -521,6 +523,23 @@ class LiquidationDaemon:
             await self._attempt_exit(pos, symbol, price, exit_reason)
             return
 
+        # --- Enhancement 4: Velocity Exit (Stop-Loss Lead-Indicator) ---
+        underlying = "NIFTY50"
+        if "BANKNIFTY" in symbol: underlying = "BANKNIFTY"
+        elif "SENSEX" in symbol: underlying = "SENSEX"
+        
+        # underlying_slope is from market_sensor (1m delta)
+        slope_1m = float(sig.get("slope_15m", 0.0)) / 15.0 # 1m proxy
+        avg_slope_raw = await self._redis.get(f"AVG_SLOPE:{underlying}")
+        avg_slope = float(avg_slope_raw or 0.0)
+
+        # If current velocity is 2x the 15m average in the direction of the loss
+        if abs(slope_1m) > (abs(avg_slope) * 2.0) and (np.sign(slope_1m) != np.sign(pnl)):
+            exit_reason = f"VELOCITY_EXIT: Speed {slope_1m:.2f} > 2x Avg {avg_slope:.2f}"
+            await self._record_barrier_exit(symbol, "VELOCITY", exit_reason, price, entry)
+            await self._attempt_exit(pos, symbol, price, exit_reason)
+            return
+
         # GATE 5: Time Gate (15:15 IST)
         now_ist = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=30)))
         if now_ist.hour == 15 and now_ist.minute >= 15:
@@ -555,11 +574,11 @@ class LiquidationDaemon:
         
         lifecycle = str(pos.get("lifecycle_class") or "KINETIC")
         if lifecycle == "POSITIONAL":
-            await self._evaluate_positional_barriers(symbol, tick, {}, pos, rv, vix, atr, str(current_hmm), is_index_tick)
+            await self._evaluate_positional_barriers(symbol, tick, sig, pos, rv, vix, atr, str(current_hmm), is_index_tick)
         elif lifecycle == "ZERO_DTE":
-            await self._evaluate_zero_dte_barriers(symbol, tick, {}, pos, rv, vix, atr, str(current_hmm), is_index_tick)
+            await self._evaluate_zero_dte_barriers(symbol, tick, sig, pos, rv, vix, atr, str(current_hmm), is_index_tick)
         else:
-            await self._evaluate_kinetic_barriers(symbol, tick, {}, pos, rv, vix, atr, str(current_hmm), is_index_tick)
+            await self._evaluate_kinetic_barriers(symbol, tick, sig, pos, rv, vix, atr, str(current_hmm), is_index_tick)
 
     async def _evaluate_kinetic_barriers(self, symbol: str, tick: dict, state: dict, pos: dict, rv: float, vix: float, atr: float, current_hmm: str, is_index_tick: bool):
         if is_index_tick:
@@ -817,6 +836,20 @@ class LiquidationDaemon:
         - Profit Target: 50% of credit received
         - Aggressive Stop: Exit if underlying moves > 0.5% from inception
         """
+        # --- Enhancement 2: IV-RV Spread Erosion Exit ---
+        # Fetch the spread from the high-fidelity SHM Signal Vector (already read in calling scope)
+        # Note: 'state' is the sig dict passed from _evaluate_barriers if we fix the call
+        iv_rv = state.get("iv_rv_spread", 0.0) 
+
+        if iv_rv < 0.01 and iv_rv != 0: # Edge has evaporated below 1% (ignore 0 which might be missing data)
+            exit_reason = f"EDGE_EROSION: IV-RV Spread collapsed to {iv_rv:.2%}"
+            # prem_price/prem_entry are defined below, let's use current ones
+            curr_price = float(tick.get("price", 0.0))
+            curr_entry = float(pos.get("price", curr_price))
+            await self._record_barrier_exit(symbol, "ALPHA_DEATH", exit_reason, curr_price, curr_entry)
+            await self._attempt_exit(pos, symbol, curr_price, exit_reason)
+            return
+
         if is_index_tick:
             # 2. Underlying Move Stop (0.5% from inception)
             idx_price = float(tick.get("price", 0.0))
@@ -851,8 +884,58 @@ class LiquidationDaemon:
                 await self._attempt_exit(pos, symbol, prem_price, exit_reason)
                 return
 
-        # 3. Fallback to kinetic barriers for time-based stall
+        # --- Enhancement 3: Delta-Specific Defensive Roll ---
+        # 1. Calculate Real-time Delta
+        idx_price_raw = await self._redis.get(f"latest_price:{underlying}")
+        idx_price = float(idx_price_raw or 0.0)
+        if idx_price > 0:
+            r_rate = 0.065 # Standard Repo
+            # Dte scaling for BS
+            dte_val = pos.get("dte", 1)
+            T_years = (dte_val / 365.0) if dte_val > 0 else (0.5 / 365.0)
+            
+            bs = BlackScholes()
+            iv_atm = state.get("iv_atm", 20.0) / 100.0
+            strike = pos.get("price") # Default to avg_price if strike not in dict
+            # If it's an option, strike is usually in the symbol or a field
+            # We'll try to find it in the symbol if not in dict
+            if "strike" not in pos:
+                import re
+                m = re.search(r"(\d+)$", symbol)
+                strike = float(m.group(1)) if m else strike
+
+            curr_delta = bs.delta(idx_price, strike, T_years, r_rate, iv_atm, pos.get("action", "SELL"))
+
+            # 2. Defensive Roll Breach (Delta > 0.35)
+            if abs(curr_delta) > 0.35:
+                logger.warning(f"🛡️ DEFENSIVE ROLL: {symbol} Delta {curr_delta:.2f} > 0.35. Dispatching ROLL.")
+                roll_cmd = {
+                    "order_id": f"roll_{uuid.uuid4().hex[:8]}",
+                    "symbol": symbol,
+                    "action": "ROLL",
+                    "parent_uuid": pos.get("parent_uuid"),
+                    "reason": f"DELTA_BREACH: {curr_delta:.2f}"
+                }
+                await self.mq.send_json(self.order_pub, Topics.ORDER_INTENT, roll_cmd)
+
+        # --- Enhancement 1: Power Hour Gamma Acceleration ---
+        now_ist = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=30)))
+        minutes_to_close = (15 * 60 + 30) - (now_ist.hour * 60 + now_ist.minute)
+
+        # Acceleration: Base 300s, but starts shrinking after 14:00 (90 mins to close)
+        # At 15:00, stall_timer becomes 60s. At 15:15, it becomes 30s.
+        time_mult = max(0.1, min(1.0, minutes_to_close / 90.0))
+        dynamic_stall = 300 * time_mult
+
         elapsed = time.time() - pos.get("entry_time", time.time())
+        if elapsed > dynamic_stall:
+            exit_reason = f"GAMMA_ACCEL_STALL: {elapsed:.0f}s > {dynamic_stall:.0f}s (Time to Close: {minutes_to_close}m)"
+            await self._record_barrier_exit(symbol, "GAMMA_DECAY", exit_reason, prem_price, prem_entry)
+            await self._attempt_exit(pos, symbol, prem_price, exit_reason)
+            return
+
+        # 3. Fallback to kinetic barriers for time-based stall
+        # (This is now redundant but kept as additive fallback)
         if elapsed > 300:  # 5 min stall for 0DTE
             exit_reason = f"ZERO_DTE_STALL: {elapsed:.0f}s > 300s"
             await self._record_barrier_exit(symbol, "ZERO_DTE_STALL", exit_reason, prem_price, prem_entry)

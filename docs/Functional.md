@@ -802,3 +802,13 @@ Latency Arb & Tick Normalization. In HFT (High-Frequency Trading), every microse
 2. **SIMD Normalization**: It 'Normalizes' the data. Different exchanges send data in different formats; this script converts them all into one 'Universal Language' for the bot.
 
 ---
+---
+### [ADDENDUM] Sovereign Risk Enhancements (Liquidation Daemon)
+
+**New High-Fidelity Exit Triggers**:
+1. **Power Hour Gamma Acceleration**: As the market approaches the 15:30 IST close, the 'Stall Timer' (time-decay exit) aggressively shrinks. While it starts at 300s, it compresses to 60s by 15:00 and 30s by 15:15, reflecting the exponential increase in Gamma risk during the final hour.
+2. **IV-RV Spread Erosion**: Monitoring the 'Statistical Edge.' If the spread between Implied Volatility (IV) and Realized Volatility (RV) collapses below 1%, the system exits the trade immediately, as the mathematical reason for the trade has evaporated.
+3. **Delta-Specific Defensive Roll**: Institutional-grade risk balancing. If the 'Delta' of a short option leg breaches 0.35, the daemon triggers a `ROLL` command to re-center the position, rather than purely liquidating.
+4. **Velocity Exit (The Lead-Indicator)**: A pre-emptive stop-loss. By comparing 1-minute price speed (Velocity) against the 15-minute norm, the system detects 'Breakout Momentum' and exits before the hard stop-loss is even touched, saving significant slippage.
+
+---

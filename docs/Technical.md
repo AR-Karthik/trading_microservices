@@ -893,3 +893,22 @@ A **Multi-Threaded Sharded Ingestor** built with C++20. It utilizes **CPU Pinnin
    - Implements a **Graceful Degradation Sequence**. Upon `SIGTERM`, it triggers a 25-second flush interval, ensuring that high-speed RAM buffers (for ticks) are committed to the `mnt/persistent_ssd` before the Spot VM is reclaimed by Google Cloud.
 
 ---
+---
+### [ADDENDUM] Sovereign Risk: Technical Logic & Invalidation
+
+**New Method Logic (LiquidationDaemon)**:
+1. **Gamma Acceleration Math**: 
+   - Formula: $\text{dynamic\_stall} = 300 \cdot \max(0.1, \min(1.0, \frac{\text{minutes\_to\_close}}{90}))$. 
+   - This implements a linear decay of the time-gate threshold starting 90 minutes before close.
+2. **IV-RV Edge Calculation**: 
+   - Utilizes `state.get("iv_rv_spread")` from the high-fidelity SHM vector. 
+   - Exit Trigger: $\text{if } IV-RV < 0.01$.
+3. **Real-Time Delta Roll (BS-Model)**: 
+   - Injects `BlackScholes.delta()` calculation inside the 0DTE loop. 
+   - Uses `T_years = dte / 365.0` and `iv_atm` for institutional pricing accuracy. 
+   - Logic: $\text{if } |\Delta| > 0.35 \rightarrow \text{Publish Topic.ORDER_INTENT with Action=ROLL}$.
+4. **Velocity/Slope Divergence**: 
+   - Logic: $\text{if } |\text{slope\_1m}| > (|\text{avg\_slope}| \cdot 2.0) \text{ and } \text{sign}(\text{slope\_1m}) \neq \text{sign}(\text{pnl})$. 
+   - This detects 'Anti-Profit Velocity'—when the market is moving too fast against the position to wait for a standard barrier check.
+
+---
