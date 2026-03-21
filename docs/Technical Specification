@@ -1,0 +1,18 @@
+# Module 0 - Part 2: The Engineering Blueprint
+
+### 1. High-Performance Polyglot Architecture
+To solve the "Python GIL Bottleneck" while maintaining logical flexibility, the system utilizes a tiered stack:
+* **Data Ingestion (C++):** An ultra-fast gateway using `simdjson` and `uWebSockets` to parse JSON tick data in the low microsecond range.
+* **Math Engine (Rust):** A dedicated Rust extension (`tick_engine`) handles heavy math (VPIN, Greeks, OFI) using thread-safe, zero-cost abstractions.
+* **Orchestration (Python):** Asynchronous Python daemons manage high-level routing, strategy state-machines, and execution bridges.
+
+### 2. Low-Latency IPC & State Management
+The system achieves sub-millisecond communication through a hybrid IPC strategy:
+* **ZeroMQ Binary Bus:** Uses Protobuf serialization over ZMQ `PUB/SUB` and `PUSH/PULL` topologies for ~40µs latency.
+* **Zero-Copy Shared Memory (SHM):** "Signal Vectors" are written to SHM segments, allowing any daemon to "read" market state in **<1µs** without network overhead.
+* **Redis State Storage:** Manages global flags (`SYSTEM_HALT`), daily P&L persistence, and dynamic configuration sync.
+
+### 3. Execution & Reliability Framework
+* **Unified Execution Bridge:** A multiplexer processing orders across **Shadow** (Counterfactual ledger), **Paper** (Regime-aware simulation), and **Live Strike** (Shoonya API).
+* **Multi-Leg Atomic Reconciler:** A "Janitor" daemon monitors the health of complex spreads, detecting partial fills and executing "Circuit Breaker Rollbacks" to prevent unhedged exposure.
+* **Infrastructure:** Fully containerized via Docker, utilizing **TimescaleDB** for high-velocity time-series persistence and GCP for automated alerting.
