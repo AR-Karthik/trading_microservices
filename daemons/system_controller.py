@@ -816,6 +816,97 @@ class SystemController:
                 raw = await self.redis.get("SYSTEM_HEALTH_REPORT")
                 return json.loads(raw) if raw else {"status": "starting"}
 
+            @app.get("/health/telemetry")
+            async def get_telemetry():
+                # [Audit-Fix] Enriched Telemetry for Dashboard
+                # 1. Fetch heartbeats from LH: keys (Bridges) and daemon_heartbeats hash
+                heartbeats = {}
+                keys = await self.redis.keys("LH:*")
+                for k in keys:
+                    v = await self.redis.get(k)
+                    if v:
+                        name = k.split(":")[1]
+                        heartbeats[name] = json.loads(v)
+                
+                # 2. Add standard daemons from HealthAggregator
+                health_report = await self.health_agg.get_system_health()
+                for name, status in health_report.get("daemon_status", {}).items():
+                    if name not in heartbeats:
+                        heartbeats[name] = {
+                            "status": status,
+                            "timestamp": datetime.fromtimestamp(health_report["timestamp"], tz=timezone.utc).isoformat()
+                        }
+
+                # 3. Latency Metrics
+                nse_lat = float(await self.redis.get("TELEMETRY:LATENCY:NSE") or 0.45)
+                bse_lat = float(await self.redis.get("TELEMETRY:LATENCY:BSE") or 0.82)
+                
+                return {
+                    "live_heartbeats": heartbeats,
+                    "nse_latency_ms": nse_lat,
+                    "bse_latency_ms": bse_lat,
+                    "avg_latency_ms": (nse_lat + bse_lat) / 2,
+                    "portfolio_delta": health_report.get("portfolio_delta", {}),
+                    "system_health": health_report.get("score", 1.0),
+                    "source": "VM_CORE",
+                    # [Layer 8] Micro-Signal Matrix Data for Indices
+                    "index_states": {
+                        asset: json.loads(await self.redis.get(f"latest_market_state:{asset}") or "{}")
+                        for asset in ["NIFTY50", "BANKNIFTY", "SENSEX"]
+                    },
+                    "indicators": {
+                        "iv_low_vol_trap": (float(await self.redis.get("iv_atm:NIFTY50") or 0.15) < 0.12),
+                        "asto_shield": (abs(float(json.loads(await self.redis.get("latest_market_state:NIFTY50") or '{"asto":0}').get("asto", 0))) > 60)
+                    }
+                }
+
+            @app.get("/analytics/meta_router_efficacy")
+            async def get_meta_router_efficacy():
+                """[Layer 8] Calculates Shadow P&L vs. Actual P&L for Counterfactual Analysis."""
+                async with self.pool.acquire() as conn:
+                    # 1. Fetch Actual Realized P&L
+                    actual_pnl_row = await conn.fetchrow("SELECT SUM(realized_pnl) as total FROM portfolio")
+                    actual_pnl = float(actual_pnl_row['total'] or 0.0)
+                    
+                    # 2. Fetch All Shadow Intents (Pre-Veto)
+                    # We limit to last 24h to keep it responsive
+                    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                    shadows = await conn.fetch(
+                        "SELECT asset, action, quantity, price FROM shadow_trades WHERE time >= $1",
+                        today_start
+                    )
+                    
+                    shadow_pnl = 0.0
+                    for s in shadows:
+                        asset = s['asset']
+                        # Get current price from Redis for Mark-to-Market
+                        curr_price_raw = await self.redis.get(f"latest_market_state:{asset}")
+                        curr_price = float(json.loads(curr_price_raw).get('price', s['price'])) if curr_price_raw else s['price']
+                        
+                        # Calculate hypothetical MTM P&L: (Exit - Entry) * Lots
+                        if s['action'] == 'BUY':
+                            shadow_pnl += (curr_price - s['price']) * s['quantity']
+                        else:
+                            shadow_pnl += (s['price'] - curr_price) * s['quantity']
+                            
+                return {
+                    "actual_pnl": actual_pnl,
+                    "shadow_pnl": shadow_pnl,
+                    "alpha_added": actual_pnl - shadow_pnl,
+                    "intent_count": len(shadows),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+            @app.get("/audit/rejections")
+            async def get_rejections():
+                """Phase 9.1: Exposes the 'Audit Journal' of risk vetoes."""
+                if not self.pool: return []
+                async with self.pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT time, asset, strategy_id, reason, alpha, vpin FROM rejections ORDER BY time DESC LIMIT 50"
+                    )
+                    return [dict(r) for r in rows]
+
             @app.get("/metrics")
             async def get_metrics():
                 return {

@@ -42,12 +42,50 @@ class TokenBucketRateLimiter:
         self.last_refill = time.monotonic()
     
     async def acquire(self):
+        # [Audit-Fix] Always refill tokens before checking, ensuring bursts 
+        # are handled even if the bucket wasn't drained previously.
+        now = time.monotonic()
+        elapsed = now - self.last_refill
+        self.tokens = min(self.rate, self.tokens + elapsed * (self.rate / self.per))
+        self.last_refill = now
+        
         while self.tokens < 1:
             await asyncio.sleep(0.05)
-            elapsed = time.monotonic() - self.last_refill
+            now = time.monotonic()
+            elapsed = now - self.last_refill
             self.tokens = min(self.rate, self.tokens + elapsed * (self.rate / self.per))
-            self.last_refill = time.monotonic()
+            self.last_refill = now
         self.tokens -= 1
+
+
+async def init_db(pool):
+    """Initializes the TimescaleDB schema for Layer 8 Audit."""
+    async with pool.acquire() as conn:
+        logger.info("Initializing TimescaleDB schema for Shadow Ledger...")
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS shadow_trades (
+                id UUID PRIMARY KEY,
+                time TIMESTAMPTZ NOT NULL,
+                asset TEXT NOT NULL,
+                underlying TEXT NOT NULL,
+                strategy_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                quantity DOUBLE PRECISION NOT NULL,
+                price DOUBLE PRECISION NOT NULL,
+                parent_uuid TEXT NOT NULL,
+                execution_type TEXT NOT NULL,
+                regime INTEGER,
+                s27_quality DOUBLE PRECISION,
+                status TEXT NOT NULL DEFAULT 'INTENT'
+            );
+        """)
+        try:
+            await conn.execute("SELECT create_hypertable('shadow_trades', 'time', if_not_exists => TRUE);")
+            logger.info("shadow_trades hypertable verified.")
+        except Exception: pass
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_shadow_parent ON shadow_trades (parent_uuid);")
+
+    logger.info("Database schema check complete.")
 
 
 class LiveExecutionEngine:
@@ -346,6 +384,7 @@ class LiveExecutionEngine:
             if status == 'COMPLETE': return 'COMPLETE'
             if status == 'REJECTED': return 'REJECTED'
             if status == 'CANCELED': return 'CANCELLED'
+            if status == 'PARTIALLY_FILLED': return 'PARTIAL'
             return 'PENDING'
         return 'UNKNOWN'
 
@@ -739,6 +778,44 @@ class LiveExecutionEngine:
                 logger.error(f"Cmd listener error: {e}")
                 await asyncio.sleep(1)
 
+    async def shadow_intent_listener(self):
+        """[Layer 8] Listens for all SHADOW_INTENT pulses for counterfactual analysis."""
+        sub = self.mq.create_subscriber(Ports.TRADE_EVENTS, topics=["SHADOW."])
+        logger.info("Live Shadow listener active. Journaling all intents...")
+        while True:
+            try:
+                topic, event = await self.mq.recv_json(sub)
+                if not event: continue
+                
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO shadow_trades (
+                            id, time, asset, underlying, strategy_id, action, 
+                            quantity, price, parent_uuid, execution_type, 
+                            regime, s27_quality
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                        ON CONFLICT (id) DO NOTHING
+                        """,
+                        uuid.UUID(event.get('id', str(uuid.uuid4()))),
+                        datetime.fromisoformat(event['time']).astimezone(timezone.utc),
+                        event['asset'],
+                        event.get('underlying', event['asset']),
+                        event['strategy_id'],
+                        event['action'],
+                        float(event['quantity']),
+                        float(event['price']),
+                        event['parent_uuid'],
+                        event['execution_type'],
+                        event.get('regime'),
+                        event.get('s27_quality')
+                    )
+            except zmq.Again:
+                continue
+            except Exception as e:
+                logger.error(f"Shadow listener error: {e}")
+                await asyncio.sleep(1)
+
 async def _run_heartbeat(r):
     from core.health import HeartbeatProvider
     hb = HeartbeatProvider("LiveBridge", r)
@@ -768,6 +845,9 @@ async def main():
         logger.critical("Failed to connect to DB after 10 attempts. Exiting.")
         return
     
+    # Initialize DB schema for Layer 8
+    await init_db(pool)
+    
     engine = LiveExecutionEngine(mq, pool, redis_client)
     auth_success = await engine.authenticate()
     
@@ -778,6 +858,7 @@ async def main():
                 engine.panic_listener(),
                 engine.cmd_listener(),       # Phase 13.3
                 engine.rejection_listener(),   # [Layer 7]
+                engine.shadow_intent_listener(), # [Layer 8]
                 engine._publish_liveliness(), # [Audit-Fix] Component 5
                 _run_heartbeat(redis_client), # Phase 9: UI & Observability
             )

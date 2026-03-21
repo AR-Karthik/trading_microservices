@@ -99,6 +99,32 @@ async def init_db(pool):
             );
         """)
 
+        # [Layer 8] Shadow Trades Counterfactual Ledger
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS shadow_trades (
+                id UUID PRIMARY KEY,
+                time TIMESTAMPTZ NOT NULL,
+                asset TEXT NOT NULL,
+                underlying TEXT NOT NULL,
+                strategy_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                quantity DOUBLE PRECISION NOT NULL,
+                price DOUBLE PRECISION NOT NULL,
+                parent_uuid TEXT NOT NULL,
+                execution_type TEXT NOT NULL,
+                regime INTEGER,
+                s27_quality DOUBLE PRECISION,
+                status TEXT NOT NULL DEFAULT 'INTENT'
+            );
+        """)
+        try:
+            await conn.execute("SELECT create_hypertable('shadow_trades', 'time', if_not_exists => TRUE);")
+            logger.info("shadow_trades hypertable verified.")
+        except Exception: pass
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_shadow_parent ON shadow_trades (parent_uuid);")
+
+    logger.info("Database schema check complete.")
+
         # [D-44] Ensure delta and theta columns exist for existing tables
         try:
             await conn.execute("ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS delta NUMERIC(15, 4) DEFAULT 0.0;")
@@ -480,6 +506,44 @@ class PaperBridge:
                 logger.error(f"Rejection listener error: {e}")
                 await asyncio.sleep(1)
 
+    async def shadow_intent_listener(self):
+        """[Layer 8] Listens for all SHADOW_INTENT pulses for counterfactual analysis."""
+        sub = self.mq.create_subscriber(Ports.TRADE_EVENTS, topics=["SHADOW."])
+        logger.info("Paper Shadow listener active. Journaling all intents...")
+        while True:
+            try:
+                topic, event = await self.mq.recv_json(sub)
+                if not event: continue
+                
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO shadow_trades (
+                            id, time, asset, underlying, strategy_id, action, 
+                            quantity, price, parent_uuid, execution_type, 
+                            regime, s27_quality
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                        ON CONFLICT (id) DO NOTHING
+                        """,
+                        uuid.UUID(event.get('id', str(uuid.uuid4()))),
+                        datetime.fromisoformat(event['time']).astimezone(timezone.utc),
+                        event['asset'],
+                        event.get('underlying', event['asset']),
+                        event['strategy_id'],
+                        event['action'],
+                        float(event['quantity']),
+                        float(event['price']),
+                        event['parent_uuid'],
+                        event['execution_type'],
+                        event.get('regime'),
+                        event.get('s27_quality')
+                    )
+            except zmq.Again:
+                continue
+            except Exception as e:
+                logger.error(f"Shadow listener error: {e}")
+                await asyncio.sleep(1)
+
     async def panic_listener(self):
         """Phase 13.3: Listens for Global Square Off commands via Redis PubSub."""
         pubsub = self.redis.pubsub()
@@ -576,6 +640,7 @@ async def main():
             bridge.execute_orders(pull_socket),
             bridge.panic_listener(),
             bridge.rejection_listener(),
+            bridge.shadow_intent_listener(),
             _run_heartbeat(r)
         )
     else:

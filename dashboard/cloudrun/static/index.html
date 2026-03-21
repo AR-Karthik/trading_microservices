@@ -198,6 +198,7 @@
                                             <th className="pb-3">UUID</th>
                                             <th className="pb-3">Instrument</th>
                                             <th className="pb-3">Entry Price</th>
+                                            <th className="pb-3">Inception Δ%</th>
                                             <th className="pb-3">Delta (Δ)</th>
                                             <th className="pb-3">Theta (Θ)</th>
                                             <th className="pb-3">Risk Light</th>
@@ -212,6 +213,9 @@
                                                     <td className="py-3 text-gray-500">{p.parent_uuid?.slice(0, 8) || 'N/A'}</td>
                                                     <td className="py-3 font-bold text-white"><span className={p.quantity>0 ? 'text-success':'text-danger'}>{p.quantity>0?'L':'S'}</span> {p.symbol}</td>
                                                     <td className="py-3">{p.avg_price?.toFixed(2)}</td>
+                                                    <td className={`py-3 mono ${Math.abs(p.avg_price - p.inception_spot)/p.inception_spot*100 > 0.4 ? 'text-danger' : 'text-gray-400'}`}>
+                                                        {p.inception_spot > 0 ? ((p.avg_price - p.inception_spot)/p.inception_spot*100).toFixed(2) + '%' : '—'}
+                                                    </td>
                                                     <td className="py-3">{p.delta?.toFixed(3)}</td>
                                                     <td className="py-3 text-warning">{p.theta?.toFixed(3)}</td>
                                                     <td className="py-3"><div className={`w-3 h-3 rounded-full ${riskColor} shadow-[0_0_8px_currentColor]`} /></td>
@@ -241,6 +245,22 @@
                                             marginLeft: Object.values(telemetry.portfolio_delta || {}).reduce((a,b)=>a+b, 0) >= 0 ? '50%' : `${50 - Math.min(45, Math.abs(Object.values(telemetry.portfolio_delta || {}).reduce((a,b)=>a+b, 0)) * 2)}%`
                                          }}></div>
                                 </div>
+                            </div>
+                            
+                            {/* [Audit-Fix] Component 7: Execution Quality (Latency vs. Slippage) */}
+                            <div className="w-full mb-8">
+                                <div className="flex justify-between text-[9px] font-black text-gray-400 uppercase mb-2">
+                                    <span>System Latency (LTT Pulse)</span>
+                                    <span className={`mono ${telemetry.avg_latency_ms > 100 ? 'text-danger' : 'text-success'}`}>
+                                        {telemetry.avg_latency_ms?.toFixed(1) || '0.0'}ms
+                                    </span>
+                                </div>
+                                <div className="flex gap-1 h-2">
+                                    {[...Array(20)].map((_, i) => (
+                                        <div key={i} className={`flex-1 rounded-full ${i < (telemetry.avg_latency_ms/10) ? 'bg-danger' : 'bg-success/20'}`}></div>
+                                    ))}
+                                </div>
+                                <p className="text-[7px] text-gray-600 mt-1 uppercase">Warning: Slippage scales 5x in Regime 3 if latency &gt; 250ms</p>
                             </div>
 
                             {/* [Audit-Fix] Component 6: Real-Time Liquidity Thermometer */}
@@ -276,12 +296,15 @@
         // --- TAB 3: STRATEGY ALPHA ---
         const StrategyAlpha = ({ state }) => {
             const [logs, setLogs] = useState([]);
+            const [rejections, setRejections] = useState([]);
             
             useEffect(() => {
-                fetch(`${API_BASE}/logs/hunter`).then(r => r.json()).then(setLogs).catch(()=>{});
-                const i = setInterval(() => {
+                const fetchAlphaData = () => {
                     fetch(`${API_BASE}/logs/hunter`).then(r => r.json()).then(setLogs).catch(()=>{});
-                }, 2000);
+                    fetch(`${API_BASE}/audit/rejections`).then(r => r.json()).then(setRejections).catch(()=>{});
+                };
+                fetchAlphaData();
+                const i = setInterval(fetchAlphaData, 2000);
                 return () => clearInterval(i);
             }, []);
 
@@ -302,6 +325,27 @@
                                 </div>
                             )})}
                             <div className="absolute bottom-2 right-4 w-2 h-4 bg-accent animate-pulse"></div>
+                        </div>
+
+                        {/* [Audit-Fix] Component 1: The Rejection Auditor */}
+                        <div className="oled-card p-6 rounded-2xl mt-6 border-warning/20">
+                            <h3 className="text-[10px] font-black uppercase text-warning mb-4 flex justify-between">
+                                <span>Rejection Journal (Risk Vetoes)</span>
+                                <span className="mono text-[8px]">{rejections.length} EVENTS TODAY</span>
+                            </h3>
+                            <div className="space-y-2 max-h-48 overflow-y-auto pr-2 scroll-hide">
+                                {rejections.length === 0 && <div className="text-[9px] text-gray-600 font-bold uppercase py-4 text-center">No risk vetoes logged</div>}
+                                {rejections.map((rej, i) => (
+                                    <div key={i} className="flex justify-between items-center bg-warning/5 p-2 rounded border border-warning/10">
+                                        <div className="text-[9px]">
+                                            <span className="text-gray-500 mr-2">[{rej.time.split('T')[1].slice(0,8)}]</span>
+                                            <span className="font-bold text-white">{rej.asset}</span>
+                                            <span className="text-warning ml-2">→ {rej.reason}</span>
+                                        </div>
+                                        <div className="text-[9px] mono text-gray-400">α: {rej.alpha.toFixed(2)} | VPIN: {rej.vpin.toFixed(2)}</div>
+                                    </div>
+                                ))}
+                            </div>
                         </div>
                     </div>
                     <div className="oled-card p-6 rounded-2xl">
@@ -372,22 +416,77 @@
                     <div className="oled-card p-6 rounded-2xl col-span-1 lg:col-span-2">
                         <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6">Daemon Heartbeats</h3>
                         <div className="flex gap-4 flex-wrap">
-                            {['NSE_MD', 'BSE_MD', 'OMS_EXEC', 'META_ROUTER', 'HMM_ENGINE', 'RISK_DAEMON', 'CLD_SYNC', 'TELEMETRY'].map((d, i) => {
-                                const active = telemetry.daemons?.includes(d) || i < 5;
-                                return (
-                                <div key={d} className="flex flex-col items-center justify-center p-2 bg-white/5 rounded min-w-[80px] group cursor-default border border-white/5 hover:border-white/20 transition-all">
-                                    <div className={`w-3 h-3 rounded-full shadow-[0_0_8px_currentColor] ${active ? 'bg-success text-success' : 'bg-danger text-danger'}`}></div>
-                                    <div className="text-[7px] font-black tracking-widest text-gray-400 mt-2">{d}</div>
+                            {Object.entries(telemetry.live_heartbeats || {}).map(([name, data]) => (
+                                <div key={name} className="flex flex-col items-center justify-center p-2 bg-white/5 rounded min-w-[100px] border border-white/5 hover:border-accent/30 transition-all">
+                                    <div className={`w-3 h-3 rounded-full shadow-[0_0_8px_currentColor] ${data.status === 'ALIVE' ? 'text-success bg-success' : 'text-danger bg-danger'}`}></div>
+                                    <div className="text-[7px] font-black tracking-widest text-gray-400 mt-2">{name.toUpperCase()}</div>
+                                    <div className="text-[6px] mono text-gray-600 mt-1">{data.timestamp?.split('T')[1]?.slice(0,8) || '—'}</div>
                                 </div>
-                            )})}
+                            ))}
                         </div>
                     </div>
                 </div>
             );
         };
 
+        const DeepDive = ({ state, asset }) => {
+            const assetState = state.index_states?.[asset] || {};
+            const signals = assetState || {}; // index_states[asset] contains the full signal map
+            const indicators = state.indicators || {};
+
+            const DataRow = ({ label, value, sub, color = "text-white" }) => (
+                <div className="flex justify-between items-center border-b border-white/5 py-2 hover:bg-white/[0.02] transition-colors">
+                    <div className="flex flex-col">
+                        <span className="text-[8px] font-black text-gray-500 uppercase leading-none">{label}</span>
+                        {sub && <span className="text-[7px] text-gray-600 font-bold">{sub}</span>}
+                    </div>
+                    <div className={`mono text-xs font-bold ${color}`}>{value}</div>
+                </div>
+            );
+
+            return (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 animate-in slide-in-from-bottom-4 duration-500">
+                    {/* COLUMN 1: MICROSTRUCTURE RAW */}
+                    <div className="oled-card p-4 rounded-xl border-l-2 border-accent">
+                        <h4 className="text-[9px] font-black text-accent uppercase mb-3 tracking-tighter">Micro-Signals (L2)</h4>
+                        <DataRow label="VPIN" sub="Order Flow Toxicity" value={signals.vpin?.toFixed(4) || "0.0000"} color={signals.vpin > 0.8 ? "text-danger" : "text-success"} />
+                        <DataRow label="OFI" sub="Order Flow Imbalance" value={signals.ofi?.toFixed(2)} color={signals.ofi > 0 ? "text-success" : "text-danger"} />
+                        <DataRow label="CVD Score" sub="Cum. Vol. Delta" value={signals.cvd_score?.toFixed(1)} />
+                        <DataRow label="Smart Flow" sub="Institutional Pulse" value={signals.smart_flow?.toFixed(2)} />
+                    </div>
+
+                    {/* COLUMN 2: REGIME HYSTERESIS */}
+                    <div className="oled-card p-4 rounded-xl border-l-2 border-warning">
+                        <h4 className="text-[9px] font-black text-warning uppercase mb-3 tracking-tighter">Regime Cortex (L3)</h4>
+                        <DataRow label="Current S18" sub="HMM Hidden State" value={signals.regime || "WAITING"} color="text-warning" />
+                        <DataRow label="S27 Quality" sub="Regime Confidence" value={`${(signals.s27 || 0).toFixed(1)}%`} />
+                        <DataRow label="Persistence" sub="Regime Stability (S26)" value={`${(signals.s26 || 0).toFixed(1)}%`} />
+                        <DataRow label="Hurst" sub="Mean Rev vs Trend" value={signals.hurst?.toFixed(3)} />
+                    </div>
+
+                    {/* COLUMN 3: VETO GATES */}
+                    <div className="oled-card p-4 rounded-xl border-l-2 border-danger">
+                        <h4 className="text-[9px] font-black text-danger uppercase mb-3 tracking-tighter">Risk Vetoes (L4)</h4>
+                        <DataRow label="System Halt" sub="Global Circuit" value={state.system_halt ? "HALTED" : "CLEAR"} color={state.system_halt ? "text-danger" : "text-success"} />
+                        <DataRow label="Heat Cap" sub="Global Kelly limit" value={state.heat_capped ? "ACTIVE" : "NONE"} color={state.heat_capped ? "text-danger" : "text-success"} />
+                        <DataRow label="Low Vol Trap" sub="IV < 12% Veto" value={indicators.iv_low_vol_trap ? "TRIGGERED" : "OFF"} color={indicators.iv_low_vol_trap ? "text-danger" : "text-success"} />
+                        <DataRow label="ASTO Shield" sub="Extreme Vol Barrier" value={indicators.asto_shield ? "ACTIVE" : "CLEAR"} color={indicators.asto_shield ? "text-danger" : "text-success"} />
+                    </div>
+
+                    {/* COLUMN 4: EXECUTION ARBITRAGE */}
+                    <div className="oled-card p-4 rounded-xl border-l-2 border-success">
+                        <h4 className="text-[9px] font-black text-success uppercase mb-3 tracking-tighter">Execution (L7)</h4>
+                        <DataRow label="Net Delta" sub="Portfolio Greek" value={state.net_delta?.toFixed(2)} />
+                        <DataRow label="Latency" sub="LTT -> DB Pulse" value={`${(state.avg_latency_ms || 0).toFixed(1)}ms`} color={state.avg_latency_ms > 100 ? "text-danger" : "text-accent"} />
+                        <DataRow label="Lot Size" sub="Dynamic Multiplier" value={state.current_lot_size || 1} />
+                        <DataRow label="Buffer" sub="Hedge Reserve" value={formatCurrency((state.available_margin_live || 0) * 0.15)} />
+                    </div>
+                </div>
+            );
+        };
+
         // --- TAB 5: ANALYTICS & EOD ---
-        const AnalyticsEOD = ({ analytics = {}, fiidii = [] }) => {
+        const AnalyticsEOD = ({ analytics = {}, fiidii = [], efficacy = {} }) => {
             const [timeRange, setTimeRange] = useState('Today');
             return (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-in fade-in duration-500">
@@ -442,14 +541,30 @@
                                     </div>
                                     <div className="flex h-6 rounded overflow-hidden">
                                         <div className="bg-success text-[8px] text-black font-bold flex items-center justify-center" style={{width: `${(v.buyValue/(v.buyValue+v.sellValue))*100}%`}}>LONG</div>
-                                        <div className="bg-danger text-[8px] text-white font-bold flex items-center justify-center" style={{width: `${(v.sellValue/(v.buyValue+v.sellValue))*100}%`}}>SHORT</div>
+                                        <div className="bg-danger text-[8px] text-white font-bold flex items-center justify-center" style={{width: `${(v.buyValue/(v.buyValue+v.sellValue))*100}%`}}>SHORT</div>
                                     </div>
                                 </div>
                             ))}
-                            <div className="mt-8 pt-4 border-t border-white/10 text-center">
-                                <div className="text-[9px] font-black text-gray-500 uppercase mb-2">Tomorrow's Market Bias</div>
-                                <div className="text-xl font-black text-accent tracking-widest bg-accent/10 py-2 rounded">BULLISH</div>
+                        </div>
+                    </div>
+
+                    <div className="oled-card p-6 rounded-2xl bg-gradient-to-br from-card to-accent/5 border border-accent/20 lg:col-span-2">
+                        <h3 className="text-[10px] font-black uppercase text-accent mb-4">Meta-Router Efficacy (PhD Metric)</h3>
+                        <div className="flex justify-between items-center h-24 px-8">
+                            <div className="text-center">
+                                <div className="text-[8px] font-bold text-gray-500 uppercase">Shadow P&L (No Vetoes)</div>
+                                <div className="text-xl font-black mono text-gray-400">{formatCurrency(efficacy.shadow_pnl || 0)}</div>
                             </div>
+                            <div className="text-3xl font-black text-accent">→</div>
+                            <div className="text-center">
+                                <div className="text-[8px] font-bold text-gray-500 uppercase">Actual P&L (With Vetoes)</div>
+                                <div className="text-xl font-black mono text-success">{formatCurrency(efficacy.actual_pnl || 0)}</div>
+                            </div>
+                        </div>
+                        <div className={`mt-4 p-2 border rounded text-center ${efficacy.alpha_added >= 0 ? 'bg-success/10 border-success/20' : 'bg-danger/10 border-danger/20'}`}>
+                            <span className={`text-[10px] font-black uppercase ${efficacy.alpha_added >= 0 ? 'text-success' : 'text-danger'}`}>
+                                Alpha Added: {efficacy.alpha_added >= 0 ? '+' : ''}{formatCurrency(efficacy.alpha_added || 0)} ({efficacy.alpha_added >= 0 ? 'Saved from Toxic Flow' : 'Opportunity Cost'})
+                            </span>
                         </div>
                     </div>
                 </div>
@@ -596,16 +711,18 @@
             const [state, setState] = useState({ hmm_regime: 'UNKNOWN', signals: {}, power_five: {} });
             const [positions, setPositions] = useState([]);
             const [telemetry, setTelemetry] = useState({});
+            const [efficacy, setEfficacy] = useState({});
             
             const fetchData = async () => {
                 try {
-                    const [s, p, t] = await Promise.all([
+                    const [s, p, t, e] = await Promise.all([
                         fetch(`${API_BASE}/state?asset=${asset}`).then(r => r.json()),
                         fetch(`${API_BASE}/portfolio?mode=${mode}`).then(r => r.json()),
-                        fetch(`${API_BASE}/health/telemetry`).then(r => r.json())
+                        fetch(`${API_BASE}/health/telemetry`).then(r => r.json()),
+                        fetch(`${API_BASE}/analytics/meta_router_efficacy`).then(r => r.json())
                     ]);
-                    setState(s); setPositions(p); setTelemetry(t);
-                } catch(e) {}
+                    setState(s); setPositions(p); setTelemetry(t); setEfficacy(e);
+                } catch(err) {}
             };
 
             useEffect(() => {
@@ -622,6 +739,7 @@
                 {id: 'ALPHA', label: 'Strategy Alpha'},
                 {id: 'HLTH', label: 'System Health'},
                 {id: 'EOD', label: 'Analytics & EOD'},
+                {id: 'DEEP', label: 'Matrix View'},
                 {id: 'CONF', label: 'System Config'}
             ];
 
@@ -654,7 +772,8 @@
                         {activeTab === 'PORT' && <PortfolioRisk positions={positions} telemetry={state} />}
                         {activeTab === 'ALPHA' && <StrategyAlpha state={state} />}
                         {activeTab === 'HLTH' && <SystemHealth telemetry={telemetry} state={state} />}
-                        {activeTab === 'EOD' && <AnalyticsEOD />}
+                        {activeTab === 'EOD' && <AnalyticsEOD efficacy={efficacy} />}
+                        {activeTab === 'DEEP' && <DeepDive state={telemetry} asset={asset} />}
                         {activeTab === 'CONF' && <SystemConfig />}
                     </main>
                 </div>

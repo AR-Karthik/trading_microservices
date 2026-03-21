@@ -430,6 +430,11 @@ class MetaRouter:
             raw_map = await self._redis.get("CONFIG:LIFECYCLE_MAP") if self._redis else None
             effective_map = json.loads(raw_map) if raw_map else LIFECYCLE_MAP
             active_dec["lifecycle_class"] = str(effective_map.get(strat_id, "KINETIC"))
+            
+            # [Audit-Fix] Layer 8: Shadow Intent Logging (Counterfactual Ledger)
+            # Use asyncio.create_task to ensure zero-latency impact on main routing path
+            if active_dec.get("lots", 0) > 0:
+                asyncio.create_task(self._log_shadow_intent(asset, active_dec, state, ctx))
 
             # [C2-03] Regime-Strategy Lock: block dispatch if regime not authorized
             allowed_regimes = REGIME_STRATEGY_LOCK.get(strat_id, [])
@@ -961,6 +966,31 @@ class MetaRouter:
         # Publish to Ports.TRADE_EVENTS with REJECTION. topic
         await self.mq.send_json(self.trade_pub, f"REJECTION.{asset}", payload)
         logger.debug(f"📤 REJECTION PULSE: {asset} | {reason}")
+
+    async def _log_shadow_intent(self, asset, active_dec, state, ctx):
+        """[Layer 8] Dispatches SHADOW_INTENT for counterfactual P&L analysis."""
+        if self.test_mode:
+            return
+            
+        payload = {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "asset": asset,
+            "underlying": asset, # Default to asset symbol
+            "strategy_id": active_dec.get("strategy_id", "KINETIC"),
+            "action": active_dec.get("action", "BUY"),
+            "quantity": float(active_dec.get("lots", 0.0)),
+            "price": float(state.get("price", 0.0)),
+            "parent_uuid": active_dec.get("parent_uuid", "NONE"),
+            "execution_type": "LIVE", # MetaRouter runs in live mode usually
+            "regime": int(ctx.get("s18_int", 0)),
+            "s27_quality": float(ctx.get("s27", 0.0))
+        }
+        # Use simple try-except to guarantee zero impact on caller
+        try:
+            await self.mq.send_json(self.trade_pub, f"SHADOW.{asset}", payload)
+            logger.debug(f"📊 SHADOW INTENT LOGGED: {asset} | {active_dec.get('strategy_id')}")
+        except Exception as e:
+            logger.error(f"Failed to log shadow intent: {e}")
 
 if __name__ == "__main__":
     if uvloop:
