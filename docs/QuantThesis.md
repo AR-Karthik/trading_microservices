@@ -1,4 +1,6 @@
-# Module 0 - Part 1: The Quant & Strategic Thesis
+# Part 1: The Quant & Strategic Thesis
+
+## Module 0 - Introduction
 
 ### 1. Philosophical Bedrock: The "Regime-First" Mandate
 Project K.A.R.T.H.I.K. is built on the mathematical reality that market stationarity is a myth. Standard retail systems often fail because they apply static logic (e.g., mean-reversion) to a dynamic environment. Our core thesis mandates that **Regime Detection** is the primary filter for all capital allocation. No trade is permitted to execute unless the market’s "DNA"—measured via Hurst Exponents, HMM States, and ASTO regimes—aligns with the strategy’s theoretical edge.
@@ -18,7 +20,7 @@ The system maintains a balanced, bifurcated strategy suite designed to thrive in
 Project K.A.R.T.H.I.K. treats Risk as a "First-Class Citizen". The system operates under a **Sovereign Risk Model** where a dedicated `LiquidationDaemon` has the absolute authority to kill any position based on a **Triple-Barrier** logic (Take-Profit, Stop-Loss, and Vertical Time Exits), bypassing the strategy engine’s own state if risk budgets are breached.
 
 
-# Module 1 - Part 1: The Quant & Strategic Thesis (Data Fidelity & Ingestion)
+# Module 1 - (Data Fidelity & Ingestion)
 
 ### 1. The Strategy of "Zero-Lag" Ingestion
 In institutional quantitative finance, the period between an event occurring at the exchange and its processing by a strategy is known as **Information Decay**. Project K.A.R.T.H.I.K. operates on the foundational thesis that **Alpha is highly perishable**, especially in 0DTE (Zero Days to Expiration) environments where gamma and theta are explosive. 
@@ -46,7 +48,7 @@ To further reduce internal latency, the ingestion layer normalizes all incoming 
 * **Why Binary?**: Standard JSON parsing in Python is slow and creates large objects in memory. Protobuf creates tiny binary payloads that can be transmitted across the ZeroMQ bus with ~40µs latency.
 * **Quant Impact**: Smaller wire-size means faster arrival at the `MarketSensor`, ensuring that microstructure calculations (like OFI) are computed in near-real-time relative to the exchange.
 
-# Module 2 - Part 1: The Quant & Strategic Thesis (Alpha Generation & Feature Engineering)
+# Module 2 - (Alpha Generation & Feature Engineering)
 
 ### 1. The Core Analytical Thesis: "Microstructure as Destiny"
 The central quantitative pillar of Project K.A.R.T.H.I.K. is that price movement is a lagging indicator of **Order Flow Dynamics**. The Market Sensor is designed to move beyond simple technical analysis by decomposing the market into four dimensions of alpha: **Regime DNA**, **Flow Toxicity**, **Liquidity Imbalance**, and **Structural Convergence**.
@@ -79,7 +81,7 @@ To prevent "Retail Fakes," the system employs a lead-lag confirmation gate using
 ### 7. Signal Decay (Phasic Latency Weighting)
 The system acknowledges that alpha has a "Half-Life." Using a mathematical decay function ($e^{-0.005 \times latency}$), the system reduces the force of an alpha signal if the processing lag exceeds 50ms. This ensures that the system never executes an aggressive "momentum" trade on information that has already been priced in by faster participants.
 
-# Module 3 - Part 1: The Quant & Strategic Thesis (Regime Detection & Meta-Routing)
+# Module 3 - (Regime Detection & Meta-Routing)
 
 ### 1. The Core Decision Thesis: "The Gatekeeper of Alpha"
 Project K.A.R.T.H.I.K. operates on the principle that **Strategy is a slave to Regime**. While Module 2 generates raw alpha signals, Module 3 acts as the sovereign gatekeeper. Its primary strategic mandate is to ensure that no capital is deployed unless the market’s mathematical "DNA" is perfectly aligned with the intended strategy’s risk profile. 
@@ -113,7 +115,7 @@ Before any "Live" strike, the **Stress Test Engine** simulates "Black Swan" scen
 To prevent "Double-Spending" or margin rejections at the broker level, the system uses Redis LUA scripts to perform **Atomic Margin Reservation**. 
 * **Quarantine Pool**: Capital for pending orders is moved into a virtual "Quarantine" state. This ensures that concurrent strategies do not compete for the same cash, enforcing a strict 50:50 Cash-to-Collateral regulatory balance.
 
-# Module 4 - Part 1: The Quant & Strategic Thesis (Strategy Logic & Tactical Alpha)
+# Module 4 - (Strategy Logic & Tactical Alpha)
 
 ### 1. The Tactical Mandate: "Regime-Specific Weapons"
 Project K.A.R.T.H.I.K. operates on the strategic pillar that no single strategy is profitable in all market conditions. The `StrategyEngine` acts as a tactical armory, maintaining a diverse suite of strategies that are only "unlocked" when their corresponding mathematical regime is detected by the MetaRouter.
@@ -164,7 +166,7 @@ Position sizing is not fixed but is a function of the **Multi-Factor Quality Sco
 The engine acknowledges that the strategic edge of a signal decays exponentially with time. 
 * **Latency Weighting**: A decay function ($e^{-0.005 \times (latency - 50)}$) is applied to the alpha force. If network or processing lag exceeds 200ms, the signal force is drastically reduced, preventing "momentum chasing" on stale data.
 
-# Module 5 - Part 1: The Quant & Strategic Thesis (Execution Bridge & Realities)
+# Module 5 - (Execution Bridge & Realities)
 
 ### 1. The Thesis of "Unified Intent": Eliminating Code Drift
 Project K.A.R.T.H.I.K. operates on the foundational execution principle that **Paper and Live realities must share the exact same mathematical DNA**. Standard trading systems often suffer from "Code Drift," where the simulation engine and the live execution engine utilize different logic paths, leading to backtest-to-live performance degradation. The `UnifiedBridge` solves this by acting as a **Unified Intent Multiplexer**, ensuring every order intent is rendered across all realities simultaneously using identical state-transition logic.
@@ -193,7 +195,7 @@ The bridge functions as the "Supreme Commander" during panic events. It implemen
 ### 7. The 3s Bailout Audit
 Execution risk doesn't end with order placement. The bridge executes a **Delayed Fill Audit** 3 seconds after every live strike. If the order status is not `COMPLETE` or `FILLED`, the system identifies a "Partial Fill Trap" and triggers an **Atomic Rollback** of the entire basket spread to prevent unhedged liability.
 
-# Module 6 - Part 1: The Quant & Strategic Thesis (Risk Guardianship & Liquidation)
+# Module 6 - (Risk Guardianship & Liquidation)
 
 ### 1. The Core Risk Thesis: "The Sovereign Guardian"
 Project K.A.R.T.H.I.K. operates under the strategic mandate of **Separation of Concerns**. While the Strategy Engine is designed to identify alpha, the `LiquidationDaemon` is designed to protect capital. It acts as a sovereign authority with the power to override strategy logic and terminate any position that breaches mathematical risk parameters. The core thesis is that **Alpha is made in entries, but Wealth is preserved in exits**.
@@ -226,7 +228,7 @@ The daemon treats multi-leg spreads (Iron Condors, Butterflies) as **Atomic Unit
 ### 6. The "Twitchy Mode" (Defensive Hyper-Scaling)
 During "Extreme Trend" regimes, the guardian enters a state of hyper-vigilance. It tightens trailing stops for losing legs to a conservative **$0.5\times$ ATR**. This ensures that "trapped" wings in a broken Iron Condor are exited at the first sign of a temporary counter-trend move, rather than waiting for a full reversal.
 
-# Module 7 - Part 1: The Quant & Strategic Thesis (Order Reconciliation & Basket Integrity)
+# Module 7 - (Order Reconciliation & Basket Integrity)
 
 ### 1. The Core Integrity Thesis: "Atomic Basket Management"
 Project K.A.R.T.H.I.K. operates on the strategic realization that **Execution is not a single event, but a state-transition**. While the Bridge fires orders, the `OrderReconciler` ensures those orders result in valid mathematical structures. In a multi-leg environment (Iron Condors, Butterflies), the system treats a collection of individual orders as a single **Atomic Basket**. The core thesis is that **a partially filled spread is worse than no trade at all**, as it exposes the portfolio to unhedged directional or gamma risk.
@@ -259,7 +261,7 @@ Not all broken baskets can be fixed by code. The reconciler implements a **Dead-
 * **Logic**: If an automated rollback fails 3 consecutive times (e.g., due to a persistent broker API error or a trading halt), the reconciler marks the basket as `CRITICAL_INTERVENTION`.
 * **Action**: It freezes the associated strategy to prevent it from firing new intents and issues a high-priority cloud alert. This acknowledges that **human intervention is the final layer of risk management** when market physics break the algorithm's capability.
 
-# Module 8 - Part 1: The Quant & Strategic Thesis (Dashboard & Observability)
+# Module 8 - (Dashboard & Observability)
 
 ### 1. The Thesis of "Absolute Visibility": Observability as Risk Management
 Project K.A.R.T.H.I.K. operates on the strategic realization that **in a distributed system, a blind spot is a precursor to ruin**. While the system is designed to be autonomous, the `Dashboard` module serves as the primary diagnostic tool for monitoring "Algorithmic Drift"—the delta between the system's mathematical intent and its physical execution. The core thesis is that **Execution Transparency is a mandatory layer of defense**.
@@ -292,7 +294,7 @@ Project K.A.R.T.H.I.K. treats monitoring as a decoupled, multi-environment servi
 * **Cloud Persistence**: Using the `CloudPublisher` daemon, system state and critical trade events are mirrored to a cloud backend (GCP Cloud Run). 
 * **Strategic Continuity**: This ensures that even if the local trading rig loses power or internet connectivity, the operator has an immutable record of the system's "Last Known Good State" and active positions on their mobile device.
 
-# Module 9 - Part 1: The Quant & Strategic Thesis (Institutional Sentiment & Macro Integration)
+# Module 9 - (Institutional Sentiment & Macro Integration)
 
 ### 1. The Thesis of "Exogenous Alpha": Beyond the Tape
 Project K.A.R.T.H.I.K. operates on the strategic realization that while microstructure (VPIN, OFI) explains the *how* of price movement, institutional flow and macro events explain the *why*. The core thesis of this module is that **Local Alpha is amplified or invalidated by Global Context**. By integrating exogenous data—specifically FII/DII activity and economic calendars—the system transforms from a "reactive" bot into a "context-aware" institutional agent.
