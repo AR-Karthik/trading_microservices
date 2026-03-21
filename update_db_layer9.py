@@ -17,7 +17,7 @@ async def run():
             conn = await asyncpg.connect(user=user, password=password, database=database, host=host)
         except:
             conn = await asyncpg.connect(user=user, password=password, database=database, host="localhost")
-        print(f"Connected to {dsn}")
+        print(f"Connected to {database}")
         
         await conn.execute("ALTER TABLE shadow_trades ADD COLUMN IF NOT EXISTS veto_reason TEXT DEFAULT 'NONE'")
         await conn.execute("ALTER TABLE shadow_trades ADD COLUMN IF NOT EXISTS is_live BOOLEAN DEFAULT FALSE")

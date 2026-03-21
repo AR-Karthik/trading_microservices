@@ -23,8 +23,12 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 import redis.asyncio as redis
+from typing import Dict, List, Tuple, Optional, TYPE_CHECKING
+if TYPE_CHECKING:
+    from core.health import HealthAggregator, HeartbeatProvider
 from core.alerts import send_cloud_alert
 from core.mq import MQManager, Ports, NumpyEncoder
+from core.margin import AsyncMarginManager
 
 try:
     import asyncpg
@@ -110,6 +114,16 @@ class SystemController:
         self._lockdown_announced: set[str] = set()  # event keys already locked
         self._preemption_detected = False
         self._shutdown_flag = False
+        self.margin_manager: Optional[AsyncMarginManager] = None
+        self.health_agg: Optional["HealthAggregator"] = None
+        self.hb: Optional["HeartbeatProvider"] = None
+        self._last_live_limit = 0.0
+        self._last_paper_limit = 0.0
+        self._background_tasks: set[asyncio.Task] = set()
+        self._last_cash_live = 0.0
+        self._last_coll_live = 0.0
+        self._last_cash_paper = 0.0
+        self._last_coll_paper = 0.0 # [Audit 22.3] Track capital for dynamic sync
         
         # Shoonya API removed [Audit 14.1: Centralized in SnapshotManager]
         self.api = None
@@ -126,7 +140,7 @@ class SystemController:
         dsn = get_db_dsn()
         while True:
             try:
-                self.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5, timeout=5.0)
+                self.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=20, timeout=5.0, command_timeout=10.0)
                 logger.info("✅ SystemController connected to TimescaleDB.")
                 break
             except Exception as e:
@@ -134,24 +148,25 @@ class SystemController:
                 logger.error(f"SystemController DB connect failed (Attempt {retry_count}): {e}")
                 await asyncio.sleep(min(5 * retry_count, 60))
         self._macro_events = self._load_macro_calendar()
+        self.margin_manager = AsyncMarginManager(self.redis)
 
         # ── Setup Hard Global Budget Constraint ──
-        # Capital limits are now configured via the UI and stored in Redis.
-        paper_limit = float(await self.redis.get("PAPER_CAPITAL_LIMIT") or 50000.0)
+        # Capital limits will be managed dynamically via _periodic_margin_sync [Audit 22.4]
         live_limit = float(await self.redis.get("LIVE_CAPITAL_LIMIT") or 0.0)
+        paper_limit = float(await self.redis.get("PAPER_CAPITAL_LIMIT") or 50000.0)
+        self._last_live_limit = live_limit
         
-        # --- Phase 3.1: Regulatory Capital Split (50:50 Cash-to-Collateral) ---
-        # Capital limits are now split according to regulatory 'Cash Component' rules.
         eff_live = float(live_limit * (1 - HEDGE_RESERVE_PCT))
         res_live = float(live_limit * HEDGE_RESERVE_PCT)
         
-        # Enforce 50:50 ratio on available margin
+        # Initial Boot Allocation
         cash_live = eff_live * 0.5
         coll_live = eff_live * 0.5
-        
         await self.redis.set("CASH_COMPONENT_LIVE", f"{cash_live:.2f}")
         await self.redis.set("COLLATERAL_COMPONENT_LIVE", f"{coll_live:.2f}")
         await self.redis.set("HEDGE_RESERVE_LIVE", f"{res_live:.2f}")
+        await self.redis.set("AVAILABLE_MARGIN_PAPER", f"{paper_limit:.2f}")
+        await self.redis.set("AVAILABLE_MARGIN_LIVE", f"{live_limit:.2f}")
         
         # [Audit-Fix] Start periodic margin sync
         asyncio.create_task(self._periodic_margin_sync())
@@ -169,9 +184,17 @@ class SystemController:
         
         logger.info(f"⚖️ REGULATORY SPLIT (50:50): Live Cash={cash_live}, Coll={coll_live} | Paper Cash={cash_paper}, Coll={coll_paper}")
         
-        # No need for redundant GLOBAL_ prefix, standardize on PAPER/LIVE_CAPITAL_LIMIT
         await self.redis.set("PAPER_CAPITAL_LIMIT", paper_limit)
         await self.redis.set("LIVE_CAPITAL_LIMIT", live_limit)
+
+        # [Audit-Fix 24.1] Synchronize tracking variables with initial boot allocation
+        # Prevents 'Delta-Double' bug on the first periodic sync iteration
+        self._last_live_limit = live_limit
+        self._last_paper_limit = paper_limit
+        self._last_cash_live = cash_live
+        self._last_coll_live = coll_live
+        self._last_cash_paper = cash_paper
+        self._last_coll_paper = coll_paper
         
         # Set available margin pools if they don't exist
         for suffix in ["LIVE", "PAPER"]:
@@ -193,24 +216,25 @@ class SystemController:
 
         try:
             # Schedule all long-running tasks
-            asyncio.create_task(self._preemption_poller())
-            asyncio.create_task(self._macro_lockdown_watcher())
-            asyncio.create_task(self._hmm_sync_watcher())
-            asyncio.create_task(self._three_stage_eod_scheduler()) 
-            asyncio.create_task(self._t1_calendar_sweep_watcher()) # Phase 3
-            asyncio.create_task(self._unsettled_premium_quarantine()) # Phase 3.3
-            asyncio.create_task(self._quarterly_settlement_guard())    # Phase 3.4
-            asyncio.create_task(self._hard_state_sync())          # Spec 11.6: Ghost Fill Sync
-            asyncio.create_task(self._exchange_health_monitor())   # Spec 12.4: NSE Halt Switch
-            asyncio.create_task(self._daily_lookback_scheduler())
+            self._track_task(asyncio.create_task(self._preemption_poller()), "PreemptionPoller")
+            self._track_task(asyncio.create_task(self._macro_lockdown_watcher()), "MacroLockdownWatcher")
+            self._track_task(asyncio.create_task(self._hmm_sync_watcher()), "HMMSyncWatcher")
+            self._track_task(asyncio.create_task(self._three_stage_eod_scheduler()), "EODScheduler")
+            self._track_task(asyncio.create_task(self._t1_calendar_sweep_watcher()), "T1CalendarSweep") # Phase 3
+            self._track_task(asyncio.create_task(self._unsettled_premium_quarantine()), "PremiumQuarantine") # Phase 3.3
+            self._track_task(asyncio.create_task(self._quarterly_settlement_guard()), "QuarterlySettlementGuard")    # Phase 3.4
+            self._track_task(asyncio.create_task(self._hard_state_sync()), "HardStateSync")          # Spec 11.6: Ghost Fill Sync
+            self._track_task(asyncio.create_task(self._exchange_health_monitor()), "ExchangeHealthMonitor")   # Spec 12.4: NSE Halt Switch
+            self._track_task(asyncio.create_task(self._daily_lookback_scheduler()), "DailyLookbackScheduler")
             
             # ── Phase 9: UI & Observability ──
             from core.health import HealthAggregator, HeartbeatProvider
             self.health_agg = HealthAggregator(self.redis)
             self.hb = HeartbeatProvider("SystemController", self.redis)
-            asyncio.create_task(self.hb.run_heartbeat())
-            asyncio.create_task(self._health_aggregation_loop())
-            asyncio.create_task(self._run_metrics_api())
+            if self.hb:
+                self._track_task(asyncio.create_task(self.hb.run_heartbeat()), "Heartbeat")
+            self._track_task(asyncio.create_task(self._health_aggregation_loop()), "HealthAggregationLoop")
+            self._track_task(asyncio.create_task(self._run_metrics_api()), "MetricsAPI")
 
             logger.info("System Controller [Core 3] initialized and monitoring.")
             # Keep the main task alive indefinitely or until shutdown_flag is set
@@ -219,8 +243,26 @@ class SystemController:
 
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            logger.error(f"FATAL: System Controller failed to start: {e}")
+            await send_cloud_alert(f"💀 FATAL: System Controller failed to start: {e}", alert_type="CRITICAL")
+            raise
         finally:
             await self.redis.aclose()
+
+    def _track_task(self, task: asyncio.Task, name: str):
+        """[Audit-Fix 26.1] Prevents 'Silent Task Death' by keeping references and logging failures."""
+        self._background_tasks.add(task)
+        def _cleanup(t: asyncio.Task):
+            self._background_tasks.discard(t)
+            try:
+                if not t.cancelled() and t.exception():
+                    exc = t.exception()
+                    logger.error(f"🚨 CRITICAL TASK FAILURE: {name} died with {exc}")
+                    asyncio.create_task(send_cloud_alert("SYSTEM_RECOVERY_FAILURE", f"Task {name} died unexpectedly: {exc}"))
+            except (asyncio.CancelledError, asyncio.InvalidStateError):
+                pass
+        task.add_done_callback(_cleanup)
 
     async def _audit_pending_journal(self):
         """Scans for orphaned intents in Redis on boot (SRS §2.7)."""
@@ -247,6 +289,9 @@ class SystemController:
             return events
         except FileNotFoundError:
             logger.warning(f"macro_calendar.json not found at {MACRO_CALENDAR_PATH}. No lockdowns.")
+            # Phase 15: Institutional CAUTIOUS_MODE fallback if blind
+            if self.redis:
+                asyncio.create_task(self.redis.set("CAUTIOUS_MODE", "True"))
             return []
 
     async def _macro_lockdown_watcher(self):
@@ -296,6 +341,10 @@ class SystemController:
                     k for k in self._lockdown_announced
                     if not self._is_event_fully_past(k, now)
                 }
+                
+            # Phase 17: Unbounded Memory Flush
+            if now.hour == 8 and now.minute == 0:
+                self._lockdown_announced.clear()
 
             await asyncio.sleep(30)  # Check every 30 seconds
 
@@ -320,16 +369,19 @@ class SystemController:
                 preempted = await self._check_preemption()
                 if preempted and not self._preemption_detected:
                     self._preemption_detected = True
+                    # [Audit 21.2] Instant Halt to prevent new originations during emergency square-off
+                    await self.redis.set("SYSTEM_HALT", "True")
                     logger.critical("⚡ GCP PREEMPTION NOTICE DETECTED! Initiating emergency square-off.")
                     asyncio.create_task(send_cloud_alert(
                         "⚡ GCP SPOT VM PREEMPTION DETECTED! Initiating batched SQUARE_OFF_ALL.",
                         alert_type="CRITICAL"
                     ))
-                    await self._execute_square_off_all(reason="GCP_PREEMPTION")
+                    # [Audit 23.2] Shield emergency sequence from SIGTERM cancellation
+                    await asyncio.shield(self._execute_square_off_all(reason="GCP_PREEMPTION"))
             except Exception as e:
                 logger.debug(f"Preemption poll error (expected outside GCP): {e}")
 
-            await asyncio.sleep(5)
+            await asyncio.sleep(1) # Accelerated 1s loop for preemption resilience
 
     async def _check_preemption(self) -> bool:
         """Returns True if this GCP Spot instance has received a preemption notice."""
@@ -384,16 +436,32 @@ class SystemController:
                 try:
                     async with self.pool.acquire() as conn:
                         # Trade count for today
+                        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
                         row = await conn.fetchrow("""
                             SELECT
-                                COUNT(*) FILTER (WHERE execution_type = 'Paper') AS paper_count,
-                                COUNT(*) FILTER (WHERE execution_type = 'Live')  AS live_count
+                                COUNT(*) FILTER (WHERE execution_type = 'PAPER') AS paper_count,
+                                COUNT(*) FILTER (WHERE execution_type = 'ACTUAL')  AS live_count
                             FROM trades
-                            WHERE time >= CURRENT_DATE
-                        """)
+                            WHERE time >= $1 AND time <= $2
+                        """, today_start, now)
                         if row:
                             trade_count_paper = row["paper_count"] or 0
                             trade_count_live  = row["live_count"]  or 0
+
+                        # Phase 9: DB-Verified Today's P&L (Institutional Integrity)
+                        # [Audit 23.5] Carry-Forward Bias Fix: created_at >= $1 ensures we only sum intraday alpha
+                        p_row = await conn.fetchrow("SELECT SUM(realized_pnl) as pnl FROM portfolio WHERE updated_at >= $1 AND created_at >= $1 AND execution_type = 'PAPER'", today_start)
+                        l_row = await conn.fetchrow("SELECT SUM(realized_pnl) as pnl FROM portfolio WHERE updated_at >= $1 AND created_at >= $1 AND execution_type = 'ACTUAL'", today_start)
+                        
+                        db_pnl_paper = float(p_row['pnl'] or 0.0)
+                        db_pnl_live  = float(l_row['pnl'] or 0.0)
+                        
+                        # Verification check: If Redis vs DB mismatch > 1.0, flag it
+                        if abs(db_pnl_live - pnl_live) > 1.0:
+                            logger.warning(f"P&L Desync Detect: Redis={pnl_live}, DB={db_pnl_live}. Using DB as truth.")
+                            pnl_live = db_pnl_live
+                        if abs(db_pnl_paper - pnl_paper) > 1.0:
+                             pnl_paper = db_pnl_paper
 
                         # Open positions (non-zero quantity)
                         positions = await conn.fetch("""
@@ -404,7 +472,7 @@ class SystemController:
                         """)
                         for p in positions:
                             open_positions.append(
-                                f"  {'📄' if p['execution_type'] == 'Paper' else '🟢'} "
+                                f"  {'📄' if p['execution_type'] == 'PAPER' else '🟢'} "
                                 f"{p['symbol']} | Qty: {p['quantity']:+d} | "
                                 f"Avg: ₹{float(p['avg_price']):,.2f} | "
                                 f"Strat: {p['strategy_id']}"
@@ -469,13 +537,10 @@ class SystemController:
     # ── HMM & Data Synchronization ──────────────────────────────────────────
 
     async def _hmm_sync_watcher(self):
-        """Manages HMM warm-up and data logger hard-stop signals."""
+        """Manages HMM data logger hard-stop signals."""
         logger.info("HMM synchronization watcher active.")
         while not self._shutdown_flag:
             now = datetime.now(tz=IST)
-            
-            # HMM_WARM_UP is deprecated in Heuristic Era
-            await self.redis.set("HMM_WARM_UP", "False")
             
             # 15:25 Logger Stop
             is_logger_stop = (now.hour > LOGGER_STOP_HH) or (now.hour == LOGGER_STOP_HH and now.minute >= LOGGER_STOP_MM)
@@ -515,6 +580,11 @@ class SystemController:
                     await self._eod_summary_report(now)
                     # POSITIONAL trades hibernate - no square_off_all here
                     logger.critical("💾 POSITIONAL trades hibernated in DB. Server shutting down.")
+                    
+                    # Phase 11: Flush EOD P&L keys against Kill-Switch persistence loops
+                    await self.redis.delete("DAILY_REALIZED_PNL_PAPER")
+                    await self.redis.delete("DAILY_REALIZED_PNL_LIVE")
+                    await self.redis.delete("SYSTEM_HALT")
                     self._shutdown_flag = True
                 
             except Exception as e:
@@ -527,17 +597,26 @@ class SystemController:
         logger.info("Unsettled premium quarantine active. Monitoring T+1 credit.")
         while not self._shutdown_flag:
             try:
-                # Find credit premium from today's sell orders
+                now = datetime.now(IST)
+                # Phase 3.3.1: Release quarantine from yesterday
+                if now.hour == 9 and now.minute == 0:
+                    await self.redis.set("QUARANTINE_PREMIUM", "0.00")
+                    await asyncio.sleep(60) # Avoid repeat
+                    continue
+
+                # Find aggregate credit premium from today's orders
+                today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
                 async with self.pool.acquire() as conn:
-                    row = await conn.fetchrow("""
-                        SELECT SUM(realized_pnl) as today_credit 
+                    # [Audit-Fix 26.2] The Paper-Profit Lock: Only quarantine ACTUAL profits.
+                    # Prevents Shadow/Paper success from locking real Live Cash.
+                    net_row = await conn.fetchrow("""
+                        SELECT SUM(realized_pnl) as net_pnl 
                         FROM portfolio 
-                        WHERE realized_pnl > 0 AND updated_at >= CURRENT_DATE
-                    """)
-                    if row and row['today_credit']:
-                        credit = float(row['today_credit'])
-                        # Move credit into a 'quarantine' bucket so it's not available in margin
-                        # This effectively locks the premium until the next BOOT
+                        WHERE updated_at >= $1 AND execution_type = 'ACTUAL'
+                    """, today_start)
+                    if net_row and net_row['net_pnl'] and float(net_row['net_pnl']) > 0:
+                        # Phase 38: Correct Net vs Gross Premium Trap (Quarantine Net only)
+                        credit = float(net_row['net_pnl'])
                         await self.redis.set("QUARANTINE_PREMIUM", f"{credit:.2f}")
                         logger.debug(f"Quarantined ₹{credit:.2f} in unsettled premium.")
             except Exception as e:
@@ -559,8 +638,6 @@ class SystemController:
                     await self.redis.set("SYSTEM_HALT", "True")
                     await send_cloud_alert("🏛️ SEBI Quarterly Settlement detected. Trading halted for manual fund reconciliation.", alert_type="SYSTEM")
                     await asyncio.sleep(60) # Avoid repeat
-            except zmq.Again:
-                continue
             except Exception as e:
                 logger.error(f"System Controller loop error: {e}")
                 await asyncio.sleep(1)
@@ -574,6 +651,7 @@ class SystemController:
                 now = datetime.now(IST)
                 # Sweep at 15:15 on T-1
                 if now.hour == 15 and now.minute == 15:
+                    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
                     async with self.pool.acquire() as conn:
                         # Find POSITIONAL positions expiring tomorrow
                         rows = await conn.fetch("""
@@ -581,9 +659,9 @@ class SystemController:
                             FROM portfolio 
                             WHERE has_calendar_risk = TRUE 
                               AND lifecycle_class = 'POSITIONAL' 
-                              AND expiry_date = CURRENT_DATE + INTERVAL '1 day'
+                              AND expiry_date = (SELECT MIN(expiry_date) FROM portfolio WHERE expiry_date > $1)
                               AND quantity != 0
-                        """)
+                        """, today_start)
                         for row in rows:
                             logger.warning(f"⏳ T-1 CALENDAR SWEEP: Liquidating {row['parent_uuid']}")
                             await self.redis.publish("panic_channel", json.dumps({
@@ -624,9 +702,8 @@ class SystemController:
                         "execution_type": row['execution_type'],
                         "reason": reason
                     }))
-                if i + SEBI_BATCH_SIZE < len(rows):
-                    logger.info(f"SEBI Batch complete ({len(batch)} orders). Waiting {INTER_BATCH_WAIT}s...")
-                    await asyncio.sleep(INTER_BATCH_WAIT)
+                logger.info(f"SEBI Batch processed ({len(batch)} orders). Guard interval active...")
+                await asyncio.sleep(INTER_BATCH_WAIT)
 
     async def _daily_lookback_scheduler(self):
         """Schedules and executes the 14-day daily close fetch at 09:00 IST."""
@@ -652,8 +729,21 @@ class SystemController:
             try:
                 # 1. Fetch broker truth from Redis Hash (populated by SnapshotManager)
                 truth_map_raw = await self.redis.hgetall("broker_positions")
-                truth_map = {k: int(v) for k, v in truth_map_raw.items()}
                 
+                # Phase 8: Safe Serialization against bad manager state
+                truth_map = {}
+                for k, v in truth_map_raw.items():
+                    if v:
+                        try: truth_map[k] = int(v)
+                        except ValueError: pass
+                
+                # Phase 32: Veto if BROKER_TRUTH is stale
+                broker_ts = await self.redis.get("TIMESTAMP:BROKER_TRUTH")
+                if not broker_ts or (time.time() - float(broker_ts)) > 60:
+                    logger.warning("Ghost Sync Vetoed: SnapshotManager telemetry is stale or missing (>60s).")
+                    await asyncio.sleep(5)
+                    continue
+
                 # If no truth in Redis, maybe SnapshotManager haven't polled yet. Wait.
                 if not truth_map:
                     logger.debug("No broker truth in Redis yet. Skipping sync.")
@@ -673,22 +763,23 @@ class SystemController:
                         d_qty = db_map.get(sym, 0)
                         
                         if t_qty != d_qty:
-                            if t_qty != 0 and d_qty == 0:
-                                # Orphan detected: Broker has it, we don't.
+                            if t_qty > d_qty:
+                                amount = t_qty - d_qty
+                                # Orphan detected: Broker has more, we don't.
                                 logger.critical(f"🚨 ORPHAN POSITION DETECTED: {sym} | Broker: {t_qty}, DB: {d_qty}")
                                 await self.redis.publish("panic_channel", json.dumps({
-                                    "action": "ORPHAN_LIQUIDATE",
+                                    "action": "CLOSE_POSITION",
                                     "symbol": sym,
-                                    "qty": t_qty,
+                                    "qty": abs(amount),
                                     "reason": "GHOST_SYNC_GAP"
                                 }))
-                                await send_cloud_alert(f"🚨 ORPHAN POSITION: Broker sees {t_qty} of {sym} but DB is flat. Liquidation triggered.", alert_type="CRITICAL")
+                                await send_cloud_alert(f"🚨 ORPHAN POSITION: Broker sees {t_qty} of {sym} but DB only {d_qty}. Liquidation triggered.", alert_type="CRITICAL")
                             
-                            elif t_qty == 0 and d_qty != 0:
-                                # DB ghost detected: We think we have it, broker says flat.
+                            elif t_qty < d_qty:
+                                # Phase 20/23/36: DB ghost detected: Broker has less. Update DB only!
                                 logger.warning(f"👻 STALE GHOST DETECTED: {sym} | Cleaning DB state.")
-                                await conn.execute("UPDATE portfolio SET quantity = 0, avg_price = 0 WHERE symbol = $1", sym)
-                                await send_cloud_alert(f"👻 STALE GHOST: DB showed {d_qty} for {sym} but broker is flat. DB cleaned.", alert_type="WARNING")
+                                await conn.execute("UPDATE portfolio SET quantity = $2 WHERE symbol = $1", sym, t_qty)
+                                await send_cloud_alert(f"👻 STALE GHOST: DB showed {d_qty} for {sym} but broker only {t_qty}. DB cleaned.", alert_type="WARNING")
 
             except Exception as e:
                 logger.error(f"Ghost sync error: {e}")
@@ -696,17 +787,42 @@ class SystemController:
             await asyncio.sleep(900) # 15 minutes
 
     async def _periodic_margin_sync(self):
-        """[Audit-Fix] Monitors margin limits from Redis (updated by SnapshotManager)."""
-        logger.info("Monitoring Redis for margin updates (60s interval).")
+        """[Audit 22.5] Dynamically syncs capital limits and regulatory split from UI."""
+        logger.info("Monitoring Redis for dynamic capital limit updates (60s interval).")
         while not self._shutdown_flag:
             try:
-                # Consumer only. Logging only for observability.
+                # 1. Check for UI-driven limit changes
+                live_limit_now = float(await self.redis.get("LIVE_CAPITAL_LIMIT") or 0.0)
+                
+                if live_limit_now != self._last_live_limit:
+                    eff_live = live_limit_now * (1 - HEDGE_RESERVE_PCT)
+                    res_live = live_limit_now * HEDGE_RESERVE_PCT
+                    
+                    # Phase 21: Collateral Haircut drift prevention
+                    coll_haircut = float(await self.redis.get("CONFIG:COLLATERAL_HAIRCUT") or 0.90)
+                    
+                    cash_live_new = eff_live * 0.5
+                    coll_live_new = (eff_live * 0.5) * coll_haircut
+                    
+                    delta_cash = cash_live_new - self._last_cash_live
+                    delta_coll = coll_live_new - self._last_coll_live
+                    
+                    # [Audit 23.4] Atomic Delta Adjustment: Prevent overwriting active reservations
+                    await self.margin_manager.sync_capital(delta_cash, delta_coll, live_limit_now, execution_type="ACTUAL")
+                    await self.redis.set("HEDGE_RESERVE_LIVE", f"{res_live:.2f}")
+                    
+                    logger.warning(f"🏦 DYNAMIC CAPITAL UPDATE: Limit changed to {live_limit_now}. Atomic Δ-sync applied.")
+                    self._last_live_limit = live_limit_now
+                    self._last_cash_live = cash_live_new
+                    self._last_coll_live = coll_live_new
+
+                # 2. Consumer-only logging for observability
                 m_avail = await self.redis.get("ACCOUNT:MARGIN:AVAILABLE")
                 m_used = await self.redis.get("ACCOUNT:MARGIN:USED")
                 if m_avail:
                     logger.debug(f"📊 Margin Health: Available={m_avail} | Used={m_used}")
             except Exception as e:
-                logger.error(f"Margin monitoring failed: {e}")
+                logger.error(f"Margin sync failed: {e}")
             
             await asyncio.sleep(60)
 
@@ -715,7 +831,7 @@ class SystemController:
     async def _exchange_health_monitor(self):
         """Phase 12.2: High-Precision Circuit Breaker (Auto-Halt)."""
         logger.info("Exchange health monitor active. Threshold: 500ms / 3 missing ticks.")
-        missing_ticks = 0
+        missing_ticks: int = 0
         
         while not self._shutdown_flag:
             try:
@@ -725,24 +841,32 @@ class SystemController:
                     await asyncio.sleep(60)
                     continue
 
-                # Check age of the latest NIFTY50 tick
-                tick_raw = await self.redis.get("latest_tick:NIFTY50")
-                if tick_raw:
-                    tick = json.loads(tick_raw)
-                    tick_ts_str = tick.get("timestamp") # ISO format
-                    if tick_ts_str:
-                        tick_ts = datetime.fromisoformat(tick_ts_str).astimezone(timezone.utc)
-                        now_utc = datetime.now(timezone.utc)
-                        latency_ms = (now_utc - tick_ts).total_seconds() * 1000
+                # Check age of all critical indices to prevent single-index blindspot
+                any_stale = False
+                for index in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
+                    tick_raw = await self.redis.get(f"latest_tick:{index}")
+                    if tick_raw:
+                        tick = json.loads(tick_raw)
+                        tick_ts_str = tick.get("timestamp") # ISO format
+                        if tick_ts_str:
+                            tick_ts = datetime.fromisoformat(tick_ts_str).astimezone(timezone.utc)
+                            now_utc = datetime.now(timezone.utc)
+                            latency_ms = (now_utc - tick_ts).total_seconds() * 1000
+                            
+                            # Phase 12.2: > 500ms jitter or stale feed
+                            if latency_ms > 500:
+                                any_stale = True
+                                logger.warning(f"⚠️ {index} Feed Latency Spike: {latency_ms:.0f}ms")
+                                break
+                    else:
+                        any_stale = True
+                        break
                         
-                        # Phase 12.2: > 500ms jitter or stale feed
-                        if latency_ms > 500:
-                            missing_ticks += 1
-                            logger.warning(f"⚠️ Feed Latency Spike: {latency_ms:.0f}ms | Missing: {missing_ticks}")
-                        else:
-                            missing_ticks = 0
+                if any_stale:
+                    missing_ticks = missing_ticks + 1
+                    logger.warning(f"⚠️ FEED STALL: {missing_ticks}/3 missing ticks. Threshold 500ms.")
                 else:
-                    missing_ticks += 1
+                    missing_ticks = 0
 
                 if missing_ticks >= 3:
                     logger.critical(f"🚨 NSE_HALT_SWITCH: Stale feed ({missing_ticks} misses). Suspending all routing.")
@@ -771,23 +895,51 @@ class SystemController:
         Publishes SQUARE_OFF_ALL to Redis panic_channel.
         The execution bridges handle batching per SEBI 10-OPS rule.
         """
+        # Phase 27: Double-Tap Command Storm Lock
+        # [Audit-Fix 24.2] Tighten lock TTL to 10s for emergency retry flexibility
+        # 60s is too long for a 30s GCP preemption window.
+        if not await self.redis.set("SQUARE_OFF_LOCK", "LOCKED", nx=True, ex=10):
+            logger.warning(f"SQUARE_OFF_ALL already in progress. Ignoring {reason}.")
+            return
+            
         logger.warning(f"🚨 SQUARE_OFF_ALL triggered. Reason: {reason}")
 
         # Signal execution bridge via panic_channel
-        await self.redis.publish("panic_channel", json.dumps({
+        # [Audit 23.3] Subscriber-Zero Check: Ensure at least one bridge received the command
+        active_subs = await self.redis.publish("panic_channel", json.dumps({
             "action": "SQUARE_OFF_ALL",
             "reason": reason,
             "execution_type": "ALL",
             "timestamp": datetime.now(timezone.utc).isoformat()
         }))
+        if active_subs == 0:
+            logger.critical(f"🚨 SUBSCRIBER-ZERO DETECTED: No active bridges received SQUARE_OFF_ALL signal ({reason}).")
+            await send_cloud_alert("🚨 EMERGENCY: Panic channel has 0 subscribers. Square-off signal lost!", alert_type="CRITICAL")
 
-        # Wait for fills (max 15 seconds)
-        logger.info("Waiting up to 15 seconds for fill receipts...")
-        await asyncio.sleep(15)
+        # Positive Acknowledgement Loop (Sprint timeout, max 5s total -> 25 iters * 0.2s)
+        logger.info("Awaiting db quantity square-off confirmations (Sprint 5s max)...")
+        for _ in range(25):
+            try:
+                async with self.pool.acquire() as conn:
+                    val = await conn.fetchval("SELECT SUM(ABS(quantity)) FROM portfolio WHERE quantity != 0")
+                    # [Audit 23.6] Handle potential None from empty portfolio
+                    f_val = float(val) if val is not None else 0.0
+                    if f_val == 0:
+                        logger.info("✅ All positions zeroed successfully.")
+                        await send_cloud_alert("✅ FINAL_STATE:FLAT. Square-off structurally verified within preemption window.", alert_type="SYSTEM")
+                        break
+            except Exception as e:
+                logger.error(f"SQL Verification error during square-off loop: {e}")
+            await asyncio.sleep(0.2)
 
         # Flush state
         await self.redis.set("SYSTEM_HALTED", "True")
         logger.info("Redis SYSTEM_HALTED flag set. Square-off sequence complete.")
+        
+        # Institutional Issue 5: Verified GCP Shutdown
+        if reason == "GCP_PREEMPTION":
+            logger.critical("💀 Writing FINAL_STATE:FLAT to avoid blocking the OS preemption sequence.")
+            await self.redis.set("FINAL_STATE:FLAT", "True")
 
     # ── Phase 9: Observability Helpers ────────────────────────────────────────
 
@@ -795,10 +947,11 @@ class SystemController:
         """Periodically computes system health score based on heartbeats."""
         while not self._shutdown_flag:
             try:
-                health = await self.health_agg.get_system_health()
-                await self.redis.set("SYSTEM_HEALTH_REPORT", json.dumps(health, cls=NumpyEncoder))
-                # Update high-level flag for metrics API
-                await self.redis.set("SYSTEM_HEALTH_SCORE", f"{health['score']:.2f}")
+                if self.health_agg:
+                    health = await self.health_agg.get_system_health()
+                    await self.redis.set("SYSTEM_HEALTH_REPORT", json.dumps(health, cls=NumpyEncoder))
+                    # Update high-level flag for metrics API
+                    await self.redis.set("SYSTEM_HEALTH_SCORE", f"{health['score']:.2f}")
             except Exception as e:
                 logger.error(f"Health aggregation failed: {e}")
             await asyncio.sleep(10)
@@ -806,10 +959,32 @@ class SystemController:
     async def _run_metrics_api(self):
         """Lightweight REST endpoint for dashboard metrics (Spec 9.1)."""
         try:
-            from fastapi import FastAPI
+            from fastapi import FastAPI, HTTPException
+            from pydantic import BaseModel
+            from typing import Dict
             import uvicorn
             
             app = FastAPI(title="ControllerMetrics")
+
+            class GateConfig(BaseModel):
+                gates: Dict[str, str]
+
+            @app.post("/config/gates")
+            async def update_gates(config: GateConfig):
+                """Phase 9.1: Dynamically updates the MetaRouter risk gates."""
+                if config.gates:
+                    # Sync to Redis hash for MetaRouter to pick up (Lab Control Step 22.9)
+                    await self.redis.hset("CONFIG:GATE_CONTROL", mapping=config.gates)
+                    # Signal MetaRouter to refresh veto gates immediately
+                    await self.redis.publish("panic_channel", json.dumps({"action": "GATE_SYNC"}))
+                    logger.warning(f"🏛️ GATE CONTROL UPDATE: {config.gates}")
+                    return {"status": "success", "updated_gates": config.gates}
+                raise HTTPException(status_code=400, detail="No gates provided")
+
+            @app.get("/config/gates")
+            async def get_gates():
+                """Returns the current state of all risk gates."""
+                return await self.redis.hgetall("CONFIG:GATE_CONTROL")
 
             @app.get("/health")
             async def get_health():
@@ -863,31 +1038,44 @@ class SystemController:
             @app.get("/analytics/meta_router_efficacy")
             async def get_meta_router_efficacy():
                 """[Layer 8] Calculates Shadow P&L vs. Actual P&L for Counterfactual Analysis."""
+                # [Audit 22.1] Anchor to IST to prevent date-line leakage for Indian markets
+                now_ist = datetime.now(tz=IST)
+                today_start = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+                
+                # Phase 34: The MOC Noise Pollution Fence
+                moc_cutoff = today_start.replace(hour=15, minute=24, second=59)
+                upper_bound = moc_cutoff if now_ist > moc_cutoff else now_ist
+
                 async with self.pool.acquire() as conn:
-                    # 1. Fetch Actual Realized P&L
-                    actual_pnl_row = await conn.fetchrow("SELECT SUM(realized_pnl) as total FROM portfolio")
+                    # 1. Fetch Actual Realized P&L (Opened & Closed Today Only, Fenced at 15:24:59)
+                    # [Audit 23.5] Carry-Forward Bias Fix: created_at >= $1 ensures we only sum intraday alpha
+                    actual_pnl_row = await conn.fetchrow(
+                        "SELECT SUM(realized_pnl) as total FROM portfolio WHERE updated_at >= $1 AND updated_at <= $2 AND created_at >= $1", 
+                        today_start, upper_bound
+                    )
                     actual_pnl = float(actual_pnl_row['total'] or 0.0)
                     
-                    # 2. Fetch All Shadow Intents (Pre-Veto)
-                    # We limit to last 24h to keep it responsive
-                    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                    # 2. Fetch All Shadow Intents (Pre-Veto) with Institutional Step 21.1 (Slippage Parity)
                     shadows = await conn.fetch(
-                        "SELECT asset, action, quantity, price FROM shadow_trades WHERE time >= $1",
-                        today_start
+                        "SELECT asset, action, quantity, execution_price, intent_price FROM shadow_trades WHERE time >= $1 AND time <= $2 AND status = 'COMPLETE'",
+                        today_start, upper_bound
                     )
                     
                     shadow_pnl = 0.0
                     for s in shadows:
                         asset = s['asset']
+                        # [PhD Critical] Prioritize execution_price (includes simulated slippage) over intent_price
+                        entry_price = float(s['execution_price'] if s['execution_price'] is not None else s['intent_price'] or 0.0)
+                        
                         # Get current price from Redis for Mark-to-Market
                         curr_price_raw = await self.redis.get(f"latest_market_state:{asset}")
-                        curr_price = float(json.loads(curr_price_raw).get('price', s['price'])) if curr_price_raw else s['price']
+                        curr_price = float(json.loads(curr_price_raw).get('price', entry_price)) if curr_price_raw else entry_price
                         
                         # Calculate hypothetical MTM P&L: (Exit - Entry) * Lots
                         if s['action'] == 'BUY':
-                            shadow_pnl += (curr_price - s['price']) * s['quantity']
+                            shadow_pnl += (curr_price - entry_price) * s['quantity']
                         else:
-                            shadow_pnl += (s['price'] - curr_price) * s['quantity']
+                            shadow_pnl += (entry_price - curr_price) * s['quantity']
                             
                 return {
                     "actual_pnl": actual_pnl,
@@ -915,6 +1103,9 @@ class SystemController:
                     "buffer_usage": float(await self.redis.get("BUFFER_USAGE_PCT") or 0)
                 }
 
+            # Phase 40 API Isolations: While a separate uvicorn proc is ideal, 
+            # state sharing for health_agg requires we maintain loop affinity.
+            # Using async server to prevent main loop starvation.
             config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="error")
             server = uvicorn.Server(config)
             await server.serve()

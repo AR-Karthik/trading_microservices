@@ -238,6 +238,7 @@ class Ports:
     RECONCILER = 5561     # Order Reconciler ROUTER (receives DEALER intents)
     SYSTEM_CTRL = 5562    # System Controller broadcasts (lifecycle events)
     HEDGE_REQUEST = 5563  # Strategy Engine requests hedge validation
+    RAW_INTENTS = 5564    # Strategy Engine pushes RAW intents to Router
 
 class Topics:
     TICK_DATA = "TICK"
@@ -246,6 +247,7 @@ class Topics:
     ORDER_INTENT = "INTENT"
     FILL_RECEIPT = "FILL"
     HEDGE_REQUEST = "HEDGE"
+    RAW_INTENT = "RAW_INTENT"
 
 class RedisLogger:
     """Streams logs to Redis for dashboard visibility."""

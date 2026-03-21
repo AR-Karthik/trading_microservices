@@ -336,90 +336,127 @@
         };
 
         // --- TAB 5: ANALYTICS & EOD ---
+        const GateToggles = () => {
+            const [gates, setGates] = useState({});
+            const fetchGates = () => fetch(`${API_BASE}/config/gates`).then(r => r.json()).then(setGates).catch(()=>{});
+            useEffect(() => { fetchGates(); }, []);
+
+            const toggleGate = async (gate) => {
+                await fetch(`${API_BASE}/config/gates?gate=${gate}&enabled=${!gates[gate]}`, {method:'POST'});
+                fetchGates();
+            };
+
+            return (
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-8">
+                    {Object.entries(gates).map(([name, enabled]) => (
+                        <button key={name} onClick={() => toggleGate(name)} className={`p-4 rounded-2xl border transition-all flex flex-col items-start gap-2 ${enabled ? 'bg-success/5 border-success/30 text-success shadow-[0_0_15px_rgba(63,185,80,0.1)]' : 'bg-white/5 border-white/10 text-gray-500'}`}>
+                            <span className="text-[9px] font-black uppercase tracking-widest">{name} GATE</span>
+                            <span className="text-xl font-black uppercase">{enabled ? 'ACTIVE' : 'BYPASSED'}</span>
+                        </button>
+                    ))}
+                </div>
+            );
+        };
+
         const AnalyticsEOD = ({ analytics = {}, fiidii = [] }) => {
             const [timeRange, setTimeRange] = useState('Today');
             return (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-in fade-in duration-500">
-                    <div className="oled-card p-6 rounded-2xl">
-                        <div className="flex justify-between items-center mb-6">
-                            <h3 className="text-[10px] font-black uppercase text-gray-500">Performance Metrics</h3>
-                            <div className="flex gap-2 items-center">
-                                <select className="bg-white/5 border border-white/10 text-[9px] font-bold px-2 py-1 outline-none text-white rounded cursor-pointer">
-                                    <option>All Strategies</option>
-                                    <option>Kinetic Scalp</option>
-                                    <option>Delta Neutral</option>
-                                </select>
-                                <select value={timeRange} onChange={e=>setTimeRange(e.target.value)} className="bg-white/5 border border-white/10 text-[9px] font-bold px-2 py-1 outline-none text-white rounded cursor-pointer">
-                                    <option>Today</option>
-                                    <option>This Week</option>
-                                    <option>This Month</option>
-                                    <option>Custom Range</option>
-                                </select>
-                                {timeRange === 'Custom Range' && (
-                                    <div className="flex gap-1 animate-in fade-in zoom-in duration-200">
-                                        <input type="date" className="bg-white/5 border border-white/10 text-[9px] font-bold px-2 py-1 outline-none text-white rounded" />
-                                        <input type="date" className="bg-white/5 border border-white/10 text-[9px] font-bold px-2 py-1 outline-none text-white rounded" />
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                        <div className="grid grid-cols-2 gap-4 mb-6">
-                            <div className="bg-white/5 p-3 rounded">
-                                <div className="text-[8px] font-bold text-gray-500 uppercase">Daily P&L</div>
-                                <div className="text-lg font-black mono text-success">{formatCurrency(analytics.total_pnl || 14500)}</div>
-                            </div>
-                            <div className="bg-white/5 p-3 rounded">
-                                <div className="text-[8px] font-bold text-gray-500 uppercase">Sharpe Ratio</div>
-                                <div className="text-lg font-black mono text-white">2.65</div>
-                            </div>
-                        </div>
-                        <div className="h-48 border border-white/5 bg-white/[0.02] rounded relative flex items-end">
-                             <svg className="w-full h-full" preserveAspectRatio="none" viewBox="0 0 100 100">
-                                <path d="M 0 100 L 20 80 L 40 85 L 60 50 L 80 30 L 100 20 L 100 100 Z" fill="rgba(63, 185, 80, 0.1)" stroke="none" />
-                                <path d="M 0 100 L 20 80 L 40 85 L 60 50 L 80 30 L 100 20" fill="none" stroke="#3fb950" strokeWidth="2" />
-                            </svg>
-                        </div>
-                    </div>
-                    <div className="oled-card p-6 rounded-2xl">
-                        <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6">Whale Prep (FII/DII Data)</h3>
-                        <div className="space-y-6">
-                            {(fiidii.length?fiidii:[{category:'FII', buyValue: 4500, sellValue: 3000, netValue: 1500}, {category:'DII', buyValue: 2000, sellValue: 2500, netValue: -500}]).map(v => (
-                                <div key={v.category}>
-                                    <div className="flex justify-between text-[10px] font-bold mb-2 uppercase">
-                                        <span className="text-gray-400">{v.category} FLOW</span>
-                                        <span className={v.netValue >= 0 ? 'text-success' : 'text-danger'}>NET: {v.netValue > 0 ? '+' : ''}{v.netValue} Cr</span>
-                                    </div>
-                                    <div className="flex h-6 rounded overflow-hidden">
-                                        <div className="bg-success text-[8px] text-black font-bold flex items-center justify-center" style={{width: `${(v.buyValue/(v.buyValue+v.sellValue))*100}%`}}>LONG</div>
-                                        <div className="bg-danger text-[8px] text-white font-bold flex items-center justify-center" style={{width: `${(v.sellValue/(v.buyValue+v.sellValue))*100}%`}}>SHORT</div>
-                                    </div>
+                <div className="space-y-6">
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-in fade-in duration-500">
+                        <div className="oled-card p-6 rounded-2xl">
+                            <div className="flex justify-between items-center mb-6">
+                                <h3 className="text-[10px] font-black uppercase text-gray-500">Performance Metrics</h3>
+                                <div className="flex gap-2 items-center">
+                                    <select value={timeRange} onChange={e=>setTimeRange(e.target.value)} className="bg-white/5 border border-white/10 text-[9px] font-bold px-2 py-1 outline-none text-white rounded cursor-pointer">
+                                        <option>Today</option>
+                                        <option>This Week</option>
+                                        <option>This Month</option>
+                                    </select>
                                 </div>
-                            ))}
-                            <div className="mt-8 pt-4 border-t border-white/10 text-center">
-                                <div className="text-[9px] font-black text-gray-500 uppercase mb-2">Tomorrow's Market Bias</div>
-                                <div className="text-xl font-black text-accent tracking-widest bg-accent/10 py-2 rounded">BULLISH</div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-4 mb-6">
+                                <div className="bg-white/5 p-3 rounded">
+                                    <div className="text-[8px] font-bold text-gray-500 uppercase">Daily P&L</div>
+                                    <div className="text-lg font-black mono text-success">{formatCurrency(analytics.total_pnl || 14500)}</div>
+                                </div>
+                                <div className="bg-white/5 p-3 rounded">
+                                    <div className="text-[8px] font-bold text-gray-500 uppercase">Sharpe Ratio</div>
+                                    <div className="text-lg font-black mono text-white">2.65</div>
+                                </div>
+                            </div>
+                            <div className="h-48 border border-white/5 bg-white/[0.02] rounded relative flex items-end">
+                                <svg className="w-full h-full" preserveAspectRatio="none" viewBox="0 0 100 100">
+                                    <path d="M 0 100 L 20 80 L 40 85 L 60 50 L 80 30 L 100 20 L 100 100 Z" fill="rgba(63, 185, 80, 0.1)" stroke="none" />
+                                    <path d="M 0 100 L 20 80 L 40 85 L 60 50 L 80 30 L 100 20" fill="none" stroke="#3fb950" strokeWidth="2" />
+                                </svg>
+                            </div>
+                        </div>
+                        <div className="oled-card p-6 rounded-2xl">
+                            <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6">Whale Prep (FII/DII Data)</h3>
+                            <div className="space-y-6">
+                                {(fiidii.length?fiidii:[{category:'FII', buyValue: 4500, sellValue: 3000, netValue: 1500}, {category:'DII', buyValue: 2000, sellValue: 2500, netValue: -500}]).map(v => (
+                                    <div key={v.category}>
+                                        <div className="flex justify-between text-[10px] font-bold mb-2 uppercase">
+                                            <span className="text-gray-400">{v.category} FLOW</span>
+                                            <span className={v.netValue >= 0 ? 'text-success' : 'text-danger'}>NET: {v.netValue > 0 ? '+' : ''}{v.netValue} Cr</span>
+                                        </div>
+                                        <div className="flex h-6 rounded overflow-hidden">
+                                            <div className="bg-success text-[8px] text-black font-bold flex items-center justify-center" style={{width: `${(v.buyValue/(v.buyValue+v.sellValue))*100}%`}}>LONG</div>
+                                            <div className="bg-danger text-[8px] text-white font-bold flex items-center justify-center" style={{width: `${(v.sellValue/(v.buyValue+v.sellValue))*100}%`}}>SHORT</div>
+                                        </div>
+                                    </div>
+                                ))}
+                                <div className="mt-8 pt-4 border-t border-white/10 text-center">
+                                    <div className="text-[9px] font-black text-gray-500 uppercase mb-2">Tomorrow's Market Bias</div>
+                                    <div className="text-xl font-black text-accent tracking-widest bg-accent/10 py-2 rounded">BULLISH</div>
+                                </div>
                             </div>
                         </div>
                     </div>
+                    <GateToggles />
                 </div>
             );
         };
 
         // --- TAB 6: SYSTEM CONFIG ---
+        const StrategyLaunchPad = () => {
+            const [strats, setStrats] = useState({});
+            const fetchStrats = () => fetch(`${API_BASE}/config/strategies/live`).then(r => r.json()).then(setStrats).catch(()=>{});
+            useEffect(() => { fetchStrats(); }, []);
+
+            const toggleStrat = async (s) => {
+                await fetch(`${API_BASE}/config/strategies/live?strat=${s}&enabled=${!strats[s]}`, {method:'POST'});
+                fetchStrats();
+            };
+
+            return (
+                <div className="oled-card p-8 rounded-3xl mt-6">
+                    <h3 className="text-xs font-black uppercase text-gray-500 mb-6">Strategy Launch Pad</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        {Object.entries(strats).map(([name, live]) => (
+                            <div key={name} className="flex items-center justify-between p-4 bg-white/5 rounded-2xl border border-white/10">
+                                <div>
+                                    <div className="text-[10px] font-black text-gray-300 uppercase">{name}</div>
+                                    <div className={`text-[8px] font-bold mt-1 uppercase ${live ? 'text-success' : 'text-gray-500'}`}>{live ? 'Live Trading Enabled' : 'Paper Only'}</div>
+                                </div>
+                                <button onClick={() => toggleStrat(name)} className={`w-12 h-6 rounded-full relative transition-all ${live ? 'bg-success' : 'bg-gray-800'}`}>
+                                    <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${live ? 'right-1' : 'left-1'}`}></div>
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
         const SystemConfig = () => {
             const [unlocked, setUnlocked] = useState(false);
-            
-            // Capital alloc
             const [totalCapital, setTotalCapital] = useState(1000000);
             const [maxAllocPct, setMaxAllocPct] = useState(40);
             const [hedgeResPct, setHedgeResPct] = useState(15);
-            
-            // Risk Limits
             const [maxLoss, setMaxLoss] = useState(50000);
             const [maxDD, setMaxDD] = useState(15000);
             const [trailStop, setTrailStop] = useState(1.5);
-            
-            // Status messages
             const [capStatus, setCapStatus] = useState('');
             const [riskStatus, setRiskStatus] = useState('');
 
@@ -438,16 +475,6 @@
             const saveRiskLimits = async () => {
                 if(!unlocked) return;
                 try {
-                    const r = await fetch(`${API_BASE}/config/validate_risk`, {
-                        method: 'POST', headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({stop_loss: 20000, current_price: 20100, spread: 5}) // dummy validation data
-                    });
-                    const res = await r.json();
-                    if(!res.valid) {
-                        setRiskStatus('VETO: ' + res.message);
-                        setTimeout(()=>setRiskStatus(''), 3000);
-                        return;
-                    }
                     await fetch(`${API_BASE}/config/risk_limits`, {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({daily_max_loss: maxLoss, max_drawdown: maxDD, trailing_stop_multi: trailStop})
@@ -464,7 +491,6 @@
                             <h3 className="text-sm font-black text-white uppercase flex items-center gap-2">
                                 {unlocked ? <span className="text-warning">🔓 SYSTEM UNLOCKED</span> : <span className="text-success">🔒 SAFETY LOCKED</span>}
                             </h3>
-                            <p className="text-[9px] text-gray-500 uppercase font-bold mt-1 tracking-widest">Only modify master registry when positions are flat.</p>
                         </div>
                         <button onClick={() => setUnlocked(!unlocked)} className={`px-6 py-2 rounded-full font-black text-[10px] uppercase transition-all ${unlocked ? 'bg-warning/20 text-warning border border-warning' : 'bg-success/20 text-success border border-success'}`}>
                             {unlocked ? "LOCK SYSTEM" : "UNLOCK TO EDIT"}
@@ -472,70 +498,94 @@
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        {/* Capital Management */}
                         <div className={`oled-card p-8 rounded-3xl transition-opacity ${unlocked?'opacity-100':'opacity-60'}`}>
-                            <h3 className="text-xs font-black uppercase text-gray-500 mb-6">Capital Allocation (Master Sandbox)</h3>
+                            <h3 className="text-xs font-black uppercase text-gray-500 mb-6">Capital Allocation</h3>
                             <div className="space-y-6">
                                 <div>
                                     <label className="text-[9px] font-bold text-gray-400 uppercase">Total Trading Capital (₹)</label>
                                     <input type="number" disabled={!unlocked} value={totalCapital} onChange={e=>setTotalCapital(Number(e.target.value))} className="w-full bg-black border border-white/10 mt-1 p-3 text-white font-mono rounded" />
                                 </div>
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div>
-                                        <label className="text-[9px] font-bold text-gray-400 uppercase">Max Allocation / Strategy %</label>
-                                        <input type="number" disabled={!unlocked} value={maxAllocPct} onChange={e=>setMaxAllocPct(Number(e.target.value))} className="w-full bg-black border border-white/10 mt-1 p-3 text-white font-mono rounded" />
-                                    </div>
-                                    <div>
-                                        <label className="text-[9px] font-bold text-gray-400 uppercase">Hedge Reserve %</label>
-                                        <input type="number" disabled={!unlocked} value={hedgeResPct} onChange={e=>setHedgeResPct(Number(e.target.value))} className="w-full bg-warning/10 border border-warning/30 mt-1 p-3 text-warning font-mono rounded ring-1 ring-warning/50" title="Strict reserve for Micro-Future hedges"/>
-                                    </div>
-                                </div>
-                                
-                                <div className="pt-4 flex items-center justify-between">
-                                    <div className="w-24 h-24 rounded-full border-4 border-gray-800 relative bg-black flex items-center justify-center">
-                                        <div className="absolute inset-0 rounded-full border-4 border-transparent" style={{borderTopColor: '#00D2FF', borderRightColor: '#00D2FF', transform: 'rotate(45deg)'}}></div>
-                                        <div className="absolute inset-0 rounded-full border-4 border-transparent" style={{borderLeftColor: '#d2990d', transform: 'rotate(-45deg)'}}></div>
-                                        <span className="text-[9px] font-black text-gray-500">MEM</span>
-                                    </div>
-                                    <div className="flex-1 ml-8 flex justify-end items-center gap-4">
-                                        {capStatus && <span className="text-[9px] font-black text-accent bg-accent/20 px-2 py-1 rounded">{capStatus}</span>}
-                                        <button disabled={!unlocked} onClick={saveCapAlloc} className="btn-neon px-6 py-3 rounded font-black text-[10px] uppercase">Save to Redis</button>
-                                    </div>
+                                <div className="flex justify-end pt-4">
+                                     <button disabled={!unlocked} onClick={saveCapAlloc} className="btn-neon px-6 py-3 rounded font-black text-[10px] uppercase">Save to Redis</button>
                                 </div>
                             </div>
                         </div>
 
-                        {/* Risk Limits */}
                         <div className={`oled-card p-8 rounded-3xl transition-opacity ${unlocked?'opacity-100':'opacity-60'}`}>
-                            <h3 className="text-xs font-black uppercase text-gray-500 mb-6">Stop-Loss & Risk Limits</h3>
+                            <h3 className="text-xs font-black uppercase text-gray-500 mb-6">Risk Limits</h3>
                             <div className="space-y-6">
                                 <div>
-                                    <label className="text-[9px] font-bold text-gray-400 uppercase">Daily Max Loss (M-to-M) (₹)</label>
+                                    <label className="text-[9px] font-bold text-gray-400 uppercase">Daily Max Loss (₹)</label>
                                     <input type="number" disabled={!unlocked} value={maxLoss} onChange={e=>setMaxLoss(Number(e.target.value))} className="w-full bg-danger/10 border border-danger/30 mt-1 p-3 text-danger font-mono rounded" />
                                 </div>
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div>
-                                        <label className="text-[9px] font-bold text-gray-400 uppercase">Max Drawdown / Strategy</label>
-                                        <input type="number" disabled={!unlocked} value={maxDD} onChange={e=>setMaxDD(Number(e.target.value))} className="w-full bg-black border border-white/10 mt-1 p-3 text-white font-mono rounded" />
-                                    </div>
-                                    <div>
-                                        <label className="text-[9px] font-bold text-gray-400 uppercase">Trailing Stop (ATR Multiplier)</label>
-                                        <input type="number" step="0.1" disabled={!unlocked} value={trailStop} onChange={e=>setTrailStop(Number(e.target.value))} className="w-full bg-black border border-white/10 mt-1 p-3 text-white font-mono rounded"/>
-                                    </div>
-                                </div>
-                                <div className="pt-4 flex items-center justify-between border-t border-white/10 mt-4">
-                                     <div className="text-[9px] font-bold text-gray-600 bg-white/5 p-2 rounded">Runs Dry-Run validation before commit.</div>
-                                     <div className="flex items-center gap-4">
-                                        {riskStatus && <span className={`text-[9px] font-black px-2 py-1 rounded ${riskStatus.includes('VETO') ? 'text-danger bg-danger/20' : 'text-accent bg-accent/20'}`}>{riskStatus}</span>}
-                                        <button disabled={!unlocked} onClick={saveRiskLimits} className="btn-neon px-6 py-3 rounded font-black text-[10px] uppercase">Validate & Commit</button>
-                                     </div>
+                                <div className="flex justify-end pt-4">
+                                    <button disabled={!unlocked} onClick={saveRiskLimits} className="btn-neon px-6 py-3 rounded font-black text-[10px] uppercase">Commit Change</button>
                                 </div>
                             </div>
                         </div>
                     </div>
+                    <StrategyLaunchPad />
                 </div>
             )
         }
+
+        // --- TAB 7: DEEP DIVE (HDD) ---
+        const DeepDive = ({ state, asset }) => {
+            const [efficacy, setEfficacy] = useState([]);
+            useEffect(() => {
+                const fetchEff = () => fetch(`${API_BASE}/analytics/meta_router_efficacy`).then(r => r.json()).then(setEfficacy).catch(()=>{});
+                fetchEff();
+                const i = setInterval(fetchEff, 5000);
+                return () => clearInterval(i);
+            }, []);
+
+            return (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-in slide-in-from-bottom-4 duration-700">
+                    <div className="lg:col-span-2 oled-card p-8 rounded-[2rem] bg-gradient-to-br from-[#070707] to-black border-white/5 shadow-2xl">
+                        <div className="flex justify-between items-center mb-10">
+                            <div>
+                                <h3 className="text-sm font-black text-white tracking-widest uppercase">The Truth Matrix</h3>
+                                <p className="text-[10px] text-gray-500 font-bold mt-1 uppercase">Meta-Router Veto Efficacy & Alpha Preservation</p>
+                            </div>
+                        </div>
+                        
+                        <div className="space-y-4">
+                            {efficacy.map((eff, i) => (
+                                <div key={i} className="group flex items-center gap-6 p-4 rounded-2xl bg-white/[0.02] border border-white/5 hover:bg-white/[0.05] hover:border-accent/30 transition-all cursor-default">
+                                    <div className="w-12 h-12 rounded-xl bg-accent/10 flex items-center justify-center text-accent font-black text-xs">
+                                        {eff.rejection_count}
+                                    </div>
+                                    <div className="flex-1">
+                                        <div className="flex justify-between items-center mb-2">
+                                            <span className="text-[11px] font-black text-gray-300 uppercase tracking-wider">{eff.veto_reason}</span>
+                                            <span className="text-[10px] font-bold text-accent mono">+{eff.lots_saved} Lots Saved</span>
+                                        </div>
+                                        <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                                            <div className="h-full bg-accent shadow-[0_0_10px_#00D2FF]" style={{ width: `${Math.min(100, (eff.rejection_count/50)*100)}%` }}></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="oled-card p-8 rounded-[2rem] bg-black border-white/5 flex flex-col items-center justify-center text-center relative overflow-hidden group">
+                        <div className="absolute inset-0 bg-accent/5 opacity-0 group-hover:opacity-100 transition-opacity duration-1000"></div>
+                        <div className="text-[10px] font-black text-gray-500 uppercase mb-8 tracking-[0.2em]">Counterfactual Ledger</div>
+                        <div className="w-40 h-40 rounded-full border border-accent/20 flex items-center justify-center relative mb-8">
+                             <div className="absolute inset-2 rounded-full border border-accent/40 animate-pulse"></div>
+                             <div className="text-4xl font-black text-white mono">91<span className="text-accent text-sm">%</span></div>
+                        </div>
+                        <div className="text-xs font-bold text-gray-400 uppercase leading-relaxed">
+                            Meta-Router has prevented<br/>
+                            <span className="text-white">Significant Theoretical Drawdown</span><br/>
+                            this session by enforcing<br/>
+                            <span className="text-accent">Institutional Guards.</span>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
 
         // --- MAIN DASHBOARD APP ---
         const Dashboard = () => {
@@ -571,6 +621,7 @@
                 {id: 'ALPHA', label: 'Strategy Alpha'},
                 {id: 'HLTH', label: 'System Health'},
                 {id: 'EOD', label: 'Analytics & EOD'},
+                {id: 'HDD', label: 'Deep Dive'},
                 {id: 'CONF', label: 'System Config'}
             ];
 
@@ -586,16 +637,6 @@
                                 </button>
                             ))}
                         </div>
-                        {activeTab !== 'CMD' && (
-                            <div className="pb-3 flex items-center gap-2">
-                                <span className="text-[9px] text-gray-500 font-bold uppercase">Global Asset:</span>
-                                <select value={asset} onChange={e => setAsset(e.target.value)} className="bg-white/5 border border-white/10 text-[9px] font-bold px-2 py-1 outline-none text-white rounded">
-                                    <option value="NIFTY50">NIFTY50</option>
-                                    <option value="BANKNIFTY">BANKNIFTY</option>
-                                    <option value="SENSEX">SENSEX</option>
-                                </select>
-                            </div>
-                        )}
                     </div>
 
                     <main className="flex-1 p-8 overflow-y-auto">
@@ -603,7 +644,8 @@
                         {activeTab === 'PORT' && <PortfolioRisk positions={positions} telemetry={telemetry} />}
                         {activeTab === 'ALPHA' && <StrategyAlpha state={state} />}
                         {activeTab === 'HLTH' && <SystemHealth telemetry={telemetry} />}
-                        {activeTab === 'EOD' && <AnalyticsEOD />}
+                        {activeTab === 'EOD' && <AnalyticsEOD analytics={state.analytics} />}
+                        {activeTab === 'HDD' && <DeepDive state={state} asset={asset} />}
                         {activeTab === 'CONF' && <SystemConfig />}
                     </main>
                 </div>

@@ -368,6 +368,64 @@ def update_capital(req: CapitalRequest):
     r.set("CONFIG:TOTAL_CAPITAL", req.amount)
     return {"status": "Capital updated"}
 
+# --- Layer 9: Gate & Strategy Management ---
+
+@app.get("/config/gates")
+def get_gates():
+    r = get_redis()
+    gates = ["FRACTURE", "REGIME_LOCK", "LOW_VOL", "ASTO", "STATE3", "0DTE", "CEILING"]
+    res = {}
+    for g in gates:
+        res[g] = r.get(f"GATE:{g}:ENABLED") != "False"
+    return res
+
+@app.post("/config/gates")
+async def update_gate(gate: str, enabled: bool):
+    r = get_redis()
+    val = "True" if enabled else "False"
+    r.set(f"GATE:{gate.upper()}:ENABLED", val)
+    await AuditLogger.log_event("GATE_TOGGLE", "ADMIN_UI", f"Gate {gate} set to {val}")
+    return {"status": "success"}
+
+@app.get("/config/strategies/live")
+def get_strat_live():
+    r = get_redis()
+    strats = ["IronCondor", "DirectionalCredit", "GammaScalping", "TastyTrade0DTE", "KineticHunter", "ElasticHunter", "PositionalHunter"]
+    res = {}
+    for s in strats:
+        res[s] = r.get(f"STRAT_LIVE_TOGGLE:{s}") == "ON"
+    return res
+
+@app.post("/config/strategies/live")
+async def update_strat_live(strat: str, enabled: bool, user: str = "ADMIN"):
+    r = get_redis()
+    val = "ON" if enabled else "OFF"
+    r.set(f"STRAT_LIVE_TOGGLE:{strat}", val)
+    await AuditLogger.log_event("STRAT_LIVE_TOGGLE", user, f"Strategy {strat} set to {val}")
+    return {"status": "success"}
+
+@app.get("/analytics/meta_router_efficacy")
+def get_meta_router_efficacy():
+    conn = get_db()
+    if not conn: return []
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # We estimate 'Alpha Saved' as the theoretical P&L of the vetoed trade
+            # For simplicity in Phase 9, we just count rejections and sum lot-weighted exposure
+            cur.execute("""
+                SELECT 
+                    veto_reason, 
+                    COUNT(*) as rejection_count, 
+                    SUM(quantity) as lots_saved
+                FROM shadow_trades
+                WHERE veto_reason != 'NONE'
+                GROUP BY veto_reason
+            """)
+            return cur.fetchall()
+    except Exception as e:
+        logger.error(f"Efficacy error: {e}")
+        return []
+
 @app.post("/config/capital_alloc")
 async def update_capital_alloc(config: CapitalConfig):
     r = get_redis()

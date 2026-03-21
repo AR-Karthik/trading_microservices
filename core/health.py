@@ -46,7 +46,8 @@ class HeartbeatProvider:
                 ts = time.time()
                 await self.redis.hset("daemon_heartbeats", self.name, ts)
                 # Keep individual key for easy TTL monitoring if needed
-                await self.redis.set(f"heartbeat:{self.name}", ts, ex=30)
+                # [Audit 21.1] Standardized 'Live Heartbeat' prefix for Dashboard
+                await self.redis.set(f"LH:{self.name}", ts, ex=30)
             except Exception as e:
                 logger.error(f"Heartbeat failed for {self.name}: {e}")
             await asyncio.sleep(interval)
