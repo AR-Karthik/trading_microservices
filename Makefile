@@ -1,4 +1,5 @@
-# Trading Microservices - Build & Dev Automation
+# Trading Microservices - Build & Development Automation
+# Simplifies complex Docker and testing commands into single words
 
 .PHONY: build up down ps logs test shell lint clean help
 

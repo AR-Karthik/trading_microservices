@@ -1,3 +1,8 @@
+"""
+Meta-Router & Institutional Truth Matrix
+Central intelligence hub for risk-managed order routing.
+Implements a 15-Gate Veto Matrix, Bayesian regime tracking, and portfolio stress testing.
+"""
 import asyncio
 import json
 import logging
@@ -96,8 +101,7 @@ class BayesianRegimeTracker:
             for r_to, trans_p in self.transition_matrix[r_from].items():
                 prior[r_to] += p_val * trans_p
         
-        # Step 2: Likelihood (Sophisticated Bayesian Dirichlet Update)
-        # We alpha-weight the observations based on signal confidence [Audit 14.1]
+        # We weight observations based on signal confidence to reduce regime jitter
         likelihood = {r: (confidence if r == observation else (1.0 - confidence)/(len(prior)-1)) for r in prior}
         
         # Step 3: Posterior normalization with Smoothing Constant
@@ -280,7 +284,7 @@ class MetaRouter:
         self.correlation_engine = AssetCorrelationEngine(self._redis)
         self.regime_tracker = BayesianRegimeTracker(["NIFTY50", "BANKNIFTY", "SENSEX"])
         
-        # Multi-Threaded Alpha Collectors (Phase 9.1: Low-Latency)
+        # Low-Latency Alpha Collectors
         self.alpha_state = collections.defaultdict(dict)
         self.veto_ledger = collections.defaultdict(lambda: collections.deque(maxlen=100))
         self.cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD, bind=True)
@@ -360,7 +364,7 @@ class MetaRouter:
         strat_id = intent.get("strategy_id", "KINETIC")
         lifecycle = LIFECYCLE_MAP.get(strat_id, "KINETIC")
         
-        # 1. Signal Vitality Check (PhD Hardening Step 22.3)
+        # Signal Vitality Check: Ensure sensory data is fresh
         last_update = self.local_signals.get("_last_update", 0)
         signal_age = time.time() - last_update
         if last_update != 0 and signal_age > 10.0 and intent.get("is_live"):
@@ -400,7 +404,7 @@ class MetaRouter:
                     # [PhD Opportunity] Lab Discovery: Bayesian Override of HMM Jitter
                     logger.info(f"🧠 BAYESIAN OVERRIDE on {asset}: HMM says {hmm_regime} (REJECT), but Bayesian says {best_regime} (ALLOW). Trade Proceeding.")
                     intent["bayesian_override"] = True
-                # PhD Rule: Veto if we are in a 'Regime Twilight Zone' (High Uncertainty)
+                # Uncertainty Veto: Reject if the probability of the current regime is too low
                 elif b_prob < 0.60:
                     vetoes.append("REGIME_UNCERTAINTY_VETO")
 
@@ -598,7 +602,7 @@ class MetaRouter:
         intent["veto_reason"] = intent.get("veto_reason", primary_veto)
         intent["all_vetoes"] = vetoes
         
-        # [Audit-Fix 25.4] PhD Analytics: Increment strategy veto counter
+        # Increment strategy veto counter for analytics
         if primary_veto != "NONE":
             self.metrics["strategy_vetos"] += 1
             

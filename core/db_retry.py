@@ -1,4 +1,9 @@
+"""
+Database Resilience and Retry Utilities
+Implements robust connection patterns and automatic recovery for TimescaleDB.
+"""
 import asyncio
+
 import functools
 import logging
 import asyncpg

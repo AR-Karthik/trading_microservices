@@ -1,8 +1,7 @@
 """
-Market Sensor Daemon
-High-performance asynchronous data ingestion and signal calculation engine.
-Ingests real-time tick sequences, dispatches intense mathematical computations (Greeks, GEX) 
-to dedicated CPU sub-processes, and merges quantitative arrays to form unified Alpha Scores.
+High-Performance Market Sensor
+Ingests real-time tick sequences and computes quantitative alpha signals.
+Utilizes parallel compute workers and Rust-based engines for ultra-low latency.
 """
 
 import asyncio
@@ -278,7 +277,7 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         atm_iv = float(snapshot.get("atm_iv", 0.18))
         result["vol_term_ratio"] = float(near_iv / far_iv) if far_iv > 0 else 1.0
         
-        # [Audit] 10-day RV Annualized logic
+        # Annualized Realized Volatility (10-day window)
         prices = np.array(snapshot.get("price_series", [snapshot.get("spot", 0)]))
         if len(prices) >= 10:
             returns = np.diff(np.log(prices))
@@ -294,12 +293,11 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         # IV Percentile rank vs 14-day history
         iv_hist = snapshot.get("iv_history", [atm_iv])
         
-        # [Audit-Fix] Hybrid IV Stabilization (S12)
-        # If in simulation mode, adjust API IV to track price moves to maintain edge parity
+            # Simulation Mode: Adjust Implied Volatility to track price moves
         off_hour_sim = snapshot.get("off_hour_sim", False)
         if off_hour_sim:
             snap_p = snapshot.get("sim_snap_price", spot)
-            # Simple inverse skew proxy: IV expands 0.1% for every 1% price drop
+            # Apply skew adjustment: IV typically expands during price drops
             price_ratio = (spot / snap_p) if snap_p > 0 else 1.0
             atm_iv = atm_iv * (1.0 + (1.0 - price_ratio) * 0.1) 
             result["atm_iv_sim"] = float(atm_iv)
@@ -317,7 +315,7 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         iv = snapshot.get("atm_iv", 0.18)
         symbol = snapshot.get("symbol", "NIFTY50")
 
-        # [Audit 2.3] Option Liquidity Guard
+        # Verify if option data is liquid enough to produce reliable Greeks
         has_liquid_options = (len(strikes) >= 5 and 0.05 < iv < 1.5 and T > 0)
         
         if has_liquid_options:
@@ -432,7 +430,7 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
         ce_oi = float(snapshot.get("ce_oi", 0))
         result["pcr"] = float(pe_oi / ce_oi) if ce_oi > 0 else 1.0
         
-        # [Audit] PCR ROC (30s change rate)
+        # Rate of change for PCR (last 30 seconds)
         prev_pcr = float(snapshot.get("prev_pcr", result["pcr"]))
         result["pcr_roc"] = float((result["pcr"] - prev_pcr) / prev_pcr * 100) if prev_pcr > 0 else 0.0
 

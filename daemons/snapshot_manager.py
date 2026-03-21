@@ -1,8 +1,7 @@
 """
-daemons/snapshot_manager.py
-===========================
-Slow Lane: REST API polling for structural market data, account stats, and history.
-Handles "heavy lifting" logic to avoid interfering with TickSensor's Fast Lane.
+Structural Data & Snapshot Manager
+Handles slow-lane REST polling for accounts, history, and option chains.
+Monitors SEBI circuit breakers and runs the off-hour simulator.
 """
 
 import asyncio
@@ -69,7 +68,7 @@ class SnapshotManager:
         self.active_option_tokens = {} # [Parity]
         self._sim_ltt_counter = 0     # [Audit-Fix] Persistent LTT for simulation
         
-        # [Audit-Fix] Component 2: REST Gatekeeper (Semaphore)
+        # REST Gatekeeper: Enforces broker rate limits (3 requests per second)
         self.rest_semaphore = asyncio.Semaphore(1)
         self.rest_delay = 0.34
         self.pool = None # asyncpg pool for Ghost Position Sync

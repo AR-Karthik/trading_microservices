@@ -1,7 +1,7 @@
 """
-Heuristic Regime Engine
-Computes multi-index market regimes deterministically using Realized Volatility, 
-Trend Strength (ADX), and Implied Volatility parameters, synchronized through Redis.
+Market Regime Heuristic Engine
+Determines market state (Trending, Ranging, Volatile) using ADX, RV, and IV.
+Informs the Meta-Router on strategy selection and risk parameters.
 """
 
 import argparse
@@ -48,9 +48,8 @@ class HeuristicEngine:
         self.asset_id = asset_id
         self.core_pin = core_pin
         self.mq = MQManager()
-        # [Command Layer] Write regimes for Meta-Router
+        # Interaction Layer: Read signals and write regimes via Shared Memory
         self.shm_regime = RegimeShm(asset_id=asset_id, mode='w')
-        # [Consumption Layer] Read signals from Market Sensor
         self.shm_signals = ShmManager(asset_id=asset_id, mode='r')
         
         # Redis connection
@@ -65,11 +64,11 @@ class HeuristicEngine:
         self.adx_val = 0.0
         self.rv_val = 0.0
         self.iv_rv_spread = 0.0
-        self.iv_val = 0.15       # Implied Volatility of At-The-Money Strikes
-        self.vpin_val = 0.0      # Order Flow Toxicity volume indicator
-        self.ofi_z = 0.0         # Order Flow Imbalance
-        self.day_high = 0.0      # [Layer 3] Intraday High
-        self.day_low = 0.0       # [Layer 3] Intraday Low
+        self.iv_val = 0.15       # Implied Volatility (ATM)
+        self.vpin_val = 0.0      # Order Flow Toxicity
+        self.ofi_z = 0.0         # Order Flow Imbalance (Z-score)
+        self.day_high = 0.0      # Intraday Session High
+        self.day_low = 0.0       # Intraday Session Low
         self.stale_override = False  # Failsafe threshold flag for stale data
         self.current_regime_int = 0  # 0:NEUTRAL, 1:TRENDING, 2:RANGING, 3:VOLATILE
         
@@ -77,7 +76,7 @@ class HeuristicEngine:
         self.regime_history = deque(maxlen=100) # For persistence calculation
         self.tick_buffer = deque(maxlen=300)
 
-        # Direct Rest API removed [Audit 14.1: Centralized in DataGateway]
+        # External API connections are centralized in DataGateway
         self.api = None
 
     def _pin_core(self):
@@ -105,7 +104,7 @@ class HeuristicEngine:
                 self.iv_rv_spread = float(sig.iv_rv_spread)
                 self.iv_val = float(sig.iv_atm)
                 
-                # 2. Sync raw peaks for ADX (Use day_high/low, NOT high_z)
+                # Synchronize raw price peaks (Highs/Lows) for trend calculation
                 self.day_high = float(sig.day_high) 
                 self.day_low = float(sig.day_low)   
                 
@@ -148,7 +147,7 @@ class HeuristicEngine:
         return float(rv)
 
     def _calculate_adx_approximation(self, closes: list[float], intraday_high: float, intraday_low: float) -> float:
-        """[Layer 3] High-Fidelity Trend Strength using Intraday Wicks."""
+        """Calculates Trend Strength (ADX) using intraday price extremes."""
         if len(closes) < 14: return 20.0
         
         # Build O/H/L/C proxy for the trend window
@@ -184,12 +183,12 @@ class HeuristicEngine:
 
     def classify_regime(self) -> int:
         """
-        [Layer 3 Audit] State-Based Hysteresis Cascade.
-        Prevents flickering by using adaptive entry/exit thresholds.
+        Classifies the market state using Hysteresis to prevent frequent flipping.
+        Uses adaptive entry/exit thresholds for stability.
         """
         curr = self.current_regime_int
         
-        # [C1-05] Block on stale feed or high toxicity (Safety overrides everything)
+        # Safety Check: Halt if data is stale or market toxicity (VPIN) is too high
         if self.stale_override or self.vpin_val > 0.8 or self.rv_val > 0.50:
             return 3 # VOLATILE/SAFETY_HALT
 
@@ -298,7 +297,7 @@ class HeuristicEngine:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    # [Audit 3.1] Standardize on NIFTY50 everywhere
+    # Configure monitoring for a specific index (NIFTY50, BANKNIFTY, SENSEX)
     parser.add_argument("--asset", required=True)
     parser.add_argument("--core", type=int, required=True)
     args = parser.parse_args()

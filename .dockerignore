@@ -1,4 +1,6 @@
-# [F15-01] Prevent secrets, build artifacts, and unnecessary files from Docker images
+# Docker ignore rules to ensure clean and secure container images
+# Excludes local secrets, build artifacts, and system logs
+
 .git
 .gitignore
 .env

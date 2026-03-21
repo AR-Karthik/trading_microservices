@@ -1,7 +1,7 @@
 """
-Market History Database Logger
-Consumes engineered market states continuously mapping all configured financial instruments into TimescaleDB tables 
-for historic quantitative analysis, and safely buffers against database outages.
+Market History Persistence Daemon
+Captures engineered market states and archives them into TimescaleDB.
+Provides a resilient batch-writing pipeline for post-trade analysis and research.
 """
 
 import asyncio

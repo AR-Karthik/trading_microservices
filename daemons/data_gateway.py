@@ -1,13 +1,7 @@
 """
-daemons/data_gateway.py
-=======================
-Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)
-
-Responsibilities:
-- Dynamic lot size fetch at 09:01 IST (Nifty=65, BankNifty=30, Sensex=10) → Redis
-- Tick staleness watchdog (>1000ms → TCP socket reset)
-- SEBI Circuit Breaker broadcasts
-- High-frequency tick streaming via ZeroMQ PUB to all consumers
+Real-Time Market Data Gateway
+Orchestrates high-frequency tick ingestion from broker WebSockets.
+Manages dynamic option subscriptions, staleness monitoring, and ZMQ broadcasting.
 """
 
 import asyncio

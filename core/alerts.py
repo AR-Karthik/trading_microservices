@@ -1,4 +1,9 @@
+"""
+Centralized Asynchronous Alerting System
+Provides a non-blocking gateway for system-wide notifications using Redis.
+"""
 import json
+
 import logging
 import os
 from datetime import datetime, timezone

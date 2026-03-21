@@ -1,5 +1,8 @@
+# Production Dockerfile for Trading Microservices
+# Multi-stage build ensuring high-performance C++ components and Python logic
 # Stage 1: Build C++ Gateway
 FROM python:3.11-slim AS builder-cpp
+
 
 RUN apt-get update && apt-get install -y \
     build-essential \

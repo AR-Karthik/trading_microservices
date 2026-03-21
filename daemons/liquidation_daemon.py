@@ -1,12 +1,7 @@
 """
-daemons/liquidation_daemon.py
-==============================
-Project K.A.R.T.H.I.K. (Kinetic Algorithmic Real-Time High-Intensity Knight)
-
-Responsibilities:
-- Triple-barrier liquidation system (TP, SL, Time-decay).
-- Granular exception handling for broker API error codes.
-- Market microstructure monitoring for CVD overrides.
+Automated Liquidation & Risk Guardian
+Enforces the Triple-Barrier exit system (TP, SL, Time-decay).
+Monitors slippage budgets and cross-asset drawdown limits.
 """
 
 import asyncio
@@ -154,8 +149,8 @@ class LiquidationDaemon:
 
     async def _monitor_fill_slippage(self):
         """
-        Subscribes to order_confirmations. If any single exit has slippage > SLIPPAGE_BUDGET_PCT,
-        sets SLIPPAGE_HALT in Redis for SLIPPAGE_HALT_TTL_SEC seconds, pausing new entries.
+        Monitors trade execution quality. If slippage exceeds the budget, 
+        trading is paused to prevent further losses.
         """
         try:
             pubsub = self._redis.pubsub()
@@ -195,7 +190,7 @@ class LiquidationDaemon:
             pass
 
     async def _hydrate_state_from_db(self):
-        """Phase 4.1: Reconstruct internal state from TimescaleDB (The Absolute Truth)."""
+        """Reconstruct the current portfolio state from the database on startup."""
         logger.info("Hydrating state from TimescaleDB...")
         try:
             async with self.pool.acquire() as conn:

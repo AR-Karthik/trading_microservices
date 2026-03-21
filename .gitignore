@@ -1,4 +1,7 @@
+# Project-wide ignore rules for version control
+# Prevents environment variables, python cache, and local data from being committed
 .env
+
 __pycache__/
 *.pyc
 venv/

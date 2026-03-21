@@ -1,4 +1,9 @@
+"""
+Centralized Authentication and Configuration Manager
+Handles credential resolution and connection string generation for system resources.
+"""
 import os
+
 from dotenv import load_dotenv
 load_dotenv()
 

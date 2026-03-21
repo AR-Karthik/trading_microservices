@@ -1,4 +1,7 @@
+# GitHub Actions Continuous Integration Workflow
+# Automated building and testing of microservices on every push/PR
 name: Trading Microservices CI
+
 
 on:
   push:

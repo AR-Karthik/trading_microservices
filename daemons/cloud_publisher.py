@@ -1,8 +1,7 @@
 """
-Remote Dashboard Gateway Controller
-Periodically broadcasts the internal operational snapshot (P&L, exposure, algorithmic regimes)
-from isolated VMs to Google Cloud Firestore, decoupling public client traffic from core trading latency.
-Also manages end-of-day statistical archives over GCS limits.
+Cloud Dashboard Publisher
+Transmits real-time operational metrics and P&L snapshots to Google Cloud Firestore.
+Handles EOD data archival to GCS and remote command monitoring.
 """
 import os
 import sys

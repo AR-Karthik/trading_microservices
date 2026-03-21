@@ -1,3 +1,8 @@
+"""
+FII/DII Institutional Data Fetcher
+Scrapes institutional net trade values from NSE India.
+Calculates institutional sentiment bias for global regime filters.
+"""
 import httpx
 import json
 import time
