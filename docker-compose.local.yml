@@ -169,11 +169,25 @@ services:
       - .:/app
       - /dev/shm:/ram_disk
 
-  paper_bridge:
+  shoonya_gateway:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.paper_bridge
+    container_name: shoonya_gateway
+    command: python -m daemons.shoonya_gateway
+    env_file: .env
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+      - /dev/shm:/ram_disk
+
+  unified_bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: unified_bridge
+    command: python -m daemons.unified_bridge
     env_file: .env
     depends_on:
       - redis
@@ -195,19 +209,6 @@ services:
       - .:/app
       - /dev/shm:/ram_disk
 
-  # [Audit 7.6] Adding missing services
-  live_bridge:
-    build:
-      context: .
-      dockerfile: Dockerfile.local
-    command: python -m daemons.live_bridge
-    depends_on:
-      - redis
-      - postgres
-    env_file: .env
-    volumes:
-      - .:/app
-      - /dev/shm:/ram_disk
 
   telegram_alerter:
     build:
