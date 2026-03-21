@@ -1,0 +1,20 @@
+The Quant & Strategic Thesis
+
+### 1. Philosophical Bedrock: The "Regime-First" Mandate
+Project K.A.R.T.H.I.K. is predicated on the mathematical reality that **market stationarity is a myth**. Most retail algorithmic systems fail because they apply fixed logic (e.g., mean-reversion) to a dynamic, multi-regime environment.
+
+Our core thesis mandates that **Regime Detection** is the primary filter for all capital allocation. No trade is permitted to execute unless the market’s "DNA" (measured via Hurst Exponent and HMM States) aligns with the strategy’s theoretical edge.
+
+### 2. The Alpha Surface: Beyond Price Action
+The system does not trade "patterns"; it trades **microstructure imbalances**. The Alpha Engine decomposes raw data into high-fidelity vectors:
+* **Order Flow Imbalance (OFI):** Detecting institutional liquidity pressure before it manifests as price movement.
+* **Order Flow Toxicity (VPIN):** Utilizing Volume-Synchronized Probability of Informed Trading to identify "Flash Crash" conditions and trigger system-wide vetoes.
+* **Volatility Dislocation:** Exploiting the spread between Implied Volatility (IV) and Realized Volatility (RV) to ensure theta-harvesting strategies (0DTE/Iron Condors) are only active when statistically overpaid.
+
+### 3. Strategic Portfolio Construction
+The system maintains a balanced, bifurcated strategy suite to thrive in all market states:
+* **Income Harvesting (Sideways/Ranging):** 0DTE Iron Butterflies and Iron Condors designed to capture rapid time decay with mechanical, Greek-based adjustments.
+* **Volatility Capture (Trending/Volatile):** Gamma Scalping and Kinetic Hunter strategies that utilize underlying futures to hedge delta exposure and capture explosive realized moves.
+
+### 4. Sovereign Risk Management
+Project K.A.R.T.H.I.K. treats **Risk as a First-Class Citizen**. The system operates under a "Sovereign Risk" model where a dedicated `LiquidationDaemon` has the absolute authority to kill any position based on a **Triple-Barrier** logic (Take-Profit, Stop-Loss, and Vertical Time Exits), bypassing the strategy engine’s own desires if risk budgets are breached.
