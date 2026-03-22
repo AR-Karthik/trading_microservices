@@ -129,11 +129,11 @@ services:
       - /dev/shm:/dev/shm
     shm_size: '256mb'
 
-  # 4. HMM Engines
-  hmm_engine_nifty:
+  # 4. Regime Detectors
+  regime_detector_nifty:
     image: trading-app:latest
-    container_name: hmm_engine_nifty
-    command: python -m daemons.hmm_engine --asset NIFTY50 --core 1
+    container_name: regime_detector_nifty
+    command: python -m daemons.regime_detector --asset NIFTY50 --core 1
     depends_on:
       market_sensor:
         condition: service_started
@@ -155,10 +155,10 @@ services:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
-  hmm_engine_banknifty:
+  regime_detector_banknifty:
     image: trading-app:latest
-    container_name: hmm_engine_banknifty
-    command: python -m daemons.hmm_engine --asset BANKNIFTY --core 1
+    container_name: regime_detector_banknifty
+    command: python -m daemons.regime_detector --asset BANKNIFTY --core 1
     depends_on:
       market_sensor:
         condition: service_started
@@ -180,10 +180,10 @@ services:
       - /ram_disk:/ram_disk
       - ${GCP_CREDS_PATH:-/var/run/google/gcp_creds.json}:/var/run/google/gcp_creds.json:ro
 
-  hmm_engine_sensex:
+  regime_detector_sensex:
     image: trading-app:latest
-    container_name: hmm_engine_sensex
-    command: python -m daemons.hmm_engine --asset SENSEX --core 1
+    container_name: regime_detector_sensex
+    command: python -m daemons.regime_detector --asset SENSEX --core 1
     depends_on:
       market_sensor:
         condition: service_started
@@ -211,11 +211,11 @@ services:
     container_name: meta_router
     command: python -m daemons.meta_router
     depends_on:
-      hmm_engine_nifty:
+      regime_detector_nifty:
         condition: service_started
-      hmm_engine_banknifty:
+      regime_detector_banknifty:
         condition: service_started
-      hmm_engine_sensex:
+      regime_detector_sensex:
         condition: service_started
       redis:
         condition: service_healthy

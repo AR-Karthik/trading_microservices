@@ -103,7 +103,7 @@ Signals are not passed via slow network sockets. They are written into a **Globa
 
 | Slot (Offset) | Signal Name | Data Type | Description |
 | :--- | :--- | :--- | :--- |
-| `0x00` | `s18_regime` | `int32` | HMM-detected market state. |
+| `0x00` | `s18_regime` | `int32` | Determined market state. |
 | `0x04` | `s21_vpin` | `float32` | Flow toxicity score ($0.0$ to $1.0$). |
 | `0x08` | `s22_whale_pivot` | `float32` | Institutional lead-lag pulse. |
 | `0x0C` | `s25_smart_flow` | `float32` | CVD-based buyer/seller bias. |
@@ -124,10 +124,10 @@ Signals are not passed via slow network sockets. They are written into a **Globa
 
 # Module 3 - (Regime Detection & Meta-Routing)
 
-### 1. The Bayesian Regime Engine (`daemons/hmm_engine.py`)
-To prevent "Regime Jitter" (where the system flips states too rapidly on noise), the Meta-Router implements a **Bayesian State Tracker**. This ensures that state transitions are mathematically smoothed before influencing strategy selection.
+### 1. The Deterministic Regime Engine (`daemons/regime_detector.py`)
+To prevent "Regime Jitter" (where the system flips states too rapidly on noise), the Meta-Router implements a **Deterministic State Tracker**. This ensures that state transitions are mathematically smoothed before influencing strategy selection.
 
-* **Observation Update**: The engine pulls the `HMM_STATE` from the Market Sensor's Shared Memory (SHM).
+* **Observation Update**: The engine pulls the `REGIME_STATE` from the Market Sensor's Shared Memory (SHM).
 * **Likelihood Function**: It calculates the likelihood of the current observation given the previous state, using a transition matrix $T$.
 * **Posterior Calculation**:
   $$P(S_t | O_{1:t}) \propto P(O_t | S_t) \sum_{S_{t-1}} P(S_t | S_{t-1}) P(S_{t-1} | O_{1:t-1})$$
@@ -352,7 +352,7 @@ The dashboard is not just for viewing; it is an active control interface using a
 ### 5. Post-Trade Journaling & TimescaleDB Integration
 For institutional-grade "Post-Game" analysis, the dashboard pulls from the persistence layer.
 
-* **Trade Reconstruction**: Users can click any filled order to see the exact **Signal Vector ($S_{total}$)** and **HMM Regime** that existed at the microsecond of the trade intent.
+* **Trade Reconstruction**: Users can click any filled order to see the exact **Signal Vector ($S_{total}$)** and **Regime** that existed at the microsecond of the trade intent.
 * **Slippage Audit**: Calculates the "Execution Alpha" by comparing the `shadow_price` (at signal) vs. the `fill_price` (at broker), visualized as a "Friction Heatmap" over the trading day.
 
 ### 6. Cloud Alerting & Telegram Bridge (`daemons/cloud_notifier.py`)

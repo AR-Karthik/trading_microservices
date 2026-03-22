@@ -3,7 +3,7 @@
 ## Module 0 - Introduction
 
 ### 1. Philosophical Bedrock: The "Regime-First" Mandate
-Project K.A.R.T.H.I.K. is built on the mathematical reality that market stationarity is a myth. Standard retail systems often fail because they apply static logic (e.g., mean-reversion) to a dynamic environment. Our core thesis mandates that **Regime Detection** is the primary filter for all capital allocation. No trade is permitted to execute unless the market’s "DNA"—measured via Hurst Exponents, HMM States, and ASTO regimes—aligns with the strategy’s theoretical edge.
+Project K.A.R.T.H.I.K. is built on the mathematical reality that market stationarity is a myth. Standard retail systems often fail because they apply static logic (e.g., mean-reversion) to a dynamic environment. Our core thesis mandates that **Regime Detection** is the primary filter for all capital allocation. No trade is permitted to execute unless the market’s "DNA"—measured via Hurst Exponents, Regime States, and ASTO regimes—aligns with the strategy’s theoretical edge.
 
 ### 2. The Alpha Surface: Microstructure Intelligence
 The system moves beyond simple price action, instead trading high-fidelity microstructure imbalances:
@@ -86,11 +86,11 @@ The system acknowledges that alpha has a "Half-Life." Using a mathematical decay
 ### 1. The Core Decision Thesis: "The Gatekeeper of Alpha"
 Project K.A.R.T.H.I.K. operates on the principle that **Strategy is a slave to Regime**. While Module 2 generates raw alpha signals, Module 3 acts as the sovereign gatekeeper. Its primary strategic mandate is to ensure that no capital is deployed unless the market’s mathematical "DNA" is perfectly aligned with the intended strategy’s risk profile. 
 
-### 2. Bayesian Regime Tracking (The Truth Matrix)
-To solve the problem of signal "jitter," the system employs a **Bayesian Regime Tracker**. 
+### 2. Deterministic Regime Tracking (The Truth Matrix)
+To solve the problem of signal "jitter," the system employs a **Deterministic Regime Tracker**. 
 * **Prior Beliefs**: The tracker maintains a rolling posterior probability for three primary states: `RANGING`, `TRENDING`, and `VOLATILE`.
 * **State Transitions**: It uses a Transition Matrix (e.g., a 10% probability of moving from Trending to Volatile) to calculate the "Prior".
-* **Observation Update**: Raw HMM signals from the `MarketSensor` are treated as "Observations." The system calculates the **Likelihood** of these observations and updates the posterior probability using Bayesian inference.
+* **Observation Update**: Raw Regime signals from the `MarketSensor` are treated as "Observations." The system calculates the **Likelihood** of these observations and updates the posterior probability using deterministic logic.
 * **Strategic Impact**: A strategy like `TastyTrade0DTE` is only permitted if the posterior probability for `RANGING` or `HIGH_VOL_CHOP` is the dominant state.
 
 ### 3. The 15-Gate Veto Matrix (Institutional Risk Control)
@@ -181,7 +181,7 @@ Strategic alpha is measured and protected through three distinct execution layer
 The bridge maintains a "Shadow Ledger" for PhD-level efficacy analysis. By comparing the `intent_price` (Shadow) vs. the `execution_price` (Actual), the system calculates the **Execution Alpha Erosion**. This allows the quant team to identify if a strategy's edge is being consumed by market microstructure or broker-level latency rather than poor signal quality.
 
 ### 4. Regime-Aware Execution Nudging
-The bridge does not treat all broker rejections equally. It employs an **HMM-Regime Aware Nudging** protocol. If a live order is rejected in a `Trending` or `Volatile` regime, the bridge applies a dynamic price "nudge" (e.g., 0.3% in volatile states vs. 0.1% in neutral states) and resubmits as a limit order to ensure the position is captured despite rapid book movement.
+The bridge does not treat all broker rejections equally. It employs an **Regime-Aware Nudging** protocol. If a live order is rejected in a `Trending` or `Volatile` regime, the bridge applies a dynamic price "nudge" (e.g., 0.3% in volatile states vs. 0.1% in neutral states) and resubmits as a limit order to ensure the position is captured despite rapid book movement.
 
 ### 5. Institutional Safety & Triple-Lock Gates
 To protect capital from "runaway" algorithms or API instabilities, the bridge enforces three hard locks before a Live Strike:

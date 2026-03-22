@@ -684,6 +684,9 @@ class MarketSensor:
             else:
                 logger.info("⚡ Rust Engine acts as compute layer. Python mp.Process worker guarded/skipped.")
             
+            # [Constitutional Purity] Isolate Market Sensor to pinned high-performance CPU cores
+            self._pin_core()
+            
             # [Audit 11.1] Heartbeat integration
             self.hb = HeartbeatProvider("MarketSensor", self._redis)
             asyncio.create_task(self.hb.run_heartbeat())
@@ -719,8 +722,23 @@ class MarketSensor:
         logger.info("✅ Market Sensor stopped successfully.")
 
     def _pin_core(self):
-        # [Audit-Fix] Finding 6.1: Docker CGroups manage CPUSet. Native pinning causes overlaps.
-        pass
+        """
+        [Constitutional Purity] Isolate Market Sensor mathematical workload to high-performance cores.
+        Prevents L1/L2 cache cross-contamination with common system daemons.
+        """
+        cpu_cores_str = os.getenv("MARKET_SENSOR_CPU_CORES", "")
+        if cpu_cores_str:
+            try:
+                # Expecting comma-separated list of core IDs, e.g., "0,1,2,3"
+                core_ids = [int(x.strip()) for x in cpu_cores_str.split(",") if x.strip()]
+                if core_ids:
+                    os.sched_setaffinity(0, set(core_ids))
+                    logger.info(f"📌 Market Sensor successfully pinned to CPU cores: {core_ids}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to pin Market Sensor to CPU cores {cpu_cores_str}: {e}")
+        else:
+            # Default to no specific pinning if not configured, respecting Docker/CGroup defaults
+            pass
 
     def _classify_trade(self, tick: dict) -> float:
         """
@@ -1426,17 +1444,17 @@ class MarketSensor:
             if symbol == "NIFTY50":
                 await self._redis.set("COMPOSITE_ALPHA", str(market_signal_state["s_total"]))
 
-            # HMM_REGIME: pull from partitioned regime hash [Audit 3.1: Standardize NIFTY50]
-            hmm_raw = await self._redis.hget("hmm_regime_state", symbol)
-            if hmm_raw:
-                hmm_data = json.loads(hmm_raw)
-                val = hmm_data.get("regime", "WAITING")
-                await self._redis.set(f"HMM_REGIME:{symbol}", val)
+            # REGIME_STATE: pull from partitioned regime hash [Audit 3.1: Standardize NIFTY50]
+            regime_raw = await self._redis.hget("regime_state", symbol)
+            if regime_raw:
+                regime_data = json.loads(regime_raw)
+                val = regime_data.get("regime", "WAITING")
+                await self._redis.set(f"REGIME_STATE:{symbol}", val)
                 if symbol == "NIFTY50":
-                    await self._redis.set("HMM_REGIME", val)
-                    await self._redis.set("hmm_regime", val)
+                    await self._redis.set("REGIME_STATE", val)
+                    await self._redis.set("regime_state", val)
             else:
-                await self._redis.set(f"HMM_REGIME:{symbol}", "WAITING")
+                await self._redis.set(f"REGIME_STATE:{symbol}", "WAITING")
 
         if not self.test_mode:
             # GAP FIX: Store individual heavyweight Z-scores for API / Power Five

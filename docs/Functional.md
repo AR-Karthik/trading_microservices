@@ -1,4 +1,4 @@
-﻿@
+@
 # Functional Documentation
 Comprehensive guide to the system's business and quantitative logic.
 ---
@@ -221,7 +221,7 @@ Market data must move fast. When the 'Gateway' sees a price change, it 'Publishe
 1. `create_publisher()`: Opens a 'TV Station' at a specific port (e.g., 5555 for Price Ticks).
 2. `create_subscriber()`: Tunes a radio into specific 'Topics' (e.g., only listen for 'NIFTY' prices).
 3. `send_json()`: Packages a message with a **Correlation ID**. This is like a 'Tracking Number' on a package—if a trade fails, you can use this ID to trace its journey through every part of the bot.
-4. `NumpyEncoder`: A special translator that allows the bot to send complex math data (numbers from the 'Greeks' or 'HMM' engines) through the radio without breaking.
+4. `NumpyEncoder`: A special translator that allows the bot to send complex math data (numbers from the 'Greeks' or 'Regime' engines) through the radio without breaking.
 
 **Variable Dictionary**:
 - `Ports`: A list of 'Channels' for different info (5555=Price, 5556=Orders, 5559=Commands).
@@ -312,7 +312,7 @@ Data integrity is critical. If a strategy expects a 'Price' but receives a 'Volu
 
 **Exhaustive Message Types**:
 1. `TickData`: The standard packet for a live price update. It contains Symbol, Price, Bid/Ask (spread), and Volume. 
-2. `AlphaSignal`: The packet for 'Brain Updates.' It contains the HMM market mood (Trending vs Ranging) and the 'Flow Toxicity' (is the market dangerous?).
+2. `AlphaSignal`: The packet for 'Brain Updates.' It contains the Regime market mood (Trending vs Ranging) and the 'Flow Toxicity' (is the market dangerous?).
 3. `StrategyConfig`: The packet used to 'Remote Control' the bot. It tells a strategy to Wake up, Sleep, or use a specific amount of Capital.
 
 **Variable Dictionary**:
@@ -374,7 +374,7 @@ High-fidelity backtesting. A strategy is only as good as the data it was trained
 - `LOGGER_STOP`: A safety toggle in Redis used to stop recording during the 'Midnight Maintenance' window.
 
 ---
-### [EXHAUSTIVE] daemons/hmm_engine.py (Regime Detection)
+### [EXHAUSTIVE] daemons/regime_detector.py (Regime Detection)
 
 **Functional Purpose**: 
 The 'Economic Meteorologist.' This daemon looks at the 'Weather' of the market. It doesn't care about the price of one stock; it cares about the *Mode* of the whole market. Is it a calm day (Ranging), a rainy day (Trending), or a hurricane (Volatile)?
@@ -410,7 +410,7 @@ Automated Risk Management. Human traders often get 'Hopeful' and hold losing tra
 2. `_check_hybrid_drawdown()`: Monitors 'Pairs.' If you are buying a future to hedge an option, it looks at both relative to each other. If the 'Net Loss' of the pair is too high, it closes both.
 3. `_evaluate_barriers()` (The 5-Gate Exit Hierarchy):
    - **Gate 1: Hard Stop**: LTP hits the calculated Stop-Loss.
-   - **Gate 2: Regime Shift**: The HMM engine (above) reports 'Volatile/Toxic.' The daemon exits immediately to avoid a crash.
+   - **Gate 2: Regime Shift**: The Regime engine (above) reports 'Volatile/Toxic.' The daemon exits immediately to avoid a crash.
    - **Gate 3: Hedge Waterfall**: If the risk (Delta) gets too high, it tries to 'Smooth' it out by buying Micro-Futures.
    - **Gate 4: Quality Decay**: If the signal 'Quality' (S27) drops but we are in profit, it takes the money and runs.
    - **Gate 5: Time Gate**: At 15:15 IST, it closes everything to avoid 'Overnight Risk.'
@@ -462,7 +462,7 @@ Multi-Strategy Risk Aggregation. When you run 5 different bots, they might all t
    - **Gate 5 (Regime Lock)**: Only allows 'Trend' strategies to run if the market is actually 'Trending.'
    - **Gate 10 (VIX Spike)**: If fear (VIX) jumps suddenly, it cancels all new trades.
    - **Gate 12 (Asset Heat)**: Limits how much money can be bet on a single index (e.g., no more than 50 lots of NIFTY).
-2. `BayesianRegimeTracker`: Uses 'Probability' to smooth out market noise. It asks: "What is the 90% chance of the market mood being 'Ranging' right now?"
+2. `DeterministicRegimeTracker`: Uses 'Probability' to smooth out market noise. It asks: "What is the 90% chance of the market mood being 'Ranging' right now?"
 3. `PortfolioStressTestEngine`: Performs 'Crash Simulations.' It asks: "If the market drops 5% in 1 minute (Flash Crash), how much money will we lose?" If the answer is "Too much," it vetos the trade.
 4. `RegulatoryCircuitBreaker`: Ensures we don't send orders too fast (SEBI rule: max 10 per second).
 
@@ -542,7 +542,7 @@ Operational Integrity & Compliance. It implements the SEBI 'Circuit Breaker' rul
 The 'Decision Maker.' This daemon contains the actual logic for when to buy and sell. It doesn't just look at price; it looks at 'Regimes' (Market Mood). It has different specialized 'Hunters' for different market conditions: one for trending markets (Kinetic), one for sideways markets (Elastic), and one for high-income option spreads (Positional).
 
 **Quant Finance Context**: 
-Dynamic Multi-Strategy Allocation. Most bots fail because they try to use one set of rules for every market. The Strategy Engine is smarter: it only 'Activates' the Kinetic Hunter when the HMM Engine confirms a strong trend. It also implements the 'TastyTrade' 0-DTE philosophy—selling insurance to the market when the implied volatility is high.
+Dynamic Multi-Strategy Allocation. Most bots fail because they try to use one set of rules for every market. The Strategy Engine is smarter: it only 'Activates' the Kinetic Hunter when the Regime Engine confirms a strong trend. It also implements the 'TastyTrade' 0-DTE philosophy—selling insurance to the market when the implied volatility is high.
 
 **Exhaustive Method Logic**:
 1. `KineticHunterStrategy`: The 'Trend Follower.' It waits for the ASTO indicator to exceed 70. It confirms the move by checking if the 'Power 5' (top 5 stocks like Reliance and HDFC Bank) are moving in the same direction.
@@ -767,7 +767,7 @@ Real-Time Transparency & Intervention. A 'Black Box' bot is dangerous. The Dashb
 
 **Variable Dictionary**:
 - `Alpha Score`: 1.0 = Bullish, -1.0 = Bearish.
-- `HMM Regime`: The identified market 'Mood' (e.g., TRENDING_UP).
+- `Regime`: The identified market 'Mood' (e.g., TRENDING_UP).
 - `Vanna/Charm`: Advanced 'Greeks' showing how risk changes as time passes or volatility jumps.
 
 ---

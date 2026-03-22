@@ -4,7 +4,7 @@ tests/test_v70_features.py
 Unit tests for all v7.0 system improvements:
   A1 — Global Portfolio Heat Constraint (meta_router.py)
   A2 — Slippage Budget Monitor (liquidation_daemon.py + strategy_engine.py)
-  B2 — HMM Warm-Up Gap Normalization / _calibrate_vol_context (strategy_engine.py)
+  B2 — Regime Warm-Up Gap Normalization / _calibrate_vol_context (strategy_engine.py)
   C1 — Theta-Aware Dynamic Stall Timer (liquidation_daemon.py)
   C2 — Automated Orphan Order Reconciliation / _reboot_audit (order_reconciler.py)
 """
@@ -252,10 +252,10 @@ class TestSlippageBudget(unittest.IsolatedAsyncioTestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# B2 — HMM Gap Calibration (_calibrate_vol_context)
+# B2 — Regime Gap Calibration (_calibrate_vol_context)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestHMMGapCalibration(unittest.IsolatedAsyncioTestCase):
+class TestRegimeGapCalibration(unittest.IsolatedAsyncioTestCase):
     """
     B2: _calibrate_vol_context() reads prev_close, tick_history, and rolling_std
     from Redis, computes gap_z, and writes VOL_GAP_Z:<symbol> with 2h TTL.

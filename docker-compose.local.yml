@@ -70,11 +70,11 @@ services:
     volumes:
       - .:/app
 
-  hmm_engine_nifty:
+  regime_detector_nifty:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.hmm_engine --asset NIFTY50 --core 1
+    command: python -m daemons.regime_detector --asset NIFTY50 --core 1
     env_file: .env
     depends_on:
       - redis
@@ -82,11 +82,11 @@ services:
       - .:/app
       - /dev/shm:/ram_disk
 
-  hmm_engine_banknifty:
+  regime_detector_banknifty:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.hmm_engine --asset BANKNIFTY --core 2
+    command: python -m daemons.regime_detector --asset BANKNIFTY --core 2
     env_file: .env
     depends_on:
       - redis
@@ -94,11 +94,11 @@ services:
       - .:/app
       - /dev/shm:/ram_disk
 
-  hmm_engine_sensex:
+  regime_detector_sensex:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.hmm_engine --asset SENSEX --core 4
+    command: python -m daemons.regime_detector --asset SENSEX --core 4
     env_file: .env
     depends_on:
       - redis

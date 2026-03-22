@@ -231,6 +231,10 @@ class KineticBarrier(BaseBarrier):
             elif elapsed >= stall_timer:
                 exit_reason = f"THETA_STALL: {elapsed:.0f}s >= {stall_timer:.0f}s"
 
+        # ── 5. Quality-Decay Early Exit (Constitutional) ────────────────
+        if not exit_reason and ctx.quality_s27 < 30:
+            exit_reason = f"QUALITY_DECAY: S27={ctx.quality_s27:.1f} < 30 (Regime Integrity compromised)"
+
         if exit_reason:
             if is_partial:
                 state_updates["runner_active"] = True
@@ -283,14 +287,20 @@ class PositionalBarrier(BaseBarrier):
 
         # ── 2. DTE Vertical Barrier ───────────────────────────────────────
         if ctx.expiry_date:
-            now = datetime.now(timezone.utc).date()
-            dte = (ctx.expiry_date - now).days
-            if dte < 3:
-                return BarrierResult(
-                    triggered=True,
-                    reason=f"DTE_VERTICAL: DTE={dte} < 3 days. Clearing positional risk.",
-                    barrier_type="TIME_LIMIT",
-                )
+            from datetime import date
+            now = date.today()
+            # Ensure ctx.expiry_date is a date object
+            exp_date = ctx.expiry_date
+            if hasattr(exp_date, 'date'):
+                exp_date = exp_date.date()
+            if isinstance(exp_date, date):
+                dte = (exp_date - now).days
+                if dte < 3:
+                    return BarrierResult(
+                        triggered=True,
+                        reason=f"DTE_VERTICAL: DTE={dte} < 3 days. Clearing positional risk.",
+                        barrier_type="TIME_LIMIT",
+                    )
 
         # ── 3. Spread Decay Take Profit ───────────────────────────────────
         initial_credit = ctx.initial_credit
@@ -361,6 +371,17 @@ class PositionalBarrier(BaseBarrier):
                         state_updates=state_updates,
                     )
                 return BarrierResult(state_updates=state_updates)
+
+        # ── 6. Regime-Shift Sensitivity (Constitutional) ────────────────
+        # S18=3 indicates a Volatility Spike / Crash Regime
+        if ctx.regime_s18 == 3:
+            return BarrierResult(
+                triggered=True,
+                reason="REGIME_SHIFT_HALT: S18=3 (Volatility Spike) detected. 50% Positional Reduction.",
+                barrier_type="STRUCTURAL_SHIFT",
+                is_partial=True,
+                partial_pct=0.5,
+            )
 
         return BarrierResult()
 

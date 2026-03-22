@@ -52,7 +52,7 @@ class TestQuantRefinements(unittest.IsolatedAsyncioTestCase):
         }
         
         # Scenario 1: High conviction state
-        # Assume HMM state probability p = 0.80, b = 1.5
+        # Assume Regime state probability p = 0.80, b = 1.5
         # Kelly = p - (1-p)/b = 0.80 - 0.20/1.5 = 0.66
         # Fractional Kelly (half) = 0.33 -> 33% weight.
         
@@ -73,7 +73,7 @@ class TestQuantRefinements(unittest.IsolatedAsyncioTestCase):
         daemon = LiquidationDaemon()
         daemon._redis = AsyncMock()
         daemon._redis.get.side_effect = lambda k: {
-            "atr": "10.0", "rv": "0.0001", "vix": "15.0", "cvd_flip_ticks": "0", "hmm_regime": "TRENDING"
+            "atr": "10.0", "rv": "0.0001", "vix": "15.0", "cvd_flip_ticks": "0", "regime": "TRENDING"
         }.get(k, "0.0")
         
         daemon.order_pub = MagicMock()

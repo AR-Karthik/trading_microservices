@@ -1,4 +1,4 @@
-﻿@
+@
 # Technical Documentation
 Exhaustive architectural and implementation details for the microservices suite.
 ---
@@ -235,7 +235,7 @@ A multi-protocol wrapper (PUB/SUB, PUSH/PULL, ROUTER/DEALER) for **Context-Aware
    - Implements **Multipart Messaging**. 
    - Frame 1: Topic. Frame 2: Metadata Header (JSON). Frame 3: Data (JSON).
    - **Context Tracking**: Uses `contextvars` to propagate the `correlation_id` across the `await` boundary, ensuring logs from different services can be grouped visually.
-3. **`NumpyEncoder`**: Overrides the default JSON encoder to handle `numpy.float64` and `numpy.ndarray`, which are common outputs from the HMM and Sensor engines.
+3. **`NumpyEncoder`**: Overrides the default JSON encoder to handle `numpy.float64` and `numpy.ndarray`, which are common outputs from the Regime and Sensor engines.
 
 **Logic Flow for Recreation**:
 1. Initialize a `zmq.asyncio.Context`.
@@ -332,7 +332,7 @@ Defines the **Google Protocol Buffers (proto3)** schema for cross-service commun
    - **Fields**: Symbol (string), Price (double), Bid/Ask (double), Volumes (int64), Timestamp (string), OI (double), VWAP (double).
    - **Rationale**: Double precision is used to maintain price accuracy for instruments with small tick sizes (e.g., 0.05).
 2. **`AlphaSignal`**: Encapsulates the quantitative verdict.
-   - **Fields**: HMM Regime (string), GEX Sign (string), Toxicity Veto (bool).
+   - **Fields**: Regime (string), GEX Sign (string), Toxicity Veto (bool).
 3. **`StrategyConfig`**: Used for management plane operations (lifecycle).
    - **Fields**: State (Enum-like string: ACTIVE, SLEEP), Target/Stop-Loss parameters.
 
@@ -406,10 +406,10 @@ Implements a **Buffered Write Pattern** using `asyncpg` and ZMQ. It serves as th
    - Log the flush count.
 
 ---
-### [EXHAUSTIVE] daemons/hmm_engine.py (Heuristic State Machine)
+### [EXHAUSTIVE] daemons/regime_detector.py (Deterministic State Machine)
 
 **Technical Architecture**:
-A deterministic **Regime Classifier** based on signal-processing heuristics. It bypasses complex HMM training in favor of low-latency, rule-based state transitions (S18).
+A deterministic **Regime Classifier** based on signal-processing heuristics. It bypasses complex probabilistic training in favor of low-latency, rule-based state transitions (S18).
 
 **Method-by-Method Technical Breakdown**:
 1. **`_calculate_adx_approximation()`**:
@@ -510,7 +510,7 @@ The system's **Arbitration Layer**. It acts as a synchronous validator sitting b
 1. **`_evaluate_vetoes()`**:
    - Implements a **Waterfall Boolean Matrix**. 
    - It performs $O(1)$ lookups against the `local_signals` cache (hydrated from SHM) to ensure sub-millisecond validation.
-   - **Bayesian Override**: If the HMM Engine has 'Jitter' (fast flipping), the `BayesianRegimeTracker` posterior probability must be > 0.60 to allow a trend-following trade.
+   - **Deterministic Override**: If the Regime Engine has 'Jitter' (fast flipping), the `DeterministicRegimeTracker` posterior probability must be > 0.60 to allow a trend-following trade.
 2. **`PortfolioStressTestEngine`**: 
    - Implements a **Taylor Series Approximation** for P&L Shocks: $\Delta P \approx \Delta \cdot dS + \frac{1}{2} \Gamma \cdot dS^2 + \nu \cdot dV + \Theta \cdot dT$.
    - It shocks the `portfolio_greeks` by -20% (Spot) and +50% (VIX) to calculate 'Worst-Case Drawdown.'
@@ -730,7 +730,7 @@ The **Institutional Alpha Sensor**. It is a robust web scraper built with `httpx
 2. **`fii_bias` Logic**: 
    - Computes a linear normalization of FII Net Value. 
    - $Bias = \text{clip}(\frac{FII_{NetValue}}{2000.0}, -1.0, 1.0)$. 
-   - This provides a stationary feature for the MetaRouter/HMM models.
+   - This provides a stationary feature for the MetaRouter models.
 3. **`run()`**: 
    - Uses a strict **Market Hour Gate**: `if 9 <= now.hour <= 16`. 
    - Implements a 30-minute `asyncio.sleep()` to ensure the bot doesn't get IP-blocked by the exchange firewall.
@@ -852,7 +852,7 @@ A **Distributed Proxy Pattern**. The internal layer is a high-bandwidth `FastAPI
    - It captures the `timestamp`, `event_type`, and `admin_details`. This is the 'Black Box Recorder' of the system used for forensic analysis after a loss.
 3. **`get_state()`**: 
    - A **Multi-Hash Aggregator**. 
-   - It performs parallel lookups into `latest_market_state`, `hmm_regime_state`, and `power_five_matrix`. 
+   - It performs parallel lookups into `latest_market_state`, `regime_state`, and `power_five_matrix`. 
    - It computes the **Effective Available Margin** using the formula: $Margin_{avail} = (Cash + Collateral) \cdot \text{HedgeReserveMultiplier}$.
 
 ---

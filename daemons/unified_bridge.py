@@ -274,7 +274,7 @@ class ShoonyaHandler:
                 "broker_oid": broker_oid
             }
         
-        # HMM-Regime Aware Nudging for Rejections
+        # Regime Aware Nudging for Rejections
         error_msg = res.get('emsg', 'Unknown')
         if "400" in error_msg or "REJECTED" in (res.get('stat') or ''):
             regime_raw = await redis_client.get("s18_state")

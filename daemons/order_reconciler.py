@@ -24,6 +24,7 @@ from core.mq import MQManager, Ports, Topics
 from core.logger import setup_logger
 from core.health import HeartbeatProvider
 from core.margin import AsyncMarginManager
+from core.alerts import send_cloud_alert
 
 try:
     from NorenRestApiPy.NorenApi import NorenApi
@@ -192,6 +193,19 @@ class OrderReconciler:
             st = status.get("status", "PENDING")
 
             if st == "COMPLETE":
+                # [Phase 13: Post-Market Audit] Track slippage
+                fill_price = float(status.get("avg_price", 0))
+                signal_price = float(order.get("price", fill_price))
+                if fill_price > 0:
+                    slippage = {
+                        "symbol": order.get("symbol"),
+                        "signal": signal_price,
+                        "fill": fill_price,
+                        "timestamp": time.time(),
+                        "reason": "STRATEGY_EXECUTION"
+                    }
+                    await self.r.rpush("execution_slippage", json.dumps(slippage))
+                
                 filled_legs.append(order)
                 continue
             elif st == "PARTIAL_FILL":
@@ -306,6 +320,7 @@ class OrderReconciler:
                 return {
                     "status": mapped,
                     "filled_qty": str(entry.get("fillshares", 0)),
+                    "avg_price": str(entry.get("avgprc", 0)),
                     "remaining_qty": str(
                         float(entry.get("qty", 0)) - float(entry.get("fillshares", 0))
                     ),
@@ -358,6 +373,7 @@ class OrderReconciler:
                 f"MANUAL INTERVENTION REQUIRED!\n"
                 f"Check CRITICAL_INTERVENTION queue in Redis.",
                 alert_type="CRITICAL",
+                redis_client=self.r
             ))
             self.rollback_retries.pop(p_uuid, None)
             return
@@ -470,6 +486,7 @@ class OrderReconciler:
                             f"Age: {age_s:.0f}s\n"
                             f"MANUAL VERIFICATION REQUIRED!",
                             alert_type="CRITICAL",
+                            redis_client=self.r
                         ))
                 except Exception as e:
                     logger.error(f"Reboot audit error for {order_id}: {e}")
@@ -481,6 +498,37 @@ class OrderReconciler:
         except Exception as e:
             logger.error(f"Reboot audit failed: {e}")
 
+    async def _panic_subscriber_loop(self):
+        """Listens for emergency commands on Redis panic_channel."""
+        pubsub = self.r.pubsub()
+        await pubsub.subscribe("panic_channel")
+        logger.info("📡 Subscribed to Redis panic_channel.")
+        
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    data = json.loads(message["data"])
+                    action = data.get("action")
+                    
+                    if action == "PRE_MARKET_REBOOT_AUDIT":
+                        logger.info("🔥 Received PRE_MARKET_REBOOT_AUDIT signal. Executing...")
+                        await self._reboot_audit()
+                    elif action == "SQUARE_OFF_ALL":
+                        logger.critical(f"☢️ NUCLEAR KILL-SWITCH ACTIVATED: {data.get('reason')}")
+                        await self._reboot_audit() # Forcing ground-truth sync
+                        # In a real scenario, this would also trigger massive cancellation and position exits
+                        asyncio.create_task(send_cloud_alert(
+                            f"☢️ NUCLEAR KILL-SWITCH ACTIVATED\nReason: {data.get('reason')}\n"
+                            f"Execution Type: {data.get('execution_type')}\n"
+                            f"System is squaring off all positions.",
+                            alert_type="CRITICAL",
+                            redis_client=self.r
+                        ))
+                    elif action == "FORCE_LIQUIDATE":
+                        pass
+                except Exception as e:
+                    logger.error(f"Panic subscriber error: {e}")
+
     # ── Main Run Loop ─────────────────────────────────────────────────
 
     async def run(self):
@@ -490,6 +538,9 @@ class OrderReconciler:
 
         await self._reboot_audit()
 
+        # [Constitutional] Add Redis panic subscriber task
+        asyncio.create_task(self._panic_subscriber_loop())
+
         sub = self.mq.create_subscriber(
             Ports.SYSTEM_CMD, topics=["BASKET_ORIGINATION"], bind=False
         )
@@ -498,6 +549,9 @@ class OrderReconciler:
 
         if self.hb:
             asyncio.create_task(self.hb.run_heartbeat())
+
+        # [Phase 14] WebSocket Silent Drop Detector
+        asyncio.create_task(self._ws_watchdog_loop())
 
         while True:
             try:
@@ -526,6 +580,41 @@ class OrderReconciler:
             except Exception as e:
                 logger.error(f"Recv error: {e}")
                 await asyncio.sleep(1)
+
+
+    async def _ws_watchdog_loop(self):
+        """Monitors 'LAST_TICK_TIMESTAMP' for silent WebSocket drops (>2000ms)."""
+        logger.info("🛰️ WebSocket Watchdog active (2000ms threshold).")
+        while True:
+            try:
+                if self._is_market_open():
+                    last_ts_raw = await self.r.get("LAST_TICK_TIMESTAMP")
+                    if last_ts_raw:
+                        last_ts = float(last_ts_raw)
+                        drift = time.time() - last_ts
+                        if drift > 2.0:
+                            logger.error(f"📡 WS SILENT DROP: {drift:.1f}s since last tick. Triggering REST Resync.")
+                            await self._reboot_audit()
+                            await self.r.set("WS_HEALTH_STATUS", "DEAD")
+                            asyncio.create_task(send_cloud_alert(
+                                f"📡 WS SILENT DROP: {drift:.1f}s drift detected.\n"
+                                f"Triggering REST ground-truth sync and notifying Bridge.",
+                                alert_type="WARNING",
+                                redis_client=self.r
+                            ))
+                        else:
+                            await self.r.set("WS_HEALTH_STATUS", "ALIVE")
+            except Exception as e:
+                logger.error(f"WS Watchdog error: {e}")
+            await asyncio.sleep(1.0)
+
+    def _is_market_open(self) -> bool:
+        """Returns True if current time is within 09:15 - 15:30 IST."""
+        now = datetime.now(IST)
+        if now.weekday() >= 5: return False # Weekend
+        m_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        m_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        return m_start <= now <= m_end
 
 
 if __name__ == "__main__":

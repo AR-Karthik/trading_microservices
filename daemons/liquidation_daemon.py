@@ -100,7 +100,7 @@ class LiquidationDaemon:
             self._position_alert_listener(),
             self._market_monitor(),
             self._monitor_fill_slippage(),
-            self._run_heartbeat(),
+            self._global_risk_loop(),
             self.portfolio.periodic_sync(interval=60),
         )
 
@@ -323,7 +323,7 @@ class LiquidationDaemon:
         vix = float(vix_raw) if vix_raw else 15.0
         rv_raw = sig.get("rv", 0.0)
         rv = float(rv_raw) if not is_shm_missing(rv_raw) else 0.0
-        current_hmm = str(reg.get("regime_s18", 0))
+        current_regime = str(reg.get("regime_s18", 0))
 
         # SHM sentinel pattern: only fallback to Redis when SHM reports MISSING (NaN)
         cvd_raw = sig.get("cvd_score", 0.0)
@@ -389,7 +389,7 @@ class LiquidationDaemon:
             runner_active=pos.get("runner_active", False),
             local_high=float(pos.get("local_high", 0.0)),
             best_price=float(pos.get("best_price", 0.0)),
-            entry_hmm=pos.get("entry_hmm", ""),
+            entry_regime=pos.get("entry_regime", ""),
             dte=float(pos.get("dte", 7.0)) if pos.get("dte") is not None else 7.0,
             atr=atr,
             vix=vix,
@@ -404,7 +404,7 @@ class LiquidationDaemon:
             iv_rv_spread=float(sig.get("iv_rv_spread", 0.0)) if sig else 0.0,
             iv_atm=float(sig.get("iv_atm", 20.0)) if sig else 20.0,
             net_delta=float(sig.get("net_delta", 0.0)) if sig else 0.0,
-            current_hmm=current_hmm,
+            current_regime=current_regime,
             hurst=hurst,
             recent_price_range=recent_price_range,
             has_range_data=has_range_data,
@@ -491,6 +491,60 @@ class LiquidationDaemon:
                     await self._redis.set(breach_key, "False")
         except Exception as e:
             logger.error(f"Stop Day Loss check error: {e}")
+
+    async def _check_broker_utilization(self):
+        """Phase 15: 90% Utilization Rule.
+        
+        If Broker_Margin / LIVE_CAPITAL_LIMIT > 0.9, trigger 25% slash.
+        """
+        try:
+            live_limit = float(await self._redis.get("LIVE_CAPITAL_LIMIT") or 0.0)
+            if live_limit <= 0: return
+
+            # Get active margin from Redis (updated by SystemController/Bridges)
+            cash = float(await self._redis.get("CASH_COMPONENT_LIVE") or 0.0)
+            coll = float(await self._redis.get("COLLATERAL_COMPONENT_LIVE") or 0.0)
+            margin_used = live_limit - (cash + coll)
+            
+            utilization = margin_used / live_limit
+            if utilization > 0.90:
+                logger.critical(f"⚠️ MARGIN OVERLOAD: Utilization {utilization:.1%} > 90%. Triggering 25% pro-rata slash.")
+                asyncio.create_task(send_cloud_alert(
+                    f"⚠️ MARGIN OVERLOAD: {utilization:.1%} utilization detected.\n"
+                    f"Executing Constitutional 25% pro-rata risk reduction.",
+                    alert_type="CRITICAL"
+                ))
+                # Slash 25% of all positions
+                for symbol, pos in list(self.portfolio.positions.items()):
+                    await self._attempt_partial_exit(pos, symbol, 0, "MARGIN_UTIL_SLASH", 0.25)
+        except Exception as e:
+            logger.error(f"Utilization check error: {e}")
+
+    async def _check_time_gate(self):
+        """Phase 15: Mandatory 15:15 IST Liquidation Sweep."""
+        try:
+            now_ist = datetime.now(timezone.utc).astimezone(
+                timezone(timedelta(hours=5, minutes=30))
+            )
+            if now_ist.hour == 15 and now_ist.minute == 15:
+                logger.warning("🕒 15:15 IST TIME GATE: Initiating mandatory liquidation sweep.")
+                # We target all non-positional or intraday-marked risk
+                for symbol, pos in list(self.portfolio.positions.items()):
+                    if pos.get("lifecycle_class") in ["KINETIC", "ZERO_DTE"]:
+                        await self._attempt_exit(pos, symbol, 0, "TIME_GATE_1515")
+                await asyncio.sleep(60) # Prevent re-trigger
+        except Exception as e:
+            logger.error(f"Time gate error: {e}")
+
+    async def _global_risk_loop(self):
+        """Background loop for system-wide constitutional checks."""
+        logger.info("🛡️ Global Risk Loop active (Utilization + Time Gate + StopLoss).")
+        while True:
+            await self._check_stop_day_loss()
+            await self._check_broker_utilization()
+            await self._check_time_gate()
+            await self._check_hybrid_drawdown()
+            await asyncio.sleep(1.0) # High-precision 1s risk polling
 
     async def _check_hybrid_drawdown(self):
         """Aggregates P&L across all legs of the same parent_uuid."""

@@ -7,7 +7,7 @@ Validates:
   - Barrier 1: TP1 partial exit at 1.2×ATR (70-30 rule)
   - Barrier 1: TP2 runner ceiling at 2.5×ATR
   - Barrier 1: Regime-adaptive SL expansion (1.5× in high vol)
-  - Barrier 1: HMM regime invalidation exit
+  - Barrier 1: Regime invalidation exit
   - Barrier 2: Stall timer (300s normal, 180s low-vol)
   - Barrier 3: CVD flip exit (5 ticks / 10 ticks for runner)
   - Barrier 3: RV panic exit (> 0.002)
@@ -97,7 +97,7 @@ class TestBarrier1TP1:
         """Price at TP1 (entry + 1.2×ATR) triggers a 70% partial exit."""
         entry, atr = 100.0, 50.0
         tp1 = entry + 1.2 * atr  # 160.0
-        d = make_daemon({"rv": "0.0005", "vix": "15.0", "atr": str(atr), "hmm_regime": "TRENDING"})
+        d = make_daemon({"rv": "0.0005", "vix": "15.0", "atr": str(atr), "regime": "TRENDING"})
         d._attempt_partial_exit = AsyncMock()
         pos = self._make_pos(entry, atr)
         tick = {"ask": tp1 + 1, "bid": tp1 - 1}
@@ -111,7 +111,7 @@ class TestBarrier1TP1:
         """Price below TP1 must not trigger partial exit."""
         entry, atr = 100.0, 50.0
         tp1 = entry + 1.2 * atr  # 160.0
-        d = make_daemon({"rv": "0.0005", "vix": "15.0", "atr": str(atr), "hmm_regime": "TRENDING"})
+        d = make_daemon({"rv": "0.0005", "vix": "15.0", "atr": str(atr), "regime": "TRENDING"})
         d._attempt_partial_exit = AsyncMock()
         d._attempt_exit = AsyncMock()
         pos = self._make_pos(entry, atr)
@@ -133,7 +133,7 @@ class TestBarrier1SL:
         entry, atr = 200.0, 20.0
         normal_sl = entry - 1.0 * atr   # 180.0 — would trigger
         hv_sl = entry - 1.5 * atr       # 170.0 — should NOT trigger at 180
-        d = make_daemon({"rv": "0.0015", "vix": "20.0", "atr": str(atr), "hmm_regime": "TRENDING"})
+        d = make_daemon({"rv": "0.0015", "vix": "20.0", "atr": str(atr), "regime": "TRENDING"})
         d._attempt_exit = AsyncMock()
         d._attempt_partial_exit = AsyncMock()
         pos = {"symbol": "NIFTY", "action": "BUY", "quantity": 50,
@@ -155,7 +155,7 @@ class TestBarrier3CVD:
     async def test_5_cvd_flips_exit_normal_position(self):
         """5 CVD flips exits a normal (non-runner) position."""
         d = make_daemon({"rv": "0.0", "vix": "15.0", "atr": "20.0",
-                         "hmm_regime": "TRENDING", "cvd_flip_ticks": "5"})
+                         "regime": "TRENDING", "cvd_flip_ticks": "5"})
         d._attempt_exit = AsyncMock()
         d._attempt_partial_exit = AsyncMock()
         pos = {"action": "BUY", "quantity": 50, "entry_price": 200.0,
@@ -168,7 +168,7 @@ class TestBarrier3CVD:
     async def test_5_cvd_flips_forgiven_for_runner(self):
         """5 CVD flips must NOT exit a runner position (threshold is 10)."""
         d = make_daemon({"rv": "0.0", "vix": "15.0", "atr": "20.0",
-                         "hmm_regime": "TRENDING", "cvd_flip_ticks": "5"})
+                         "regime": "TRENDING", "cvd_flip_ticks": "5"})
         d._attempt_exit = AsyncMock()
         pos = {"action": "BUY", "quantity": 50, "entry_price": 200.0,
                "execution_type": "Paper", "runner_active": True}

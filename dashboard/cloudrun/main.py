@@ -199,7 +199,7 @@ async def get_state(asset: Optional[str] = None):
 
         return {
             "alpha_score":            float(m.get("live_alpha", 0.0)),
-            "hmm_regime":             m.get("live_regime", "UNKNOWN"),
+            "regime":                 m.get("live_regime", "UNKNOWN"),
             "is_vm_running":          vm_running,
             "last_heartbeat":         last_hb_str,
             "exchange_ts":            m.get("exchange_ts", ""), # [Audit-Fix] Lag handshake
@@ -223,7 +223,7 @@ async def get_state(asset: Optional[str] = None):
         }
     except Exception as e:
         return {"source": "OFFLINE", "is_vm_running": False, "alpha_score": 0.0,
-                "hmm_regime": "UNKNOWN", "error": str(e)}
+                "regime": "UNKNOWN", "error": str(e)}
 
 @app.get("/portfolio")
 async def get_portfolio(mode: str = "Paper"):

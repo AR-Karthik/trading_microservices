@@ -5,6 +5,7 @@ import time
 import json
 import os
 import logging
+from typing import Any
 
 logger = logging.getLogger("SHM")
 
@@ -18,7 +19,7 @@ def is_shm_missing(value: float) -> bool:
     """Check if a value is the SHM_MISSING sentinel."""
     return math.isnan(value) if isinstance(value, float) else False
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 @dataclass
 class SignalVector:
@@ -53,10 +54,11 @@ class SignalVector:
     day_high: float = 0.0 # [Layer 3 Wick Mapping] Raw Price
     day_low: float = 0.0  # [Layer 3 Wick Mapping] Raw Price
     hb_ts: float = 0.0
+    sequence_id: int = 0
     veto: bool = False
     raw_veto: bool = False
     stale_flag: bool = False
-    hw_alpha: list[float] = None
+    hw_alpha: list[float] = field(default_factory=lambda: [0.0]*10)
 
 @dataclass
 class RegimeVector:
@@ -73,12 +75,13 @@ class ShmManager:
     # Pre-allocate 1KB memory map buffer size for current and future structural scaling
     SIZE = 1024 
     # Data packing format matching SignalVector attributes
-    # 31 doubles (ts + 30 sig), 3 booleans, 10 doubles (hw), 1 double (crc)
-    STRUCT_FORMAT = "ddddddddddddddddddddddddddddddd???ddddddddddd" 
+    # 31 doubles (ts + 30 sig), 3 booleans, 10 doubles (hw), 1 Q (seq), 1 d (crc)
+    STRUCT_FORMAT = "ddddddddddddddddddddddddddddddd???dddddddddddQ" 
 
     def __init__(self, asset_id: str = "GLOBAL", mode='r'):
         self.mode = mode
         self.asset_id = asset_id
+        self.shm: Any = None # Using Any to bridge mmap/None typing gap
         
         base_name = f"trading_alpha_{asset_id}"
         if os.name != 'nt':
@@ -130,7 +133,7 @@ class ShmManager:
                 signals.smart_flow, signals.buy_p, signals.sell_p, signals.pcr_roc, 
                 signals.iv_atm, signals.hb_ts, signals.latency_ms, signals.day_high, signals.day_low,
                 signals.veto, signals.raw_veto, signals.stale_flag,
-                *hw_a, crc
+                *hw_a, crc, signals.sequence_id
             )
             self.shm.seek(0)
             self.shm.write(data)
@@ -140,52 +143,63 @@ class ShmManager:
     def read(self) -> SignalVector | None:
         """Reads, deserializes, and validates the shared memory buffer into a SignalVector instance."""
         if not self.shm: return None
-        try:
-            self.shm.seek(0)
-            fmt_size = struct.calcsize(self.STRUCT_FORMAT)
-            data = self.shm.read(fmt_size)
-            
-            read_data = struct.unpack(self.STRUCT_FORMAT, data)
-            ts = read_data[0]
-            # 1 to 18 (Existing Doubles)
-            s_total, vpin, ofiz, vanna, charm, senv, sstr, sdiv = read_data[1:9]
-            rv, adx, pcr, asto, asto_reg, wh_p, nd_nift, nd_bn, nd_sen = read_data[9:18]
-            # 18 to 31 (New Doubles)
-            hi_z, lo_z, iv_p, iv_rv, sf, bp, sp, p_roc, iv_atm, hb, lat, d_hi, d_lo = read_data[18:31]
-            # 31 to 34 (Booleans)
-            veto, r_veto, s_flag = read_data[31:34]
-            # 34 to 44 (HW Alphas)
-            hw_alphas = list(read_data[34:44])
-            # 44 (CRC)
-            crc = read_data[44]
-            
-            # Reject payload if delta from write timestamp exceeds 1.0 second
-            if time.time() - ts > 1.0:
-                return None
-            
-            # Validate checksum sum against the stored CRC value to ensure atomic read
-            check_val = (s_total + vpin + ofiz + vanna + charm + senv + sstr + sdiv + 
-                         rv + adx + pcr + asto + asto_reg + wh_p + nd_nift + nd_bn + nd_sen +
-                         hi_z + lo_z + iv_p + iv_rv + sf + bp + sp + p_roc + iv_atm + hb + lat + d_hi + d_lo +
-                         sum(hw_alphas) + 
-                         (100.0 if veto else 0.0) + (100.0 if r_veto else 0.0) + (100.0 if s_flag else 0.0))
-            
-            if abs(crc - check_val) > 1e-4:
-                return None
+        format_size = struct.calcsize(self.STRUCT_FORMAT)
+        
+        # 3-retry loop to prevent torn reads and ensure atomic delivery
+        for _ in range(3):
+            try:
+                self.shm.seek(0)
+                data = self.shm.read(format_size)
+                if len(data) < format_size:
+                    continue
+
+                read_data = struct.unpack(self.STRUCT_FORMAT, data)
+                ts = float(read_data[0])
                 
-            return SignalVector(
-                s_total=s_total, vpin=vpin, ofi_z=ofiz, vanna=vanna, charm=charm,
-                s_env=senv, s_str=sstr, s_div=sdiv, rv=rv, adx=adx, pcr=pcr,
-                asto=asto, asto_regime=asto_reg, whale_pivot=wh_p,
-                net_delta_nifty=nd_nift, net_delta_banknifty=nd_bn, net_delta_sensex=nd_sen,
-                high_z=hi_z, low_z=lo_z, iv_percentile=iv_p, iv_rv_spread=iv_rv,
-                smart_flow=sf, buy_p=bp, sell_p=sp, pcr_roc=p_roc, iv_atm=iv_atm, hb_ts=hb,
-                latency_ms=lat, day_high=d_hi, day_low=d_lo, veto=veto, raw_veto=r_veto, stale_flag=s_flag,
-                hw_alpha=hw_alphas
-            )
-        except Exception as e:
-            logger.error(f"SHM read error: {e}")
-            return None
+                # Check for stale data immediately (1s timeout)
+                if time.time() - ts > 1.0:
+                    return None
+
+                # Unpack signals (Indices 1 to 31)
+                s_total, vpin, ofiz, vanna, charm, senv, sstr, sdiv = read_data[1], read_data[2], read_data[3], read_data[4], read_data[5], read_data[6], read_data[7], read_data[8]
+                rv, adx, pcr, asto, asto_reg, wh_p, nd_nift, nd_bn, nd_sen = read_data[9], read_data[10], read_data[11], read_data[12], read_data[13], read_data[14], read_data[15], read_data[16], read_data[17]
+                hi_z, lo_z, iv_p, iv_rv, sf, bp, sp, p_roc, iv_atm, hb, lat, d_hi, d_lo = read_data[18], read_data[19], read_data[20], read_data[21], read_data[22], read_data[23], read_data[24], read_data[25], read_data[26], read_data[27], read_data[28], read_data[29], read_data[30]
+                
+                # Unpack booleans (31 to 34)
+                veto, r_veto, s_flag = bool(read_data[31]), bool(read_data[32]), bool(read_data[33])
+                
+                # Unpack HW Alphas (34 to 44)
+                hw_alphas = [float(read_data[i]) for i in range(34, 44)]
+                
+                # Checksum (44) and Sequence ID (45)
+                crc = float(read_data[44])
+                seq_id = int(read_data[45])
+                
+                # Validate checksum sum against the stored CRC value to ensure atomic read
+                check_val = (s_total + vpin + ofiz + vanna + charm + senv + sstr + sdiv + 
+                             rv + adx + pcr + asto + asto_reg + wh_p + nd_nift + nd_bn + nd_sen +
+                             hi_z + lo_z + iv_p + iv_rv + sf + bp + sp + p_roc + iv_atm + hb + lat + d_hi + d_lo +
+                             sum(hw_alphas) + 
+                             (100.0 if veto else 0.0) + (100.0 if r_veto else 0.0) + (100.0 if s_flag else 0.0))
+                
+                if abs(crc - check_val) > 1e-4:
+                    continue # Retry on checksum mismatch (Torn Read)
+                    
+                return SignalVector(
+                    s_total=s_total, vpin=vpin, ofi_z=ofiz, vanna=vanna, charm=charm,
+                    s_env=senv, s_str=sstr, s_div=sdiv, rv=rv, adx=adx, pcr=pcr,
+                    asto=asto, asto_regime=asto_reg, whale_pivot=wh_p,
+                    net_delta_nifty=nd_nift, net_delta_banknifty=nd_bn, net_delta_sensex=nd_sen,
+                    high_z=hi_z, low_z=lo_z, iv_percentile=iv_p, iv_rv_spread=iv_rv,
+                    smart_flow=sf, buy_p=bp, sell_p=sp, pcr_roc=p_roc, iv_atm=iv_atm, hb_ts=hb,
+                    latency_ms=lat, day_high=d_hi, day_low=d_lo, veto=veto, raw_veto=r_veto, stale_flag=s_flag,
+                    hw_alpha=hw_alphas, sequence_id=seq_id
+                )
+            except Exception as e:
+                logger.error(f"SHM read retry attempt failed: {e}")
+                continue
+                
+        return None
 
     def read_dict(self) -> dict:
         """Read SHM as a dict with SHM_MISSING sentinels for unavailable data.
@@ -241,7 +255,7 @@ class ShmManager:
 
 class RegimeShm:
     """
-    Dedicated memory-mapped manager for HMM Regime Vectors.
+    Dedicated memory-mapped manager for Deterministic Regime Vectors.
     Enables ultra-low latency broadcasting of market state verdicts.
     """
     SIZE = 256
@@ -250,6 +264,7 @@ class RegimeShm:
     def __init__(self, asset_id: str, mode='r'):
         self.mode = mode
         self.asset_id = asset_id
+        self.shm: Any = None # Using Any to bridge mmap/None typing gap
         self.shm_path = f"regime_alpha_{asset_id}"
         
         try:

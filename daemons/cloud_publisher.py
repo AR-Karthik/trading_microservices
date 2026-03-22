@@ -105,7 +105,7 @@ class CloudPublisher:
                 alpha = await self.redis.get("COMPOSITE_ALPHA") or "0.0"
                 # Aggregate distributed subsystem indicators into a monolithic Command Center object
                 # Retrieve global regime from NIFTY50 as default
-                nifty_reg_raw = await self.redis.hget("hmm_regime_state", "NIFTY50")
+                nifty_reg_raw = await self.redis.hget("regime_state", "NIFTY50")
                 regime = "UNKNOWN"
                 if nifty_reg_raw:
                     try: regime = json.loads(nifty_reg_raw).get("regime", "UNKNOWN")
@@ -121,7 +121,7 @@ class CloudPublisher:
                     st = json.loads(st_raw) if st_raw else {}
                     
                     # Fetch regime
-                    asset_reg_raw = await self.redis.hget("hmm_regime_state", asset)
+                    asset_reg_raw = await self.redis.hget("regime_state", asset)
                     asset_reg = "UNKNOWN"
                     s18, s27 = 0, 0.0
                     if asset_reg_raw:

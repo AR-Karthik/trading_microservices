@@ -3,3 +3,4 @@
 # NO LOSS OF EXISTING FUNCTIONALITY, NO ACCIDENTAL DELETIONS, NO OVERSIGHT - GCP CONTAINER SAFE
 
 from .manager import MQManager, Ports, Topics
+from .encoders import NumpyEncoder

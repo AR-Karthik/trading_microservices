@@ -25,7 +25,7 @@ app = FastAPI(title="🦸‍♂️ Project K.A.R.T.H.I.K. (Kinetic Algorithmic R
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # In production, specify Tailscale IP/Host
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -96,7 +96,7 @@ class TelemetryMetrics(BaseModel):
 # Application domain models
 class SystemState(BaseModel):
     alpha_score: float
-    hmm_regime: str
+    regime: str
     gex_sign: str
     system_halted: bool
     macro_lockdown: bool
@@ -203,26 +203,73 @@ def get_state(asset: str = "NIFTY50"):
         for idx in indices:
             st_raw = r.get(f"latest_market_state:{idx}")
             st = json.loads(st_raw) if st_raw else {}
-            reg_raw = r.hget("hmm_regime_state", idx)
+            reg_raw = r.hget("regime_state", idx)
             regime = "UNKNOWN"
             if reg_raw:
                 try: regime = json.loads(reg_raw).get("regime", "UNKNOWN")
                 except: pass
-            
             index_states[idx] = {
+                # Primary Metrics
                 "score": st.get("s_total", 0.0), 
                 "regime": regime, 
                 "price": st.get("price", 0.0),
-                "asto": st.get("asto", 0.0),
-                "asto_regime": st.get("asto_regime", 0),
-                "asto_multiplier": st.get("asto_multiplier", 3.0),
-                "rsi": st.get("rsi", 50.0),
-                "pcr": st.get("pcr", 0.85),
                 "change_pct": st.get("change_pct", 0.0),
-                "call_wall": r.get(f"CALL_WALL:{idx}") or "—",
-                "put_wall": r.get(f"PUT_WALL:{idx}") or "—",
-                "oi_accel": float(r.get(f"OI_ACCEL:{idx}") or 0.0)
+                "latency_ms": st.get("latency_ms", 0.0),
+                
+                # Market Ingestion & Pressure
+                "pressure_gauge": st.get("pressure_gauge", 0.0),
+                "vpin":           st.get("vpin", 0.0),
+                "total_buy_qty":  st.get("total_buy_qty", 0),
+                "total_sell_qty": st.get("total_sell_qty", 0),
+                
+                # Alpha Signals (Technical)
+                "asto":           st.get("asto", 0.0),
+                "asto_regime":    st.get("asto_regime", 0),
+                "rsi":            st.get("rsi", 50.0),
+                "pcr":            st.get("pcr", 0.85),
+                "pcr_roc":        st.get("pcr_roc", 0.0),
+                "hurst":          st.get("hurst", 0.5),
+                "adx":            st.get("adx", 20.0),
+                "kaufman_er":     st.get("kaufman_er", 0.5),
+                
+                # Volatility & Greeks
+                "atm_iv":         float(r.get(f"LIVE_IV:{idx}") or r.get("atm_iv") or st.get("iv_atm", 0.18)),
+                "iv_percentile":  st.get("iv_percentile", 50.0),
+                "rv":             st.get("rv", 0.0),
+                "iv_rv_spread":   st.get("iv_rv_spread", 0.0),
+                "vanna":          st.get("vanna", 0.0),
+                "charm":          st.get("charm", 0.0),
+                "gex_sign":       st.get("gex_sign", "POSITIVE"),
+                "gamma_flip":     st.get("zero_gamma_level", st.get("price", 0.0) * 0.995),
+                
+                # Order Flow & Microstructure
+                "log_ofi_z":      st.get("log_ofi_zscore", 0.0),
+                "dispersion":     st.get("dispersion_coeff", 0.5),
+                "cvd":            st.get("cvd", 0.0),
+                "cvd_absorption": st.get("cvd_absorption", False),
+                "cvd_flips":      st.get("cvd_flip_ticks", 0),
+                "basis_z":        st.get("basis_zscore", 0.0),
+                "smart_flow":     st.get("smart_flow", 0.0),
+                
+                # Walls & Safety
+                "call_wall":      r.get(f"CALL_WALL:{idx}") or st.get("call_wall", "—"),
+                "put_wall":       r.get(f"PUT_WALL:{idx}") or st.get("put_wall", "—"),
+                "veto":           st.get("flow_toxicity_veto", False),
+                "toxic_option":   st.get("toxic_option", False),
+                "dislocation":    st.get("price_dislocation", False),
+                "stale_flag":     st.get("stale_data_flag", False)
             }
+
+        # Global System Ingestion & Pivots
+        system_stats = {
+            "vix": float(r.get("RAW_VIX") or 0.0),
+            "tick_gap": float(r.get("TICK_GAP_MS") or 0.0),
+            "shoonya_ws": r.get("HEALTH:SHOONYA_WS") or "CONNECTED",
+            "shoonya_rest": r.get("HEALTH:SHOONYA_REST") or "CONNECTED",
+            "whales_pivot": r.get("WHALES_PIVOT") or "NEUTRAL",
+            "fii_net": float(r.get("FII_NET_OI") or 0.0),
+            "dii_net": float(r.get("DII_NET_OI") or 0.0)
+        }
 
         # Index-aware Deep Signals
         ms_raw = r.get(f"latest_market_state:{asset}")
@@ -276,7 +323,7 @@ def get_state(asset: str = "NIFTY50"):
         return {
             "source": "VM_DIRECT",
             "alpha_score": index_states[asset]["score"],
-            "hmm_regime": index_states[asset]["regime"],
+            "regime": index_states[asset]["regime"],
             "index_states": index_states,
             "primary_asset": asset,
             "gex_sign": r.get(f"gex_sign:{asset}") or "UNKNOWN",
@@ -296,7 +343,7 @@ def get_state(asset: str = "NIFTY50"):
         # Robust Mock Fallback for UI Testing
         return {
             "source": "MOCK_MODE",
-            "alpha_score": 0.82, "hmm_regime": "TRENDING_UP",
+            "alpha_score": 0.82, "regime": "TRENDING_UP",
             "index_states": {
                 "NIFTY50": {"score": 0.82, "regime": "TRENDING_UP", "price": 22450.5, "asto": 75.0, "asto_regime": 1, "asto_multiplier": 3.2},
                 "BANKNIFTY": {"score": -0.15, "regime": "RANGING", "price": 47200.0, "asto": 20.0, "asto_regime": 0, "asto_multiplier": 2.8},
@@ -319,7 +366,7 @@ def get_strategies():
     
     # In a real system, we'd fetch actual process status. 
     # For now, we derive it from the last MetaRouter decision in Redis.
-    regime = r.get("hmm_regime") or "RANGING"
+    regime = r.get("regime_state") or "RANGING"
     
     for t in targets:
         # Derivative logic to show "intended" state

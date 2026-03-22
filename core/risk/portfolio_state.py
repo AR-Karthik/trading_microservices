@@ -102,7 +102,13 @@ class PortfolioState:
         symbol = data.get("symbol")
         if not symbol:
             return
-        
+
+        inception_spot = float(data.get("inception_spot", 0.0))
+        if inception_spot <= 0:
+            underlying = determine_underlying(symbol)
+            spot_raw = await self._redis.get(f"ltp:{underlying}")
+            inception_spot = float(spot_raw) if spot_raw else 0.0
+
         pos = {
             "symbol": symbol,
             "quantity": float(data.get("quantity", 0)),
@@ -115,7 +121,7 @@ class PortfolioState:
             "short_strikes": data.get("short_strikes", {}),
             "execution_type": data.get("execution_type", "Paper"),
             "action": data.get("action", "BUY"),
-            "inception_spot": float(data.get("inception_spot", 0.0)),
+            "inception_spot": inception_spot,
         }
         self.positions[symbol] = pos
         await self._compute_thresholds(pos)
@@ -205,6 +211,7 @@ class PortfolioState:
             "initial_credit": float(row['initial_credit'] or 0.0),
             "short_strikes": row['short_strikes'] or {},
             "execution_type": row['execution_type'] or "Paper",
+            "inception_spot": float(row['inception_spot'] or 0.0),
         }
 
     async def _compute_thresholds(self, pos: dict):

@@ -1,7 +1,7 @@
 """
 Meta-Router & Institutional Truth Matrix
 Central intelligence hub for risk-managed order routing.
-Implements a 15-Gate Veto Matrix, Bayesian regime tracking, and portfolio stress testing.
+Implements a 15-Gate Veto Matrix, Deterministic regime tracking, and portfolio stress testing.
 """
 import asyncio
 import json
@@ -82,10 +82,10 @@ REGIME_STRATEGY_LOCK = {
 
 # ── Mathematical Foundations ────────────────────────────────────────────────
 
-class BayesianRegimeTracker:
+class DeterministicRegimeTracker:
     """
     Maintains a rolling posterior probability of market regimes.
-    Uses HMM states from the sensory layer and applies Bayesian updates
+    Uses Regime states from the sensory layer and applies deterministic updates
     based on realized volatility and smart-flow alignment.
     """
     def __init__(self, assets: List[str]):
@@ -394,20 +394,20 @@ class MetaRouter:
             if latency_ms > LATENCY_MS_THRESHOLD:
                 vetoes.append("STALE_FEED_LATENCY")
 
-        # Gate 5: Bayesian Regime Strategy Lock (The Supreme Court Review)
+        # Gate 5: Deterministic Regime Strategy Lock (The Supreme Court Review)
         if self.enabled_gates.get("REGIME_LOCK", "True") == "True":
             best_regime, b_prob = await self.regime_tracker.get_highest_prob_regime(asset)
             allowed = REGIME_STRATEGY_LOCK.get(strat_id, [])
             
             if allowed:
-                hmm_regime = ctx.get("regime", "UNKNOWN")
-                # Agreement Rule: Veto if BOTH HMM and Bayesian disagree with policy
-                if hmm_regime not in allowed and best_regime not in allowed:
+                current_regime = ctx.get("regime", "UNKNOWN")
+                # Agreement Rule: Veto if BOTH Engine and Deterministic Tracker disagree with policy
+                if current_regime not in allowed and best_regime not in allowed:
                     vetoes.append(f"REGIME_LOCK_VIOLATION: {best_regime}")
-                elif hmm_regime not in allowed and best_regime in allowed:
-                    # [PhD Opportunity] Lab Discovery: Bayesian Override of HMM Jitter
-                    logger.info(f"🧠 BAYESIAN OVERRIDE on {asset}: HMM says {hmm_regime} (REJECT), but Bayesian says {best_regime} (ALLOW). Trade Proceeding.")
-                    intent["bayesian_override"] = True
+                elif current_regime not in allowed and best_regime in allowed:
+                    # [PhD Opportunity] Lab Discovery: Deterministic Override of Regime Jitter
+                    logger.info(f"🧠 DETERMINISTIC OVERRIDE on {asset}: Engine says {current_regime} (REJECT), but Tracker says {best_regime} (ALLOW). Trade Proceeding.")
+                    intent["deterministic_override"] = True
                 # Uncertainty Veto: Reject if the probability of the current regime is too low
                 elif b_prob < 0.60:
                     vetoes.append("REGIME_UNCERTAINTY_VETO")
@@ -425,7 +425,7 @@ class MetaRouter:
 
         # Gate 8: Index Divergence (Fracture Veto)
         if self.enabled_gates.get("FRACTURE", "True") == "True":
-            regimes_raw = await self._redis.hgetall("hmm_regime_state")
+            regimes_raw = await self._redis.hgetall("regime_state")
             trends = [json.loads(v).get("regime") for v in regimes_raw.values()]
             if "BULL_TREND" in trends and "BEAR_TREND" in trends:
                 vetoes.append("INDEX_FRACTURE")
@@ -641,6 +641,10 @@ class MetaRouter:
         required_margin = intent["lots"] * 150000 * (1.0 + iv)
         intent["reserved_margin"] = required_margin
         intent["execution_type"] = exec_type
+        
+        # [Phase 13: Post-Market Audit] Signal Price Preservation
+        if "price" not in intent or intent["price"] <= 0:
+            intent["price"] = float(state.get("price", 0.0))
         
         reserved_code = await self.margin_manager.reserve(required_margin, execution_type=exec_type)
         if reserved_code < 1:
@@ -972,7 +976,7 @@ class MetaRouter:
                 self.local_signals["_last_update"] = time.time()
                 
                 # Also sync regimes from this pulse
-                regimes_raw = await self._redis.hgetall("hmm_regime_state")
+                regimes_raw = await self._redis.hgetall("regime_state")
                 for k, v in regimes_raw.items():
                     self.regime_cache[k] = fast_json.loads(v)
             except Exception: 

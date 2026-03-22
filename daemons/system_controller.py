@@ -19,6 +19,7 @@ import os
 import zmq
 import zmq.asyncio
 import sys
+import subprocess
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -74,7 +75,7 @@ GCP_METADATA_HEADERS = {"Metadata-Flavor": "Google"}
 SHUTDOWN_HH = 16
 SHUTDOWN_MM = 0
 
-# HMM Ingestion Hard Stop (to prevent MOC noise)
+# Regime Ingestion Hard Stop (to prevent MOC noise)
 LOGGER_STOP_HH = 15
 LOGGER_STOP_MM = 25
 
@@ -133,6 +134,9 @@ class SystemController:
     # ── Startup ─────────────────────────────────────────────────────────────
 
     async def start(self):
+        # [Constitutional Purity] Isolate System Controller to management CPU cores
+        self._pin_core()
+        
         self.redis = redis.from_url(self.redis_url, decode_responses=True)
         # [F10-01] Add DB connection retry loop
         retry_count = 0
@@ -218,7 +222,7 @@ class SystemController:
             # Schedule all long-running tasks
             self._track_task(asyncio.create_task(self._preemption_poller()), "PreemptionPoller")
             self._track_task(asyncio.create_task(self._macro_lockdown_watcher()), "MacroLockdownWatcher")
-            self._track_task(asyncio.create_task(self._hmm_sync_watcher()), "HMMSyncWatcher")
+            self._track_task(asyncio.create_task(self._regime_sync_watcher()), "RegimeSyncWatcher")
             self._track_task(asyncio.create_task(self._three_stage_eod_scheduler()), "EODScheduler")
             self._track_task(asyncio.create_task(self._t1_calendar_sweep_watcher()), "T1CalendarSweep") # Phase 3
             self._track_task(asyncio.create_task(self._unsettled_premium_quarantine()), "PremiumQuarantine") # Phase 3.3
@@ -226,6 +230,7 @@ class SystemController:
             self._track_task(asyncio.create_task(self._hard_state_sync()), "HardStateSync")          # Spec 11.6: Ghost Fill Sync
             self._track_task(asyncio.create_task(self._exchange_health_monitor()), "ExchangeHealthMonitor")   # Spec 12.4: NSE Halt Switch
             self._track_task(asyncio.create_task(self._daily_lookback_scheduler()), "DailyLookbackScheduler")
+            self._track_task(asyncio.create_task(self._pre_market_validator_scheduler()), "PreMarketValidator")
             
             # ── Phase 9: UI & Observability ──
             from core.health import HealthAggregator, HeartbeatProvider
@@ -234,6 +239,10 @@ class SystemController:
             if self.hb:
                 self._track_task(asyncio.create_task(self.hb.run_heartbeat()), "Heartbeat")
             self._track_task(asyncio.create_task(self._health_aggregation_loop()), "HealthAggregationLoop")
+            # [Phase 14] High-Frequency Watchdog (1000ms threshold)
+            self._track_task(asyncio.create_task(self._high_freq_watchdog_loop()), "HighFreqWatchdog")
+            # [Phase 14] Nuclear Panic Subscriber
+            self._track_task(asyncio.create_task(self._panic_subscriber_loop()), "PanicSubscriber")
             self._track_task(asyncio.create_task(self._run_metrics_api()), "MetricsAPI")
 
             logger.info("System Controller [Core 3] initialized and monitoring.")
@@ -248,7 +257,28 @@ class SystemController:
             await send_cloud_alert(f"💀 FATAL: System Controller failed to start: {e}", alert_type="CRITICAL")
             raise
         finally:
-            await self.redis.aclose()
+            if self.redis:
+                await self.redis.aclose()
+            if self.pool:
+                await self.pool.close()
+
+    def _pin_core(self):
+        """
+        [Constitutional Purity] Isolate management daemons to separate CPU cores.
+        Prevents interference with high-performance mathematical workloads.
+        """
+        cpu_cores_str = os.getenv("SYSTEM_CONTROLLER_CPU_CORES", "")
+        if cpu_cores_str:
+            try:
+                core_ids = [int(x.strip()) for x in cpu_cores_str.split(",") if x.strip()]
+                if core_ids:
+                    os.sched_setaffinity(0, set(core_ids))
+                    logger.info(f"📌 System Controller pinned to CPU cores: {core_ids}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to pin System Controller to CPU cores {cpu_cores_str}: {e}")
+        else:
+            # Respect OS/CGroup defaults if not explicitly configured
+            pass
 
     def _track_task(self, task: asyncio.Task, name: str):
         """[Audit-Fix 26.1] Prevents 'Silent Task Death' by keeping references and logging failures."""
@@ -534,11 +564,11 @@ class SystemController:
             logger.error(f"EOD summary report failed: {e}")
             asyncio.create_task(send_cloud_alert(f"⚠️ EOD summary report failed: {e}", alert_type="ERROR"))
 
-    # ── HMM & Data Synchronization ──────────────────────────────────────────
+    # ── Regime Data Synchronization ──────────────────────────────────────────
 
-    async def _hmm_sync_watcher(self):
-        """Manages HMM data logger hard-stop signals."""
-        logger.info("HMM synchronization watcher active.")
+    async def _regime_sync_watcher(self):
+        """Manages Regime data logger hard-stop signals."""
+        logger.info("Regime synchronization watcher active.")
         while not self._shutdown_flag:
             now = datetime.now(tz=IST)
             
@@ -573,7 +603,13 @@ class SystemController:
                     await self._execute_selective_square_off(lifecycle_class="ZERO_DTE", reason="EOD_HARD_INTRADAY")
                     await send_cloud_alert("🔴 15:20 IST: Intraday square-off complete. Institutional positional trades hibernating.", alert_type="RISK")
                 
-                # 3. 16:00 IST - HARD_VM_SHUTDOWN
+                # 3. 15:45 IST - POST_MARKET_AUDIT
+                if now.hour == 15 and now.minute == 45:
+                    logger.info("📊 15:45 IST: Triggering Post-Market Performance Audit.")
+                    await self._spawn_ephemeral_audit("daemons.post_market_audit")
+                    await asyncio.sleep(60) # Prevent multiple triggers
+
+                # 4. 16:00 IST - HARD_VM_SHUTDOWN
                 if now.hour == SHUTDOWN_HH and now.minute == SHUTDOWN_MM:
                     logger.critical("💀 16:00 IST: HARD SHUTDOWN sequence started.")
                     # ── EOD Summary Report (before square-off) ──
@@ -719,6 +755,43 @@ class SystemController:
                 continue
             
             await asyncio.sleep(30)
+
+    async def _pre_market_validator_scheduler(self):
+        """Triggers the pre-market validator at 09:00 IST."""
+        logger.info("Pre-market validator scheduler active.")
+        while not self._shutdown_flag:
+            try:
+                now = datetime.now(IST)
+                # Ensure we only trigger on weekdays (0-4 are Mon-Fri)
+                if now.weekday() < 5 and now.hour == 9 and now.minute == 0:
+                    logger.info("🛡️ 09:00 IST: Triggering Pre-Market Validator.")
+                    await self._spawn_ephemeral_audit("daemons.pre_market_validator")
+                    await asyncio.sleep(60) # Prevent re-trigger within the same minute
+            except Exception as e:
+                logger.error(f"Pre-Market Scheduler error: {e}")
+            await asyncio.sleep(30)
+
+    async def _spawn_ephemeral_audit(self, module_name: str):
+        """Spawns read-only audits as ephemeral sub-processes to prevent GIL lock or memory drift."""
+        try:
+            cmd = [sys.executable, "-m", module_name]
+            logger.info(f"Spawning ephemeral process: {' '.join(cmd)}")
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            async def _monitor_proc():
+                stdout, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    logger.info(f"✅ {module_name} completed successfully.")
+                else:
+                    logger.error(f"❌ {module_name} failed with code {proc.returncode}:\n{stderr.decode('utf-8', errors='ignore')}")
+            
+            self._track_task(asyncio.create_task(_monitor_proc()), f"Monitor_{module_name}")
+        except Exception as e:
+            logger.error(f"Failed to spawn {module_name}: {e}")
 
     # ── Hard State Sync ──────────────────────────────────────────────────────
 
@@ -955,6 +1028,49 @@ class SystemController:
             except Exception as e:
                 logger.error(f"Health aggregation failed: {e}")
             await asyncio.sleep(10)
+
+    async def _high_freq_watchdog_loop(self):
+        """[Phase 14] Monitors critical daemons with 1000ms threshold."""
+        logger.info("🛡️ High-Frequency Watchdog active (1000ms threshold).")
+        critical_daemons = ["MetaRouter", "OrderReconciler", "MarketSensor", "StrategyEngine"]
+        
+        while not self._shutdown_flag:
+            try:
+                now = time.time()
+                for daemon in critical_daemons:
+                    hb_raw = await self.redis.get(f"HEARTBEAT:{daemon}")
+                    if hb_raw:
+                        hb_ts = float(hb_raw)
+                        if now - hb_ts > 1.0: # 1000ms breach
+                            logger.critical(f"💀 DAEMON DEATH DETECTED: {daemon} (Drift: {now - hb_ts:.2f}s)")
+                            await send_cloud_alert(
+                                f"💀 DAEMON DEATH DETECTED: {daemon}\n"
+                                f"System Health is compromised. Manual intervention or automated restart required.",
+                                alert_type="CRITICAL",
+                                redis_client=self.redis
+                            )
+                            # Logic for automated restart could be added here if infra supports it
+            except Exception as e:
+                logger.error(f"High-Freq Watchdog error: {e}")
+            await asyncio.sleep(0.5) # 500ms resolution
+
+    async def _panic_subscriber_loop(self):
+        """[Phase 14] Nuclear Kill-Switch Listener."""
+        pubsub = self.redis.pubsub()
+        await pubsub.subscribe("panic_channel")
+        logger.info("📡 SystemController subscribed to panic_channel for Nuclear Kill-Switch.")
+        
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    data = json.loads(message["data"])
+                    if data.get("action") == "SQUARE_OFF_ALL":
+                        # Double-check reason to avoid loop if triggered from here
+                        reason = data.get("reason", "EXTERNAL_PANIC")
+                        if "NUCLEAR" in reason: # Special flag for external panic
+                            await self._execute_square_off_all(reason=reason)
+                except Exception as e:
+                    logger.error(f"Panic subscriber error: {e}")
 
     async def _run_metrics_api(self):
         """Lightweight REST endpoint for dashboard metrics (Spec 9.1)."""

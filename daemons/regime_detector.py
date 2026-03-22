@@ -1,5 +1,5 @@
 """
-Market Regime Heuristic Engine
+Market Regime Deterministic Engine
 Determines market state (Trending, Ranging, Volatile) using ADX, RV, and IV.
 Informs the Meta-Router on strategy selection and risk parameters.
 """
@@ -29,7 +29,7 @@ except ImportError:
     _HAS_SHOONYA = False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("HeuristicEngine")
+logger = logging.getLogger("RegimeDetector")
 
 # Regime Verdict constants
 REGIME_RANGING = "RANGING"
@@ -43,7 +43,7 @@ REGIME_OVERSOLD = "OVERSOLD"
 # Maximum acceptable delay for realtime price ticks before triggering failsafe
 STALE_DATA_THRESHOLD_S = 10
 
-class HeuristicEngine:
+class RegimeDetector:
     def __init__(self, asset_id: str, core_pin: int):
         self.asset_id = asset_id
         self.core_pin = core_pin
@@ -57,7 +57,7 @@ class HeuristicEngine:
         redis_pass = os.getenv("REDIS_PASSWORD", "")
         self.r = redis.Redis(host=redis_host, port=6379, db=0, password=redis_pass, decode_responses=True)
         
-        # Heuristic state
+        # Regime State
         self.history_14d = [] # Fixed daily closes
         self.last_pcr = 1.0
         self.pcr_roc = 0.0
@@ -212,7 +212,7 @@ class HeuristicEngine:
 
     async def run(self):
         self._pin_core()
-        logger.info(f"Heuristic Engine [{self.asset_id}] active. Deterministic regime mode.")
+        logger.info(f"Regime Detector [{self.asset_id}] active. Deterministic regime mode.")
         
         # Initial param fetch
         await self._fetch_parameters()
@@ -268,7 +268,7 @@ class HeuristicEngine:
                 ))
 
                 # Push full telemetry to Redis for dashboard
-                await self.r.set(f"hmm_regime_state:{self.asset_id}", json.dumps({
+                await self.r.set(f"regime_state:{self.asset_id}", json.dumps({
                     "regime": legacy_regime,
                     "s18_int": s18_val,
                     "s26_persistence": round(s26_val, 2),
@@ -285,14 +285,14 @@ class HeuristicEngine:
                 }, cls=NumpyEncoder))
                 
                 # Set per-asset regime key 
-                await self.r.set(f"hmm_regime:{self.asset_id}", legacy_regime)
+                await self.r.set(f"current_regime:{self.asset_id}", legacy_regime)
                 if self.asset_id == "NIFTY50":
-                    await self.r.set("hmm_regime", legacy_regime)
+                    await self.r.set("current_regime", legacy_regime)
                 
             except zmq.Again:
                 continue
             except Exception as e:
-                logger.error(f"Heuristic Engine [{self.asset_id}] loop error: {e}")
+                logger.error(f"Regime Detector [{self.asset_id}] loop error: {e}")
                 await asyncio.sleep(1)
 
 if __name__ == "__main__":
@@ -312,5 +312,5 @@ if __name__ == "__main__":
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    engine = HeuristicEngine(asset, args.core)
+    engine = RegimeDetector(asset, args.core)
     asyncio.run(engine.run())
