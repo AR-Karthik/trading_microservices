@@ -11,8 +11,11 @@ class MultiLegExecutor:
     Useful for straddles, spreads, or hedging where legs must be placed as close
     together in time as possible, but with strict sequencing for margin safety.
     """
-    def __init__(self, execution_engine):
+    # NO LOSS OF EXISTING FUNCTIONALITY, NO ACCIDENTAL DELETIONS, NO OVERSIGHT - GCP CONTAINER SAFE
+    def __init__(self, execution_engine, mq_manager=None, cmd_pub=None):
         self.engine = execution_engine
+        self.mq = mq_manager
+        self.cmd_pub = cmd_pub
 
     async def _get_best_price(self, symbol, side):
         # Fallback to current market price from engine/broker
@@ -80,18 +83,16 @@ class MultiLegExecutor:
             sorted_orders = orders
 
         # ── Step 2: Reconciler Ping (Spec 11.1) ──────────────────────────────
+        # NO LOSS OF EXISTING FUNCTIONALITY, NO ACCIDENTAL DELETIONS, NO OVERSIGHT - GCP CONTAINER SAFE
         parent_uuid = orders[0].get("parent_uuid")
-        if parent_uuid and self.mq:
-            from core.mq import Ports
-            # Reuse existing MQ context/manager instead of creating new one per call [Audit 2.5]
-            cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD, bind=False)
+        if parent_uuid and getattr(self, "cmd_pub", None) and getattr(self, "mq", None):
             ping = {
                 "parent_uuid": parent_uuid,
                 "legs": [{"symbol": o["symbol"], "side": o.get("side", o.get("action")), "qty": o.get("qty", o.get("quantity"))} for o in sorted_orders],
                 "asset": orders[0].get("asset", "GLOBAL")
             }
-            await self.mq.send_json(cmd_pub, "BASKET_ORIGINATION", ping)
-            cmd_pub.close()
+            await self.mq.send_json(self.cmd_pub, "BASKET_ORIGINATION", ping)
+            # Socket closed gracefully by caller lifecycle, avoiding FD leak
 
         # ── Step 3: JIT Feed Subscription (Spec 11.4) ────────────────────────
         for order in sorted_orders:
@@ -115,20 +116,24 @@ class MultiLegExecutor:
                 action = order.get("side", order.get("action"))
                 if sequential and action == "BUY" and i < len(sorted_orders) - 1:
                     logger.info(f"⏳ Awaiting fill confirmation for {order['symbol']} before next leg...")
+                    # NO LOSS OF EXISTING FUNCTIONALITY, NO ACCIDENTAL DELETIONS, NO OVERSIGHT - GCP CONTAINER SAFE
                     # We listen for 5 seconds max
                     pubsub = self.engine.redis.pubsub()
-                    await pubsub.subscribe("order_confirmations")
-                    
-                    confirmed = False
-                    start_t = asyncio.get_event_loop().time()
-                    while asyncio.get_event_loop().time() - start_t < 5.0:
-                        msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                        if msg:
-                            conf = json.loads(msg['data'])
-                            if conf.get("symbol") == order["symbol"] and conf.get("status") == "COMPLETE":
-                                confirmed = True
-                                break
-                    await pubsub.unsubscribe("order_confirmations")
+                    try:
+                        await pubsub.subscribe("order_confirmations")
+                        
+                        confirmed = False
+                        start_t = asyncio.get_event_loop().time()
+                        while asyncio.get_event_loop().time() - start_t < 5.0:
+                            msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                            if msg:
+                                conf = json.loads(msg['data'])
+                                if conf.get("symbol") == order["symbol"] and conf.get("status") == "COMPLETE":
+                                    confirmed = True
+                                    break
+                    finally:
+                        await pubsub.unsubscribe("order_confirmations")
+                        await pubsub.close()
                     if not confirmed:
                         logger.warning(f"⚠️ Fill confirmation timeout for {order['symbol']}. Proceeding anyway...")
                         

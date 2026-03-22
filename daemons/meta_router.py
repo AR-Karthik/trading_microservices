@@ -287,7 +287,7 @@ class MetaRouter:
         # Low-Latency Alpha Collectors
         self.alpha_state = collections.defaultdict(dict)
         self.veto_ledger = collections.defaultdict(lambda: collections.deque(maxlen=100))
-        self.cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD, bind=True)
+        self.cmd_pub = self.mq.create_publisher(Ports.SYSTEM_CMD, bind=False)
         # Phase 24: ZMQ High-Water Mark Drop Prevention
         self.cmd_pub.setsockopt(zmq.SNDHWM, 0)
         self.trade_pub = self.mq.create_publisher(Ports.TRADE_EVENTS)

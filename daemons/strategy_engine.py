@@ -20,12 +20,14 @@ import zmq
 import zmq.asyncio
 
 import redis.asyncio as redis
-from core.mq import MQManager, Ports, RedisLogger, Topics, NumpyEncoder
+from core.mq import MQManager, Ports, Topics
+from core.mq.redis_logger import RedisLogger
+from core.mq.encoders import NumpyEncoder
 from core.shared_memory import TickSharedMemory, SYMBOL_TO_SLOT
 from core.shm import ShmManager, RegimeShm
 from core.margin import AsyncMarginManager
-from core.strategy.signal_dispatcher import SignalDispatcher
-from core.strategy.registry import KnightRegistry
+from daemons.signal_dispatcher import SignalDispatcher
+from daemons.registry import KnightRegistry
 from core.options.jit_manager import JITWarmupManager
 from core.options.chain_utils import INDEX_METADATA
 

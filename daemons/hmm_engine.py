@@ -268,7 +268,7 @@ class HeuristicEngine:
                 ))
 
                 # Push full telemetry to Redis for dashboard
-                await self.r.hset("hmm_regime_state", self.asset_id, json.dumps({
+                await self.r.set(f"hmm_regime_state:{self.asset_id}", json.dumps({
                     "regime": legacy_regime,
                     "s18_int": s18_val,
                     "s26_persistence": round(s26_val, 2),

@@ -668,18 +668,21 @@ class MarketSensor:
     async def start(self):
         """Starts multiprocessing sensors and the async state publishing."""
         try:
-            self.manager = mp.Manager()
-            self._compute_in = self.manager.Queue(maxsize=10000) # Re-initialize with manager queue
-            self._compute_out = self.manager.Queue(maxsize=1000) # Re-initialize with manager queue
-            
-            self._compute_proc = mp.Process(
-                target=_compute_worker,
-                args=(self._compute_in, self._compute_out),
-                daemon=True,
-                name="MarketSensor_Compute"
-            )
-            self._compute_proc.start() # type: ignore
-            logger.info(f"🚀 Compute Process started. PID: {self._compute_proc.pid}")
+            if not self.use_rust:
+                self.manager = mp.Manager()
+                self._compute_in = self.manager.Queue(maxsize=10000) # Re-initialize with manager queue
+                self._compute_out = self.manager.Queue(maxsize=1000) # Re-initialize with manager queue
+                
+                self._compute_proc = mp.Process(
+                    target=_compute_worker,
+                    args=(self._compute_in, self._compute_out),
+                    daemon=True,
+                    name="MarketSensor_Compute"
+                )
+                self._compute_proc.start() # type: ignore
+                logger.info(f"🚀 Python Compute Process started. PID: {self._compute_proc.pid}")
+            else:
+                logger.info("⚡ Rust Engine acts as compute layer. Python mp.Process worker guarded/skipped.")
             
             # [Audit 11.1] Heartbeat integration
             self.hb = HeartbeatProvider("MarketSensor", self._redis)
@@ -716,12 +719,8 @@ class MarketSensor:
         logger.info("✅ Market Sensor stopped successfully.")
 
     def _pin_core(self):
-        if sys.platform != "win32":
-            try:
-                os.sched_setaffinity(0, {0, 1}) # Pin to first two cores
-                logger.info("Pinned Market Sensor to cores 0,1 natively.")
-            except Exception as e:
-                logger.error(f"Failed to pin core: {e}")
+        # [Audit-Fix] Finding 6.1: Docker CGroups manage CPUSet. Native pinning causes overlaps.
+        pass
 
     def _classify_trade(self, tick: dict) -> float:
         """

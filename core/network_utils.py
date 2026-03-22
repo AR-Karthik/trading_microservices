@@ -38,24 +38,30 @@ class CircuitBreaker:
         self.failure_count = 0
         self.last_failure_time = 0
         self.state = "CLOSED"
+        self._lock = asyncio.Lock()
 
-    def call(self, func, *args, **kwargs):
-        if self.state == "OPEN":
-            if time.time() - self.last_failure_time > self.recovery_timeout:
-                self.state = "HALF_OPEN"
-                logger.info("Circuit Breaker: Entering HALF_OPEN state.")
-            else:
-                raise Exception("Circuit Breaker is OPEN. Request blocked.")
+    async def call(self, func, *args, **kwargs):
+        async with self._lock:
+            if self.state == "OPEN":
+                if time.time() - self.last_failure_time > self.recovery_timeout:
+                    self.state = "HALF_OPEN"
+                    logger.info("Circuit Breaker: Entering HALF_OPEN state.")
+                else:
+                    raise Exception("Circuit Breaker is OPEN. Request blocked.")
 
-        try:
-            result = func(*args, **kwargs)
-            if self.state == "HALF_OPEN":
-                logger.info("Circuit Breaker: Success in HALF_OPEN. Resetting to CLOSED.")
-                self.reset()
-            return result
-        except Exception as e:
-            self.record_failure()
-            raise e
+            try:
+                if asyncio.iscoroutinefunction(func):
+                    result = await func(*args, **kwargs)
+                else:
+                    result = func(*args, **kwargs)
+                
+                if self.state == "HALF_OPEN":
+                    logger.info("Circuit Breaker: Success in HALF_OPEN. Resetting to CLOSED.")
+                    self.reset()
+                return result
+            except Exception as e:
+                self.record_failure()
+                raise e
 
     def reset(self):
         self.failure_count = 0

@@ -6,7 +6,6 @@ import asyncio
 
 import functools
 import logging
-import asyncpg
 import os
 
 logger = logging.getLogger(__name__)
@@ -19,6 +18,7 @@ def with_db_retry(max_retries=3, backoff=0.5):
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(self, *args, **kwargs):
+            import asyncpg
             last_err = None
             for attempt in range(max_retries):
                 try:
@@ -50,6 +50,7 @@ async def robust_db_connect(dsn, max_retries=10, timeout=5.0):
     Attempt to create an asyncpg pool with retries and backoff.
     Essential for Docker environments where services might start out of order.
     """
+    import asyncpg
     retry_count = 0
     while True:
         try:

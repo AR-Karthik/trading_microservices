@@ -12,27 +12,33 @@ logger = logging.getLogger("MarginManager")
 # ── Hardened Lua Scripts ──────────────────────────────────────────────────────
 
 LUA_GET_STATE = """
-local cash = tonumber(redis.call('get', KEYS[1]) or '0')
-local coll = tonumber(redis.call('get', KEYS[2]) or '0')
+local rcall = redis.call
+local tn = tonumber
+local cash = tn(rcall('get', KEYS[1]) or '0')
+local coll = tn(rcall('get', KEYS[2]) or '0')
 return {tostring(cash), tostring(coll)}
 """
 
 LUA_SYNC_CAPITAL = """
+local rcall = redis.call
+local tn = tonumber
 -- KEYS[1]: CASH, KEYS[2]: COLLATERAL, KEYS[3]: LIMIT
 -- ARGV[1]: Delta Cash, ARGV[2]: Delta Collateral, ARGV[3]: New Limit
-local cash = tonumber(redis.call('get', KEYS[1]) or '0')
-local coll = tonumber(redis.call('get', KEYS[2]) or '0')
-redis.call('set', KEYS[1], tostring(cash + tonumber(ARGV[1])))
-redis.call('set', KEYS[2], tostring(coll + tonumber(ARGV[2])))
-redis.call('set', KEYS[3], tostring(ARGV[3]))
+local cash = tn(rcall('get', KEYS[1]) or '0')
+local coll = tn(rcall('get', KEYS[2]) or '0')
+rcall('set', KEYS[1], tostring(cash + tn(ARGV[1])))
+rcall('set', KEYS[2], tostring(coll + tn(ARGV[2])))
+rcall('set', KEYS[3], tostring(ARGV[3]))
 return 1
 """
 
 LUA_RESERVE = """
+local rcall = redis.call
+local tn = tonumber
 -- KEYS[1]: CASH, KEYS[2]: COLLATERAL | ARGV[1]: Required
-local cash_avail = tonumber(redis.call('get', KEYS[1]) or '0')
-local coll_avail = tonumber(redis.call('get', KEYS[2]) or '0')
-local req = tonumber(ARGV[1])
+local cash_avail = tn(rcall('get', KEYS[1]) or '0')
+local coll_avail = tn(rcall('get', KEYS[2]) or '0')
+local req = tn(ARGV[1])
 
 if (cash_avail + coll_avail) < req then
     return -1 -- Insufficient Total Margin
@@ -46,19 +52,21 @@ end
 local coll_use = math.min(coll_avail, req * 0.5)
 local cash_use = req - coll_use
 
-redis.call('set', KEYS[1], tostring(cash_avail - cash_use))
-redis.call('set', KEYS[2], tostring(coll_avail - coll_use))
+rcall('set', KEYS[1], tostring(cash_avail - cash_use))
+rcall('set', KEYS[2], tostring(coll_avail - coll_use))
 return 1
 """
 
 LUA_RELEASE = """
+local rcall = redis.call
+local tn = tonumber
 -- KEYS[1]: CASH, KEYS[2]: COLLATERAL, KEYS[3]: TOTAL_LIMIT
 -- ARGV[1]: Amount back, ARGV[2]: Original Margin reserved
-local cash_avail = tonumber(redis.call('get', KEYS[1]) or '0')
-local coll_avail = tonumber(redis.call('get', KEYS[2]) or '0')
-local limit = tonumber(redis.call('get', KEYS[3]) or '0')
-local amount_back = tonumber(ARGV[1])
-local original = tonumber(ARGV[2])
+local cash_avail = tn(rcall('get', KEYS[1]) or '0')
+local coll_avail = tn(rcall('get', KEYS[2]) or '0')
+local limit = tn(rcall('get', KEYS[3]) or '0')
+local amount_back = tn(ARGV[1])
+local original = tn(ARGV[2])
 
 -- PhD Institutional Rule: Profits (any amount above original) MUST go to Cash.
 -- Healing Rule: Restore cash to 50% of original first.
@@ -78,8 +86,8 @@ if limit > 0 and (new_cash + new_coll) > (limit * 1.02) then
     new_cash = math.max(0, new_cash - excess) 
 end
 
-redis.call('set', KEYS[1], tostring(new_cash))
-redis.call('set', KEYS[2], tostring(new_coll))
+rcall('set', KEYS[1], tostring(new_cash))
+rcall('set', KEYS[2], tostring(new_coll))
 return tostring(new_cash + new_coll)
 """
 

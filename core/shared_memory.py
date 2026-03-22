@@ -1,12 +1,15 @@
 import struct
 import time
+import zlib
 from multiprocessing import shared_memory
 import logging
 
 logger = logging.getLogger("SharedMemory")
 
-# 32s: Symbol, d: Price, q: Volume, d: Timestamp, d: Latency, Q: Hires, Q: Seq, d: High, d: Low
-TICK_STRUCT_FORMAT = "32s d q d d Q Q d d"
+# 32s: Symbol, d: Price, q: Volume, d: Timestamp, d: Latency, Q: Hires, Q: Seq, d: High, d: Low, I: CRC32
+PAYLOAD_FORMAT = "32s d q d d Q Q d d"
+TICK_STRUCT_FORMAT = PAYLOAD_FORMAT + " I"
+PAYLOAD_SIZE = struct.calcsize(PAYLOAD_FORMAT)
 TICK_STRUCT_SIZE = struct.calcsize(TICK_STRUCT_FORMAT)
 MAX_SLOTS = 1000
 SHM_NAME = "trading_ticks_shm"
@@ -60,7 +63,10 @@ class TickSharedMemory:
         # hires_ts for staleness check (e.g., microsecond epoch as uint64)
         effective_hires = hires_ts if hires_ts is not None else int(time.time() * 1_000_000)
 
-        packed_data = struct.pack(TICK_STRUCT_FORMAT, symbol_bytes, price, volume, effective_ts, float(latency_ms), effective_hires, sequence_id, float(high), float(low))
+        payload_data = struct.pack(PAYLOAD_FORMAT, symbol_bytes, price, volume, effective_ts, float(latency_ms), effective_hires, sequence_id, float(high), float(low))
+        crc = zlib.crc32(payload_data) & 0xFFFFFFFF
+        packed_data = struct.pack(TICK_STRUCT_FORMAT, symbol_bytes, price, volume, effective_ts, float(latency_ms), effective_hires, sequence_id, float(high), float(low), crc)
+        
         offset = slot_index * TICK_STRUCT_SIZE
         # Using a slice object to help the linter understand the mapping
         self.shm.buf[offset : offset + TICK_STRUCT_SIZE] = packed_data
@@ -70,22 +76,33 @@ class TickSharedMemory:
             return None
             
         offset = slot_index * TICK_STRUCT_SIZE
-        data = self.shm.buf[offset : offset + TICK_STRUCT_SIZE]
         
-        symbol_bytes, price, volume, timestamp, latency_ms, hires_ts, sequence_id, high, low = struct.unpack(TICK_STRUCT_FORMAT, data)
-        symbol = symbol_bytes.decode('utf-8').strip('\0')
+        # Retry loop to gracefully handle torn reads without locking (Lock-Free IPC)
+        for _ in range(3):
+            data = bytes(self.shm.buf[offset : offset + TICK_STRUCT_SIZE])
+            payload = data[:PAYLOAD_SIZE]
+            
+            # Extract unpacked values
+            symbol_bytes, price, volume, timestamp, latency_ms, hires_ts, sequence_id, high, low, crc = struct.unpack(TICK_STRUCT_FORMAT, data)
+            
+            # Validate mathematical sincerity of the read
+            expected_crc = zlib.crc32(payload) & 0xFFFFFFFF
+            if expected_crc == crc:
+                symbol = symbol_bytes.decode('utf-8').strip('\0')
+                return {
+                    "symbol": symbol,
+                    "price": price,
+                    "volume": volume,
+                    "timestamp": timestamp,
+                    "latency_ms": latency_ms,
+                    "hires_ts": hires_ts,
+                    "sequence_id": sequence_id,
+                    "day_high": high,
+                    "day_low": low
+                }
         
-        return {
-            "symbol": symbol,
-            "price": price,
-            "volume": volume,
-            "timestamp": timestamp,
-            "latency_ms": latency_ms,
-            "hires_ts": hires_ts,
-            "sequence_id": sequence_id,
-            "day_high": high,
-            "day_low": low
-        }
+        # Failure atomicity: If 3 retries fail, the reader does not process corrupt data.
+        return None
 
     def close(self):
         if self.shm:

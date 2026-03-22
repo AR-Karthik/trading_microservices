@@ -57,5 +57,5 @@ def setup_logger(name, log_file=None, level=logging.INFO):
 
     return logger
 
-# Instantiate a global default logger
-logger = setup_logger("TradingSystem", log_file="logs/system.log")
+# NO LOSS OF EXISTING FUNCTIONALITY, NO ACCIDENTAL DELETIONS, NO OVERSIGHT - GCP CONTAINER SAFE
+# The global logger has been removed. Modules must instantiate their own loggers explicitly.

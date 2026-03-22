@@ -1,0 +1,51 @@
+Module 1 Deep Dive: The C++ Firehose Implementation
+1. Ultra-Fast Parsing with simdjson
+Standard JSON parsers (like Python's json or C++ nlohmann/json) are too slow for tick-by-tick firehoses. We use simdjson, which uses SIMD instructions to parse gigabytes of JSON per second.
+
+The Implementation Logic:
+
+C++
+// src/ingestion/parser.cpp
+#include "simdjson.h"
+
+void process_shoonya_tick(std::string_view json_payload) {
+    simdjson::ondemand::parser parser;
+    auto doc = parser.iterate(json_payload);
+    
+    // Extracting fields using high-speed pointer arithmetic
+    std::string_view symbol = doc["tk"];
+    double last_price = doc["lp"];
+    int64_t volume = doc["v"];
+    
+    // Map to Protobuf and send to IPC
+    Karthik::Tick tick;
+    tick.set_symbol(symbol.data());
+    tick.set_ltp(last_price);
+    // ... further serialization
+}
+2. Unix Domain Sockets (UDS) for Local IPC
+TCP/IP (even on localhost) introduces unnecessary overhead. For the "M1 to M2" bridge, we use UDS.
+
+Performance: ~40 microseconds latency vs. ~150-200 microseconds for TCP.
+
+Reliability: No packet loss; kernel-level flow control ensures data integrity.
+
+3. The Protobuf Schema (core/messages.proto)
+This is the "Source of Truth" for all data moving through the 8 modules.
+
+Protocol Buffers
+syntax = "proto3";
+
+message Tick {
+    string sym = 1;     // Symbol
+    fixed64 ts = 2;     // Nanosecond Timestamp
+    float ltp = 3;      // Last Traded Price
+    uint64 vol = 4;     // Volume
+    float bid = 5;      // Best Bid
+    float ask = 6;      // Best Ask
+}
+4. Error Handling: The "Circuit Breaker"
+If the Gateway receives 3 consecutive malformed packets or a "429 Rate Limit" from the broker, it initiates an Exponential Backoff.
+
+State Protection: Before shutting down, it writes the last_sequence_id to Redis so the Order Reconciler (Module 7) can audit any pending fills during the downtime.
+

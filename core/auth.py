@@ -5,10 +5,18 @@ Handles credential resolution and connection string generation for system resour
 import os
 
 from dotenv import load_dotenv
-load_dotenv()
+
+_dotenv_loaded = False
+
+def _ensure_dotenv():
+    global _dotenv_loaded
+    if not _dotenv_loaded:
+        load_dotenv()
+        _dotenv_loaded = True
 
 def get_redis_url():
     """Returns a fully authenticated Redis URL based on .env variables."""
+    _ensure_dotenv()
     host = os.getenv("REDIS_HOST", "redis")
     password = os.getenv("REDIS_PASSWORD", "").strip()
     
@@ -21,6 +29,7 @@ def get_redis_url():
 
 def get_db_dsn():
     """Returns a fully authenticated Postgres DSN based on .env variables."""
+    _ensure_dotenv()
     user = os.getenv("DB_USER", "trading_user")
     password = os.getenv("DB_PASS", "trading_pass")
     host = os.getenv("DB_HOST", "timescaledb")
@@ -31,6 +40,7 @@ def get_db_dsn():
 
 def get_db_config():
     """Returns a dictionary for asyncpg.connect() or pool.acquire()."""
+    _ensure_dotenv()
     return {
         "user": os.getenv("DB_USER", "trading_user"),
         "password": os.getenv("DB_PASS", "trading_pass"),

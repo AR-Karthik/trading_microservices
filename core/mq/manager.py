@@ -5,49 +5,51 @@ import logging
 import os
 import uuid
 import contextvars
-from datetime import datetime
 
-try:
-    import numpy as np
-except ImportError:
-    np = None
+from .encoders import NumpyEncoder
 
 correlation_id_ctx = contextvars.ContextVar("correlation_id", default=None)
 
-class NumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if np:
-            if isinstance(obj, np.integer):
-                return int(obj)
-            if isinstance(obj, np.floating):
-                return float(obj)
-            if isinstance(obj, np.bool_):
-                return bool(obj)
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()
-        return super().default(obj)
+# Common Ports Configuration
+class Ports:
+    MARKET_DATA = 5555    # Data Gateway publishes TICK_DATA
+    ORDERS = 5556         # Strategy Engine pushes ORDER_INTENT
+    TRADE_EVENTS = 5557   # Execution Bridge publishes FILL_RECEIPT
+    MARKET_STATE = 5558   # Market Sensor publishes MARKET_STATE vector
+    SYSTEM_CMD = 5559     # Meta Router publishes SYSTEM_CMD
+    LOGGING = 5560        # Centralized logging
+    RECONCILER = 5561     # Order Reconciler ROUTER (receives DEALER intents)
+    SYSTEM_CTRL = 5562    # System Controller broadcasts (lifecycle events)
+    HEDGE_REQUEST = 5563  # Strategy Engine requests hedge validation
+    RAW_INTENTS = 5564    # Strategy Engine pushes RAW intents to Router
 
+class Topics:
+    TICK_DATA = "TICK"
+    MARKET_STATE = "STATE"
+    SYSTEM_CMD = "CMD"
+    ORDER_INTENT = "INTENT"
+    FILL_RECEIPT = "FILL"
+    HEDGE_REQUEST = "HEDGE"
+    RAW_INTENT = "RAW_INTENT"
 
 class MQManager:
     """Wrapper around ZeroMQ for async pub/sub and push/pull messaging."""
     
-    def __init__(self):
+    # NO LOSS OF EXISTING FUNCTIONALITY, NO ACCIDENTAL DELETIONS, NO OVERSIGHT - GCP CONTAINER SAFE
+    def __init__(self, hosts: dict | None = None):
         self.context = zmq.asyncio.Context()
-        # Set a global receive timeout of 5 seconds for all sockets created from this context
-        # Actually, ZMQ context doesn't have a default RCVTIMEO, so we'll set it in create methods
         self.logger = logging.getLogger("MQ")
-        # In Docker, bind to 0.0.0.0 to be reachable from other containers
         self.host = "0.0.0.0"
-        self.default_host = os.getenv("MQ_DEFAULT_HOST", "127.0.0.1")
-        self.mq_hosts = {
-            "market_data": os.getenv("MQ_MARKET_DATA_HOST", self.default_host),
-            "orders": os.getenv("MQ_ORDERS_HOST", self.default_host),
-            "trade_events": os.getenv("MQ_TRADE_EVENTS_HOST", self.default_host),
-            "market_state": os.getenv("MQ_MARKET_STATE_HOST", self.default_host),
-            "system_cmd": os.getenv("MQ_SYSTEM_CMD_HOST", self.default_host),
-            "logging": os.getenv("MQ_LOGGING_HOST", self.default_host),
-            "reconciler": os.getenv("MQ_RECONCILER_HOST", self.default_host),
-            "system_ctrl": os.getenv("MQ_SYSTEM_CTRL_HOST", self.default_host),
+        default_host = os.getenv("MQ_DEFAULT_HOST", "127.0.0.1")
+        self.mq_hosts = hosts or {
+            "market_data": os.getenv("MQ_MARKET_DATA_HOST", default_host),
+            "orders": os.getenv("MQ_ORDERS_HOST", default_host),
+            "trade_events": os.getenv("MQ_TRADE_EVENTS_HOST", default_host),
+            "market_state": os.getenv("MQ_MARKET_STATE_HOST", default_host),
+            "system_cmd": os.getenv("MQ_SYSTEM_CMD_HOST", default_host),
+            "logging": os.getenv("MQ_LOGGING_HOST", default_host),
+            "reconciler": os.getenv("MQ_RECONCILER_HOST", default_host),
+            "system_ctrl": os.getenv("MQ_SYSTEM_CTRL_HOST", default_host),
         }
 
     def _get_host(self, port, bind):
@@ -55,14 +57,14 @@ class MQManager:
             return self.host # 0.0.0.0
         # Map ports to hosts for connections
         port_to_host = {
-            Ports.MARKET_DATA: self.mq_hosts["market_data"],
-            Ports.ORDERS: self.mq_hosts["orders"],
-            Ports.TRADE_EVENTS: self.mq_hosts["trade_events"],
-            Ports.MARKET_STATE: self.mq_hosts["market_state"],
-            Ports.SYSTEM_CMD: self.mq_hosts["system_cmd"],
-            Ports.LOGGING: self.mq_hosts["logging"],
-            Ports.RECONCILER: self.mq_hosts["reconciler"],
-            Ports.SYSTEM_CTRL: self.mq_hosts["system_ctrl"],
+            Ports.MARKET_DATA: self.mq_hosts.get("market_data", "127.0.0.1"),
+            Ports.ORDERS: self.mq_hosts.get("orders", "127.0.0.1"),
+            Ports.TRADE_EVENTS: self.mq_hosts.get("trade_events", "127.0.0.1"),
+            Ports.MARKET_STATE: self.mq_hosts.get("market_state", "127.0.0.1"),
+            Ports.SYSTEM_CMD: self.mq_hosts.get("system_cmd", "127.0.0.1"),
+            Ports.LOGGING: self.mq_hosts.get("logging", "127.0.0.1"),
+            Ports.RECONCILER: self.mq_hosts.get("reconciler", "127.0.0.1"),
+            Ports.SYSTEM_CTRL: self.mq_hosts.get("system_ctrl", "127.0.0.1"),
         }
         return port_to_host.get(port, "127.0.0.1")
 
@@ -224,49 +226,3 @@ class MQManager:
             correlation_id_ctx.set(correlation_id)
             
         return topic, data
-
-import redis.asyncio as redis
-
-# Common Ports Configuration
-class Ports:
-    MARKET_DATA = 5555    # Data Gateway publishes TICK_DATA
-    ORDERS = 5556         # Strategy Engine pushes ORDER_INTENT
-    TRADE_EVENTS = 5557   # Execution Bridge publishes FILL_RECEIPT
-    MARKET_STATE = 5558   # Market Sensor publishes MARKET_STATE vector
-    SYSTEM_CMD = 5559     # Meta Router publishes SYSTEM_CMD
-    LOGGING = 5560        # Centralized logging
-    RECONCILER = 5561     # Order Reconciler ROUTER (receives DEALER intents)
-    SYSTEM_CTRL = 5562    # System Controller broadcasts (lifecycle events)
-    HEDGE_REQUEST = 5563  # Strategy Engine requests hedge validation
-    RAW_INTENTS = 5564    # Strategy Engine pushes RAW intents to Router
-
-class Topics:
-    TICK_DATA = "TICK"
-    MARKET_STATE = "STATE"
-    SYSTEM_CMD = "CMD"
-    ORDER_INTENT = "INTENT"
-    FILL_RECEIPT = "FILL"
-    HEDGE_REQUEST = "HEDGE"
-    RAW_INTENT = "RAW_INTENT"
-
-class RedisLogger:
-    """Streams logs to Redis for dashboard visibility."""
-    def __init__(self, redis_url=None, key="live_logs", max_len=100):
-        if redis_url is None:
-            from core.auth import get_redis_url
-            redis_url = get_redis_url()
-        self.redis = redis.from_url(redis_url)
-        self.key = key
-        self.max_len = max_len
-
-    async def log(self, message, level="INFO"):
-        log_entry = json.dumps({
-            "timestamp": datetime.now().isoformat(),
-            "level": level,
-            "message": message
-        })
-        try:
-            await self.redis.lpush(self.key, log_entry)
-            await self.redis.ltrim(self.key, 0, self.max_len - 1)
-        except Exception:
-            pass

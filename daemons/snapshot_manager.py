@@ -641,7 +641,8 @@ class SnapshotManager:
                                 "ltt": sim_ltt, "ft": sim_ft, "source": "SIM", "type": "TICK"
                             }
                             await self.redis_client.set(f"latest_tick:{opt_sym}", json.dumps(tick, cls=NumpyEncoder))
-                            await self.mq.send_json(self.mq.create_publisher(Ports.MARKET_DATA), Topics.TICK_DATA, tick)
+                            # [Audit-Fix] Finding 6.4: Do not flood primary MARKET_DATA port with sim ticks
+                            # await self.mq.send_json(self.mq.create_publisher(Ports.MARKET_DATA), Topics.TICK_DATA, tick)
                             
                             # Underlying update to SHM
                             if self.shm_ticks and asset in SYMBOL_TO_SLOT and i == 0 and otype == "CE":

@@ -10,7 +10,8 @@ from zoneinfo import ZoneInfo
 import redis.asyncio as redis
 from dotenv import load_dotenv
 
-from core.mq import MQManager, Ports, RedisLogger
+from core.mq import MQManager, Ports
+from core.mq.redis_logger import RedisLogger
 from core.health import HeartbeatProvider
 from core.alerts import send_cloud_alert
 from NorenRestApiPy.NorenApi import NorenApi

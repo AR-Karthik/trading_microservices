@@ -140,7 +140,7 @@ class SystemController:
         dsn = get_db_dsn()
         while True:
             try:
-                self.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=20, timeout=5.0, command_timeout=10.0)
+                self.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=20, timeout=30.0, command_timeout=10.0)
                 logger.info("✅ SystemController connected to TimescaleDB.")
                 break
             except Exception as e:
