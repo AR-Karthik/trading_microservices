@@ -268,7 +268,7 @@ class RegimeDetector:
                 ))
 
                 # Push full telemetry to Redis for dashboard
-                await self.r.set(f"regime_state:{self.asset_id}", json.dumps({
+                await self.r.hset("regime_state", self.asset_id, json.dumps({
                     "regime": legacy_regime,
                     "s18_int": s18_val,
                     "s26_persistence": round(s26_val, 2),
@@ -299,7 +299,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Configure monitoring for a specific index (NIFTY50, BANKNIFTY, SENSEX)
     parser.add_argument("--asset", required=True)
-    parser.add_argument("--core", type=int, required=True)
+    parser.add_argument("--core", type=int, default=0)
     args = parser.parse_args()
 
     # Robust normalization

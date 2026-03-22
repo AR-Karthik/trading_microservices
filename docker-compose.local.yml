@@ -257,5 +257,18 @@ services:
     volumes:
       - ./dashboard/frontend/index.html:/usr/share/nginx/html/index.html
 
+  db_init:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: db_init
+    command: python -m daemons.init_db
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+
 volumes:
   pgdata:

@@ -139,6 +139,12 @@ rm -f /opt/trading/data/redis /opt/trading/data/db
 ln -s /mnt/hot_nvme/redis_data /opt/trading/data/redis
 ln -s /mnt/hot_nvme/db_data /opt/trading/data/db
 
+# 4.5 Initialize Database Schema
+echo "Initializing Database Schema (Trades, Portfolio, Shadow, Rejections)..."
+# We use a one-shot container to run the initialization
+# Timeout of 60s for DB to be ready
+timeout 60s docker compose run --rm market_sensor python -m daemons.init_db || echo "⚠️ Database initialization failed or timed out."
+
 # Use --progress=plain for build logs
 docker compose up -d --build --progress=plain
 

@@ -245,6 +245,10 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
     def compute_signals(snapshot: dict) -> dict:
         """Main compute function called for each tick snapshot."""
         result = {}
+        # 🛡️ Defensive Initialization: Wait for first valid tick to prevent math errors
+        spot = snapshot.get("spot", snapshot.get("price"))
+        if spot is None or spot <= 0:
+            return {}
 
         # ── Log-OFI Z-score ────────────────────────────────────────────────
         ofi_series = np.array(snapshot.get("ofi_series", []))
@@ -309,7 +313,6 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
             result["iv_percentile"] = 50.0
 
         # ── Zero Gamma Level & GEX ───────────────────────────────────────────
-        spot = snapshot.get("spot", 22000.0)
         strikes = snapshot.get("strikes", [])
         T = snapshot.get("dte", 2) / 365.0
         iv = snapshot.get("atm_iv", 0.18)
@@ -407,6 +410,12 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
 
         # ── Smart Flow (Composite CMF + MFI) ──────────────────────────────
         vols = np.array(snapshot.get("vol_series", [1.0] * len(prices)))
+        # logger.info(f"DEBUG SHAPES: prices={prices.shape}, vols={vols.shape}, ofi={ofi_series.shape}, cvd={cvd_series.shape}")
+        if vols.shape != prices.shape:
+             logger.warning(f"🚨 SHAPE MISMATCH: prices {prices.shape} vs vols {vols.shape} for {symbol}. Truncating...")
+             min_len = min(len(prices), len(vols))
+             prices = prices[-min_len:]
+             vols = vols[-min_len:]
         result["smart_flow"] = calculate_smart_flow(prices * 1.001, prices * 0.999, prices, vols)
 
         # ── Phase 12.1: Sentiment Fusion ───────────────────────────────────
@@ -489,7 +498,7 @@ def _compute_worker(in_queue: mp.Queue, out_queue: mp.Queue):
             if snapshot is None:
                 break  # Sentinel → shutdown
             signals = compute_signals(snapshot)
-            out_queue.put(signals)
+            out_queue.put({"symbol": snapshot.get("symbol"), "signals": signals})
         except Empty:
             continue
         except Exception as e:
@@ -631,6 +640,7 @@ class MarketSensor:
             sym: collections.deque(maxlen=100) for sym in all_assets
         }
         self._last_tick_ts: dict[str, float] = collections.defaultdict(time.time)
+        self.tick_counters: dict[str, int] = collections.defaultdict(int)
 
         # ASTO Indicators (SRS Part 1)
         self.atr_buffer: collections.deque[float] = collections.deque(maxlen=10)
@@ -1034,7 +1044,7 @@ class MarketSensor:
                         except (IndexError, ValueError):
                             pass
 
-                    tick_count = int(tick_count + 1)
+                    self.tick_counters[symbol] += 1
 
                     # Drain compute results every tick (non-blocking)
                     await self._drain_compute_output()
@@ -1064,7 +1074,7 @@ class MarketSensor:
                             "basis_series": list(self.basis_series[symbol]),
                             "spot_15m_series": list(self.spot_15m_series[symbol]),
                             "vpin_series": list(self.vpin_series[symbol]) if self.vpin_series[symbol] else [0.0],
-                            "vol_series": [t.get("volume", 1) for t in list(self.tick_store[symbol])][-200:],
+                            "vol_series": [t.get("volume", 1) for t in list(self.tick_store[symbol])],
                             "iv_history": list(self.iv_history[symbol]),
                             "prev_pcr": self.pcr_history[symbol][-1] if self.pcr_history[symbol] else 1.0,
                             "zero_gamma_level": find_zero_gamma_level(np.array(price_series), price),
@@ -1101,8 +1111,8 @@ class MarketSensor:
                             except (queue.Full, Exception):
                                 pass # Skip if compute is backed up
 
-                    # Publish state every 50 ticks
-                    if tick_count % 50 == 0:
+                    # Publish state every 50 ticks per symbol
+                    if self.tick_counters[symbol] % 50 == 0:
                         await self._publish_market_state(symbol, price)
 
                     await asyncio.sleep(0)  # yield to event loop
@@ -1452,7 +1462,8 @@ class MarketSensor:
                 await self._redis.set(f"REGIME_STATE:{symbol}", val)
                 if symbol == "NIFTY50":
                     await self._redis.set("REGIME_STATE", val)
-                    await self._redis.set("regime_state", val)
+                    # Use a different key for the legacy lower-case string to avoid hash collision
+                    await self._redis.set("regime_state_legacy", val)
             else:
                 await self._redis.set(f"REGIME_STATE:{symbol}", "WAITING")
 

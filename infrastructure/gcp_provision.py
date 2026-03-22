@@ -246,6 +246,12 @@ fi
 set -e
 export TRADING_RESOURCES_ROOT=/ram_disk
 echo "Setting up performance optimizations..."
+
+# 4.5 Initialize Database Schema (Trades, Portfolio, Shadow, Rejections)
+echo "Initializing Database Schema..."
+# We use one-shot container to run the initialization
+timeout 60s docker compose run --rm market_sensor python -m daemons.init_db || echo "⚠️ Database initialization failed or timed out."
+
 timeout 600s docker compose up -d --build || echo "❌ Docker compose timed out or failed."
 
 # 6. Wait for Telegram Alerter to be ready

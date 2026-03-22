@@ -452,3 +452,15 @@ services:
     environment:
       - TZ=Asia/Kolkata
       - SIMULATION_MODE=false
+  db_init:
+    image: trading-app:latest
+    container_name: db_init
+    command: python -m daemons.init_db
+    env_file: .env
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    environment:
+      - TZ=Asia/Kolkata

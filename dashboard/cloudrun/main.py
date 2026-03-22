@@ -301,6 +301,11 @@ async def get_regime_sim():
     vm_data = await smart_proxy("regime/simulation")
     return vm_data if vm_data else {"engine_ranking": [], "equity_growth": []}
 
+@app.get("/deep_dive/summary")
+async def get_deep_dive_summary():
+    vm_data = await smart_proxy("deep_dive/summary")
+    return vm_data if vm_data else {"error": "VM Offline / No Deep Dive Data"}
+
 @app.get("/analytics/summary")
 async def get_analytics_summary(mode: str = "Paper"):
     vm_data = await smart_proxy("analytics/summary", params={"mode": mode})

@@ -133,9 +133,11 @@ class Position(BaseModel):
     avg_price: float
     realized_pnl: float
     unrealized_pnl: float
-    parent_uuid: str
-    delta: float
-    theta: float
+    parent_uuid: Optional[str] = "NONE"
+    delta: float = 0.0
+    theta: float = 0.0
+    stall_timer: int = 0
+    atr_stop: float = 0.0
 
 class StrategyStatus(BaseModel):
     name: str
@@ -333,6 +335,7 @@ def get_state(asset: str = "NIFTY50"):
             "available_margin_live": float(r.get("CASH_COMPONENT_LIVE") or 0) + float(r.get("COLLATERAL_COMPONENT_LIVE") or 0),
             "paper_capital_limit": float(r.get("PAPER_CAPITAL_LIMIT") or 0),
             "live_capital_limit": float(r.get("LIVE_CAPITAL_LIMIT") or 0),
+            "regime": index_states[asset]["regime"],
             "signals": deep_signals,
             "power_five": power_five,
             "exit_path_70_30": ms.get("exit_path_70_30", {"tp1": 0.0, "tp2": 0.0, "progress": 0.0}),
@@ -762,6 +765,125 @@ def get_analytics(mode: str = "Paper"):
             base += random.randint(-500, 1500)
             curve.append({"time": f"2026-03-17T{10+i//12:02}:{ (i%12)*5:02}:00", "equity": base})
         return {"equity_curve": curve, "total_pnl": base, "trade_count": 20}
+
+@app.get("/deep_dive/summary")
+def get_deep_dive_summary():
+    try:
+        r = get_redis()
+        indices = ["NIFTY50", "BANKNIFTY", "SENSEX"]
+        
+        # 1. Ingestion & Connectivity
+        ingestion = {
+            "shoonya_ws": r.get("HEALTH:SHOONYA_WS") or "CONNECTED",
+            "shoonya_rest": r.get("HEALTH:SHOONYA_REST") or "CONNECTED",
+            "tick_gap_ms": float(r.get("TICK_GAP_MS") or 0.0),
+            "tick_counts": {idx: int(r.get(f"TICK_COUNT:{idx}") or 0) for idx in indices},
+            "last_heartbeat": r.get("HEARTBEAT:NSE_MD")
+        }
+        
+        # 2. Market Sensor (Exhaustive Alpha Vector)
+        sensor = {}
+        for idx in indices:
+            st_raw = r.get(f"latest_market_state:{idx}")
+            st = json.loads(st_raw) if st_raw else {}
+            sensor[idx] = {
+                "price": st.get("price", 0.0),
+                "s_total": st.get("s_total", 0.0),
+                "log_ofi_z": st.get("log_ofi_zscore", 0.0),
+                "cvd": st.get("cvd", 0.0),
+                "cvd_flips": st.get("cvd_flip_ticks", 0),
+                "asto": st.get("asto", 0.0),
+                "rv": st.get("rv", 0.0),
+                "iv_rv_spread": st.get("iv_rv_spread", 0.0),
+                "hurst": st.get("hurst", 0.5),
+                "kaufman_er": st.get("kaufman_er", 0.5),
+                "adx": st.get("adx", 20.0),
+                "rsi": st.get("rsi", 50.0),
+                "pcr": st.get("pcr", 0.85),
+                "phi": st.get("phi", 0.0),
+                "vanna": st.get("vanna", 0.0),
+                "charm": st.get("charm", 0.0)
+            }
+            
+        # 3. Regime Detection (Bayesian Posteriors)
+        regime = {}
+        regimes_raw = r.hgetall("regime_state")
+        for idx in indices:
+            raw = regimes_raw.get(idx)
+            data = json.loads(raw) if raw else {"regime": "WAITING", "prob": 0.5}
+            regime[idx] = {
+                "current": data.get("regime", "UNKNOWN"),
+                "confidence": data.get("s27_quality", 0.0),
+                "hmm_state": f"S{data.get('s18_int', 0)}"
+            }
+            
+        # 4. Meta Router (Veto Matrix & Greeks)
+        mr_metrics_raw = r.get("METAROUTER:METRICS")
+        mr_metrics = json.loads(mr_metrics_raw) if mr_metrics_raw else {}
+        greeks_raw = r.get("LIVE_PORTFOLIO_GREEKS")
+        greeks = json.loads(greeks_raw) if greeks_raw else {"delta":0,"gamma":0,"theta":0,"vega":0}
+        
+        # Fetch Veto Ledger (Last 10)
+        veto_ledger = []
+        raw_ledger = r.lrange("Analytics:DeepDive:Router", -10, -1)
+        for x in raw_ledger:
+            try:
+                entry = json.loads(x)
+                # entry usually contains metrics and top_vetoes
+                veto_ledger.append(entry)
+            except: pass
+
+        meta_router = {
+            "metrics": mr_metrics,
+            "greeks": greeks,
+            "vix": float(r.get("RAW_VIX") or 0.0),
+            "vix_spike": r.get("VIX_SPIKE_DETECTED") == "True",
+            "veto_ledger": veto_ledger,
+            "gates_enabled": {g: (r.get(f"GATE:{g}:ENABLED") != "False") for g in ["FRACTURE", "REGIME_LOCK", "LOW_VOL", "ASTO", "STATE3"]}
+        }
+        
+        # 5. Liquidation & Risk
+        liquidation = {
+            "slippage_halt": r.get("SLIPPAGE_HALT") == "True",
+            "stop_loss_breached_paper": r.get("STOP_DAY_LOSS_BREACHED_PAPER") == "True",
+            "stop_loss_breached_live": r.get("STOP_DAY_LOSS_BREACHED_LIVE") == "True",
+            "daily_pnl_paper": float(r.get("DAILY_REALIZED_PNL_PAPER") or 0.0),
+            "daily_pnl_live": float(r.get("DAILY_REALIZED_PNL_LIVE") or 0.0),
+            "active_monitors": []
+        }
+        # Scalable scan for active position risk status
+        pos_keys = r.keys("POSITION_STATE:*")
+        for pk in pos_keys:
+            p_state = r.hgetall(pk)
+            liquidation["active_monitors"].append({
+                "symbol": pk.split(":")[-1],
+                "risk": p_state.get("risk_status", "GREEN"),
+                "sl": float(p_state.get("current_sl") or 0.0),
+                "s18": int(p_state.get("regime_s18") or 0)
+            })
+
+        # 6. Strategy Engine (Last 5 Intents)
+        # We can pull these from the audit trail or a specific strategy channel
+        intents = []
+        raw_intents = r.lrange("audit_trail", 0, 19)
+        for ri in raw_intents:
+            ev = json.loads(ri)
+            if ev.get("event_type") in ["STRATEGY_SIGNAL", "ORDER_DISPATCH", "SUCCESS"]:
+                intents.append(ev)
+                if len(intents) >= 5: break
+
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "ingestion": ingestion,
+            "sensor": sensor,
+            "regime": regime,
+            "meta_router": meta_router,
+            "liquidation": liquidation,
+            "strategy_intents": intents
+        }
+    except Exception as e:
+        logger.error(f"Deep Dive Summary Error: {e}", exc_info=True)
+        return {"error": str(e)}
 
 @app.get("/portfolio", response_model=List[Position])
 def get_portfolio(mode: str = "Paper"):

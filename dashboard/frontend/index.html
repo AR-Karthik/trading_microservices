@@ -15,19 +15,27 @@
         .theme-actual { --theme-accent: #3fb950; --theme-accent-rgb: 63, 185, 80; }
         body { font-family: 'Inter', sans-serif; background-color: #000000; color: #e6edf3; overflow-x: hidden; }
         .glass { background: rgba(10, 10, 10, 0.8); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.05); }
-        .oled-card { background: #070707; border: 1px solid #1a1a1a; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
-        .mono { font-family: 'JetBrains Mono', monospace; }
+        .oled-card { 
+            background: rgba(7, 7, 7, 0.4); 
+            border: 1px solid rgba(255, 255, 255, 0.05); 
+            transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+            position: relative;
+            overflow: hidden;
+        }
+        .oled-card:hover { border-color: rgba(var(--theme-accent-rgb), 0.4); box-shadow: 0 0 20px rgba(var(--theme-accent-rgb), 0.1); }
         
-        .k-letter { color: var(--theme-accent); font-weight: 900; text-shadow: 0 0 15px rgba(var(--theme-accent-rgb), 0.8); font-size: 1.1em; }
+        /* Neon Variants */
+        .neon-cyan { border: 1px solid rgba(6, 182, 212, 0.2); box-shadow: 0 0 15px rgba(6, 182, 212, 0.05); }
+        .neon-purple { border: 1px solid rgba(168, 85, 247, 0.2); box-shadow: 0 0 15px rgba(168, 85, 247, 0.05); }
+        .neon-emerald { border: 1px solid rgba(16, 185, 129, 0.2); box-shadow: 0 0 15px rgba(16, 185, 129, 0.05); }
+        .neon-rose { border: 1px solid rgba(244, 63, 94, 0.2); box-shadow: 0 0 15px rgba(244, 63, 94, 0.05); }
+        .neon-amber { border: 1px solid rgba(245, 158, 11, 0.2); box-shadow: 0 0 15px rgba(245, 158, 11, 0.05); }
         
-        .tab-active { color: var(--theme-accent); border-bottom: 2px solid var(--theme-accent); }
-        .btn-neon { background: transparent; border: 1px solid var(--theme-accent); color: var(--theme-accent); transition: all 0.3s; }
-        .btn-neon:hover:not(:disabled) { background: var(--theme-accent); color: #000; box-shadow: 0 0 20px rgba(var(--theme-accent-rgb), 0.4); }
-        .btn-neon:disabled { opacity: 0.5; cursor: not-allowed; border-color: #333; color: #666; }
-        
-        @keyframes pulse-red { 0%, 100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.4); } 50% { box-shadow: 0 0 20px 0 rgba(248, 81, 73, 0.4); } }
-        .animate-panic { animation: pulse-red 2s infinite; }
-        .scroll-hide::-webkit-scrollbar { display: none; }
+        .neon-cyan:hover { border-color: rgba(6, 182, 212, 0.5); box-shadow: 0 0 25px rgba(6, 182, 212, 0.15); }
+        .neon-purple:hover { border-color: rgba(168, 85, 247, 0.5); box-shadow: 0 0 25px rgba(168, 85, 247, 0.15); }
+        .neon-emerald:hover { border-color: rgba(16, 185, 129, 0.5); box-shadow: 0 0 25px rgba(16, 185, 129, 0.15); }
+        .neon-rose:hover { border-color: rgba(244, 63, 94, 0.5); box-shadow: 0 0 25px rgba(244, 63, 94, 0.15); }
+        .neon-amber:hover { border-color: rgba(245, 158, 11, 0.5); box-shadow: 0 0 25px rgba(245, 158, 11, 0.15); }
         
         /* Heatmap Backgrounds */
         .bg-regime-trending { background: radial-gradient(circle at center, rgba(63, 185, 80, 0.1) 0%, #000 70%); }
@@ -82,7 +90,8 @@
 
         // --- TAB 1: COMMAND CENTER ---
         const CommandCenter = ({ state, asset, setAsset }) => {
-            const regimeClass = state.hmm_regime.includes('TREND') ? 'bg-regime-trending' : (state.hmm_regime.includes('CRASH') ? 'bg-regime-crash' : 'bg-regime-ranging');
+            const regime = state.regime || 'UNKNOWN';
+            const regimeClass = regime.includes('TREND') ? 'bg-regime-trending' : (regime.includes('CRASH') ? 'bg-regime-crash' : 'bg-regime-ranging');
             const signals = state.signals || {};
             const p5 = state.power_five?.[asset] || state.power_five?.[state.primary_asset] || {};
             const p5_data = Object.keys(p5).length > 0 ? p5 : (asset === 'BANKNIFTY' ? {'HDFCBANK': 1.5, 'ICICIBANK': 2.0, 'SBIN': -0.5, 'AXISBANK': 0.2, 'KOTAKBANK': 1.1} : { 'HDFCBANK': 1.2, 'RELIANCE': -0.5, 'ICICIBANK': 2.1, 'INFY': 0.0, 'ITC': -1.5 });
@@ -91,7 +100,7 @@
                 <div className={`space-y-6 animate-in fade-in duration-500 rounded-3xl p-6 ${regimeClass} min-h-[70vh]`}>
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                         {/* Market Pulse */}
-                        <div className="oled-card p-6 rounded-2xl flex flex-col justify-between">
+                        <div className="oled-card neon-cyan p-6 rounded-2xl flex flex-col justify-between">
                             <div className="flex justify-between items-center mb-4">
                                 <h3 className="text-[10px] font-black uppercase text-gray-500">Market Pulse</h3>
                                 <select value={asset} onChange={e => setAsset(e.target.value)} className="bg-white/5 border border-white/10 text-[9px] font-bold px-2 py-1 outline-none text-white rounded">
@@ -111,7 +120,7 @@
                             </div>
                             <div className="flex justify-between text-[10px] font-bold text-gray-400 mb-1 mt-4">
                                 <span>Vol-Regime</span>
-                                <span className={state.hmm_regime.includes('TREND') ? 'text-success' : 'text-warning'}>{state.hmm_regime}</span>
+                                <span className={regime.includes('TREND') ? 'text-success' : 'text-warning'}>{regime}</span>
                             </div>
                             <div className="mt-6 border-t border-white/10 pt-4">
                                 <div className="text-[9px] font-black uppercase text-gray-500 mb-2">Smart Money Flow Ribbon</div>
@@ -122,7 +131,7 @@
                         </div>
 
                         {/* Power Five Matrix */}
-                        <div className="oled-card p-6 rounded-2xl">
+                        <div className="oled-card neon-emerald p-6 rounded-2xl">
                             <h3 className="text-[10px] font-black uppercase text-gray-500 mb-4">Power Five Matrix</h3>
                             <div className="grid grid-cols-5 gap-2 h-32">
                                 {Object.entries(p5_data).map(([sym, z]) => (
@@ -138,7 +147,7 @@
                         </div>
 
                         {/* Pivot Zone */}
-                        <div className="oled-card p-6 rounded-2xl">
+                        <div className="oled-card neon-amber p-6 rounded-2xl">
                             <h3 className="text-[10px] font-black uppercase text-gray-500 mb-4">The Pivot Zone</h3>
                             <div className="space-y-4 font-mono text-sm max-w-sm">
                                 <div className="flex justify-between items-center text-success border-b border-white/5 pb-2">
@@ -169,7 +178,7 @@
             return (
                 <div className="space-y-6 animate-in fade-in duration-500">
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                        <div className="oled-card p-6 rounded-2xl col-span-2">
+                        <div className="oled-card neon-emerald p-6 rounded-2xl col-span-2">
                             <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6">Active Trades</h3>
                             <div className="overflow-x-auto">
                                 <table className="w-full text-left text-[11px]">
@@ -202,7 +211,7 @@
                                 </table>
                             </div>
                         </div>
-                        <div className="oled-card p-6 rounded-2xl flex flex-col items-start">
+                        <div className="oled-card neon-rose p-6 rounded-2xl flex flex-col items-start">
                             <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6 w-full text-left">Liquidity Thermometer</h3>
                             <div className="flex-1 w-full flex justify-center items-end px-4 gap-8">
                                 <div className="w-24 h-48 bg-white/5 rounded-t-full border border-white/10 relative overflow-hidden flex flex-col justify-end">
@@ -236,7 +245,7 @@
 
             return (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-in fade-in duration-500">
-                    <div className="oled-card p-6 rounded-2xl">
+                    <div className="oled-card neon-purple p-6 rounded-2xl">
                         <h3 className="text-[10px] font-black uppercase text-gray-500 mb-4 flex justify-between">
                             <span>Hunter Logs (Meta-Router)</span>
                             <span className="text-accent animate-pulse">● LIVE</span>
@@ -253,7 +262,7 @@
                             <div className="absolute bottom-2 right-4 w-2 h-4 bg-accent animate-pulse"></div>
                         </div>
                     </div>
-                    <div className="oled-card p-6 rounded-2xl">
+                    <div className="oled-card neon-purple p-6 rounded-2xl">
                         <h3 className="text-[10px] font-black uppercase text-gray-500 mb-4">Adaptive Oscillator (ASTO)</h3>
                         <div className="flex justify-between items-end mb-8">
                             <div>
@@ -312,7 +321,7 @@
                     direction: "INFERENCE",
                     source: "Redis / Regime Cache",
                     metrics: [
-                        { label: "REGIME QUALITY", value: state.hmm_regime || "UNKNOWN" },
+                        { label: "REGIME QUALITY", value: state.regime || "UNKNOWN" },
                         { label: "WHALES PIVOT", value: stats.whales_pivot || "NEUTRAL", color: stats.whales_pivot === "BULLISH" ? "text-success" : (stats.whales_pivot === "BEARISH" ? "text-danger" : "text-gray-400") },
                         { label: "FII NET OI", value: stats.fii_net?.toLocaleString() || "—" }
                     ]
@@ -333,7 +342,7 @@
                 <div className="space-y-6 animate-in fade-in duration-500">
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         {flows.map(f => (
-                            <div key={f.component} className="oled-card p-6 rounded-[2rem] border-white/5 relative overflow-hidden group">
+                            <div key={f.component} className="oled-card neon-amber p-6 rounded-[2rem] border-white/5 relative overflow-hidden group">
                                 <div className="absolute top-0 right-0 p-4">
                                     <span className={`text-[8px] font-black px-2 py-0.5 rounded ${f.direction === 'INPUT' ? 'bg-success/20 text-success' : (f.direction === 'OUTPUT' ? 'bg-accent/20 text-accent' : 'bg-white/10 text-gray-400')}`}>
                                         {f.direction}
@@ -387,7 +396,7 @@
             return (
                 <div className="space-y-6">
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-in fade-in duration-500">
-                        <div className="oled-card p-6 rounded-2xl">
+                        <div className="oled-card neon-cyan p-6 rounded-2xl">
                             <div className="flex justify-between items-center mb-6">
                                 <h3 className="text-[10px] font-black uppercase text-gray-500">Performance Metrics</h3>
                                 <div className="flex gap-2 items-center">
@@ -415,7 +424,7 @@
                                 </svg>
                             </div>
                         </div>
-                        <div className="oled-card p-6 rounded-2xl">
+                        <div className="oled-card neon-emerald p-6 rounded-2xl">
                             <h3 className="text-[10px] font-black uppercase text-gray-500 mb-6">Whale Prep (FII/DII Data)</h3>
                             <div className="space-y-6">
                                 {(fiidii.length?fiidii:[{category:'FII', buyValue: 4500, sellValue: 3000, netValue: 1500}, {category:'DII', buyValue: 2000, sellValue: 2500, netValue: -500}]).map(v => (
@@ -454,7 +463,7 @@
             };
 
             return (
-                <div className="oled-card p-8 rounded-3xl mt-6">
+                <div className="oled-card neon-emerald p-8 rounded-3xl mt-6">
                     <h3 className="text-xs font-black uppercase text-gray-500 mb-6">Strategy Launch Pad</h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         {Object.entries(strats).map(([name, live]) => (
@@ -522,7 +531,7 @@
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <div className={`oled-card p-8 rounded-3xl transition-opacity ${unlocked?'opacity-100':'opacity-60'}`}>
+                        <div className={`oled-card neon-amber p-8 rounded-3xl transition-opacity ${unlocked?'opacity-100':'opacity-60'}`}>
                             <h3 className="text-xs font-black uppercase text-gray-500 mb-6">Capital Allocation</h3>
                             <div className="space-y-6">
                                 <div>
@@ -535,7 +544,7 @@
                             </div>
                         </div>
 
-                        <div className={`oled-card p-8 rounded-3xl transition-opacity ${unlocked?'opacity-100':'opacity-60'}`}>
+                        <div className={`oled-card neon-rose p-8 rounded-3xl transition-opacity ${unlocked?'opacity-100':'opacity-60'}`}>
                             <h3 className="text-xs font-black uppercase text-gray-500 mb-6">Risk Limits</h3>
                             <div className="space-y-6">
                                 <div>
@@ -550,144 +559,264 @@
                     </div>
                     <StrategyLaunchPad />
                 </div>
-            )
-        }
+            );
+        };
 
         // --- TAB 7: DEEP DIVE (HDD) ---
-        const DeepDive = ({ state }) => {
-            const indices = state.index_states ? Object.keys(state.index_states) : ['NIFTY50', 'BANKNIFTY', 'SENSEX'];
-            
-            const sections = [
-                {
-                    label: "Primary Intelligence",
-                    metrics: [
-                        { key: 'score', label: 'Alpha Score', format: v => v?.toFixed(2), color: v => v > 0.7 ? 'text-success' : 'text-gray-300' },
-                        { key: 'regime', label: 'HMM Regime', format: v => v },
-                        { key: 'price', label: 'LTP', format: v => v?.toFixed(2) },
-                        { key: 'change_pct', label: 'Change %', format: v => (v > 0 ? '+' : '') + v?.toFixed(2) + '%', color: v => v >= 0 ? 'text-success' : 'text-danger' },
-                        { key: 'latency_ms', label: 'Gateway Latency', format: v => v?.toFixed(2) + 'ms' },
-                    ]
-                },
-                {
-                    label: "Ingestion & Liquidity",
-                    metrics: [
-                        { key: 'pressure_gauge', label: 'Pressure Gauge', format: v => (v * 100).toFixed(1) + '%', color: v => Math.abs(v) > 0.5 ? 'text-warning' : 'text-gray-400' },
-                        { key: 'vpin', label: 'VPIN (Toxicity)', format: v => v?.toFixed(3), color: v => v > 0.7 ? 'text-danger animate-pulse' : 'text-gray-400' },
-                        { key: 'total_buy_qty', label: 'Total Buy Qty', format: v => v?.toLocaleString() },
-                        { key: 'total_sell_qty', label: 'Total Sell Qty', format: v => v?.toLocaleString() },
-                    ]
-                },
-                {
-                    label: "Alpha & Microstructure",
-                    metrics: [
-                        { key: 'asto', label: 'ASTO Oscillator', format: v => v?.toFixed(2) },
-                        { key: 'asto_regime', label: 'ASTO Tier', format: v => v },
-                        { key: 'rsi', label: 'RSI (14)', format: v => v?.toFixed(1) },
-                        { key: 'pcr', label: 'Put-Call Ratio', format: v => v?.toFixed(2) },
-                        { key: 'pcr_roc', label: 'PCR Velocity', format: v => v?.toFixed(4) },
-                        { key: 'hurst', label: 'Hurst Exponent', format: v => v?.toFixed(2) },
-                        { key: 'adx', label: 'ADX (Trend)', format: v => v?.toFixed(1) },
-                        { key: 'kaufman_er', label: 'Kaufman ER', format: v => v?.toFixed(2) },
-                    ]
-                },
-                {
-                    label: "Volatility & Greeks",
-                    metrics: [
-                        { key: 'atm_iv', label: 'ATM IV', format: v => (v * 100).toFixed(2) + '%' },
-                        { key: 'iv_percentile', label: 'IV Percentile', format: v => v?.toFixed(1) + '%' },
-                        { key: 'rv', label: 'Realized Vol', format: v => (v * 100).toFixed(2) + '%' },
-                        { key: 'vanna', label: 'Vanna (dΔ/dσ)', format: v => v?.toFixed(4) },
-                        { key: 'charm', label: 'Charm (dΔ/dt)', format: v => v?.toFixed(4) },
-                        { key: 'gex_sign', label: 'Gamma Exposure', format: v => v },
-                        { key: 'gamma_flip', label: 'Gamma Flip Px', format: v => v?.toFixed(0) },
-                    ]
-                },
-                {
-                    label: "Execution Flow",
-                    metrics: [
-                        { key: 'log_ofi_z', label: 'OFI Z-Score', format: v => v?.toFixed(2), color: v => Math.abs(v) > 2 ? 'text-warning' : 'text-gray-300' },
-                        { key: 'dispersion', label: 'Dispersion Coeff', format: v => v?.toFixed(3) },
-                        { key: 'cvd', label: 'Cum. Vol Delta', format: v => v?.toLocaleString() },
-                        { key: 'cvd_flips', label: 'CVD Flip Count', format: v => v },
-                        { key: 'basis_z', label: 'Basis Z-Score', format: v => v?.toFixed(2) },
-                        { key: 'smart_flow', label: 'Smart Money %', format: v => (v * 100).toFixed(1) + '%' },
-                    ]
-                },
-                {
-                    label: "Safety & Institutional",
-                    metrics: [
-                        { key: 'call_wall', label: 'Call Wall', format: v => v },
-                        { key: 'put_wall', label: 'Put Wall', format: v => v },
-                        { key: 'veto', label: 'Toxicity Veto', format: v => v ? 'ACTIVE' : 'NONE', color: v => v ? 'text-danger font-black' : 'text-success' },
-                        { key: 'toxic_option', label: 'Toxic Strikes', format: v => v ? 'YES' : 'NO', color: v => v ? 'text-danger' : 'text-gray-500' },
-                        { key: 'dislocation', label: 'Px Dislocation', format: v => v ? 'DETECTED' : 'STABLE', color: v => v ? 'text-warning' : 'text-gray-500' },
-                        { key: 'stale_flag', label: 'Data Latency', format: v => v ? 'STALE' : 'LIVE', color: v => v ? 'text-danger animate-pulse' : 'text-success' },
-                    ]
-                }
-            ];
+        const DeepDiveCard = ({ title, tagline, children, className = "", neonClass = "" }) => (
+            <div className={`oled-card ${neonClass} rounded-[2rem] border-white/5 shadow-2xl overflow-hidden glass p-6 flex flex-col ${className}`}>
+                <div className="flex justify-between items-center mb-6 border-b border-white/10 pb-4">
+                    <div>
+                        <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em]">{title}</h3>
+                        <p className="text-[8px] text-gray-500 font-bold uppercase mt-0.5">{tagline}</p>
+                    </div>
+                </div>
+                <div className="flex-1">{children}</div>
+            </div>
+        );
+
+        const DeepDive = () => {
+            const [data, setData] = useState(null);
+            const [loading, setLoading] = useState(true);
+
+            const fetchSummary = () => {
+                fetch(`${API_BASE}/deep_dive/summary`)
+                    .then(r => r.json())
+                    .then(d => {
+                        setData(d);
+                        setLoading(false);
+                    })
+                    .catch(e => console.error("Deep Dive Fetch Error:", e));
+            };
+
+            useEffect(() => {
+                fetchSummary();
+                const i = setInterval(fetchSummary, 2000);
+                return () => clearInterval(i);
+            }, []);
+
+            if (loading || !data) return (
+                <div className="flex flex-col items-center justify-center h-[60vh] gap-4">
+                    <div className="w-12 h-12 border-4 border-accent/20 border-t-accent rounded-full animate-spin"></div>
+                    <div className="text-[10px] font-black text-accent uppercase tracking-[0.3em] animate-pulse">Syncing Truth Matrix...</div>
+                </div>
+            );
+
+            const { ingestion, sensor, regime, meta_router, liquidation, strategy_intents } = data;
+            const indices = ["NIFTY50", "BANKNIFTY", "SENSEX"];
 
             return (
                 <div className="space-y-6 animate-in slide-in-from-bottom-4 duration-700 pb-20">
-                    <div className="oled-card rounded-[2rem] border-white/5 shadow-2xl overflow-hidden glass">
-                        <div className="flex justify-between items-center p-6 border-b border-white/10 bg-white/[0.02]">
-                             <h3 className="text-sm font-black text-white tracking-widest uppercase">The Truth Matrix (Exhaustive Signal Vector)</h3>
-                             <div className="flex gap-4">
-                                {indices.map(idx => (
-                                    <div key={idx} className="px-3 py-1 bg-accent/10 border border-accent/30 text-accent text-[9px] font-black rounded-lg">
-                                        {idx} ACTIVE
-                                    </div>
-                                ))}
-                             </div>
+                    {/* Level 1: Ingestion & Connectivity */}
+                    <div className="oled-card neon-cyan p-4 rounded-2xl flex justify-between items-center border-accent/20 bg-accent/5">
+                        <div className="flex gap-8 items-center">
+                            <div className="flex flex-col">
+                                <span className="text-[8px] font-black text-gray-500 uppercase">WS STATUS</span>
+                                <span className={`text-[10px] font-black ${ingestion.shoonya_ws === 'CONNECTED' ? 'text-success' : 'text-danger'}`}>{ingestion.shoonya_ws}</span>
+                            </div>
+                            <div className="flex flex-col">
+                                <span className="text-[8px] font-black text-gray-500 uppercase">REST API</span>
+                                <span className={`text-[10px] font-black ${ingestion.shoonya_rest === 'CONNECTED' ? 'text-success' : 'text-danger'}`}>{ingestion.shoonya_rest}</span>
+                            </div>
+                            <div className="flex flex-col">
+                                <span className="text-[8px] font-black text-gray-500 uppercase">FEED GAP</span>
+                                <span className="text-[10px] font-black text-white mono">{ingestion.tick_gap_ms}ms</span>
+                            </div>
                         </div>
-                        
-                        <div className="overflow-x-auto scroll-hide">
-                            <table className="w-full text-left text-[11px] border-collapse">
-                                <thead>
-                                    <tr className="text-gray-500 border-b border-white/5 uppercase text-[9px] bg-black">
-                                        <th className="p-4 sticky left-0 z-20 bg-black">Metric Cluster</th>
-                                        {indices.map(idx => (
-                                            <th key={idx} className="p-4 text-center font-black text-gray-300 border-l border-white/5">{idx}</th>
-                                        ))}
-                                    </tr>
-                                </thead>
-                                <tbody className="mono">
-                                    {sections.map(section => (
-                                        <React.Fragment key={section.label}>
-                                            <tr className="bg-white/[0.03]">
-                                                <td colSpan={indices.length + 1} className="p-2 px-4 text-[9px] font-black text-accent uppercase tracking-widest border-b border-white/10">{section.label}</td>
-                                            </tr>
-                                            {section.metrics.map(m => (
-                                                <tr key={m.key} className="border-b border-white/[0.03] hover:bg-white/[0.05] transition-colors group">
-                                                    <td className="p-4 text-gray-400 font-bold border-r border-white/5 sticky left-0 bg-black/95 backdrop-blur-sm z-10 group-hover:text-white transition-colors">{m.label}</td>
-                                                    {indices.map(idx => {
-                                                        const val = state.index_states?.[idx]?.[m.key];
-                                                        const colorClass = m.color ? m.color(val) : 'text-gray-200';
-                                                        return (
-                                                            <td key={idx} className={`p-4 text-center font-bold border-l border-white/5 ${colorClass}`}>
-                                                                {val !== undefined && val !== null ? m.format(val) : '—'}
-                                                            </td>
-                                                        );
-                                                    })}
-                                                </tr>
-                                            ))}
-                                        </React.Fragment>
-                                    ))}
-                                </tbody>
-                            </table>
+                        <div className="flex gap-4">
+                            {indices.map(idx => (
+                                <div key={idx} className="flex flex-col items-end">
+                                    <span className="text-[8px] font-black text-gray-500 uppercase">{idx} TICKS</span>
+                                    <span className="text-[10px] font-black text-accent mono">{ingestion.tick_counts[idx]?.toLocaleString()}</span>
+                                </div>
+                            ))}
                         </div>
                     </div>
 
+                    {/* Level 2: Index Intelligence Rows (Optimized for Width & Aesthetics) */}
+                    <div className="grid grid-cols-1 gap-6">
+                        {indices.map(idx => {
+                            const s = sensor[idx] || {};
+                            const r = regime[idx] || {};
+                            
+                            // Asset-specific Neon Colors
+                            const neonClass = idx === 'NIFTY50' ? 'border-cyan-500/30' : 
+                                             idx === 'BANKNIFTY' ? 'border-purple-500/30' : 
+                                             'border-emerald-500/30';
+                            const glowClass = idx === 'NIFTY50' ? 'shadow-[0_0_15px_rgba(6,182,212,0.1)]' : 
+                                             idx === 'BANKNIFTY' ? 'shadow-[0_0_15px_rgba(168,85,247,0.1)]' : 
+                                             'shadow-[0_0_15px_rgba(16,185,129,0.1)]';
+                            
+                            return (
+                                <div key={idx} className={`bg-gray-800/20 rounded-2xl p-5 border-2 ${neonClass} ${glowClass} hover:scale-[1.01] transition-all flex items-center gap-8`}>
+                                    <div className="w-40 flex-shrink-0">
+                                        <h3 className="text-xl font-black text-white tracking-tighter leading-none mb-1">{idx}</h3>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-[10px] font-black text-accent uppercase tracking-widest px-2 py-0.5 bg-accent/10 rounded">
+                                                {r.current || 'WAITING'}
+                                            </span>
+                                            <span className="text-[10px] font-bold text-gray-500">{(r.confidence * 100).toFixed(0)}%</span>
+                                        </div>
+                                    </div>
+
+                                    <div className="w-48 flex-shrink-0 text-center border-x border-white/5 px-6">
+                                        <span className="text-[9px] font-bold text-gray-500 uppercase block mb-1 tracking-widest">LIVE PRICE</span>
+                                        <span className="text-2xl font-black text-white mono">
+                                            ₹{s.price?.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                        </span>
+                                    </div>
+
+                                    <div className="flex-grow grid grid-cols-4 md:grid-cols-8 gap-6 px-4">
+                                        {[
+                                            { label: 'ALPHA', val: s.s_total, format: v => v?.toFixed(2), color: v => v > 0 ? 'text-success' : 'text-danger' },
+                                            { label: 'OFI Z', val: s.log_ofi_z, format: v => v?.toFixed(2), color: v => Math.abs(v) > 2 ? 'text-warning' : '' },
+                                            { label: 'CVD', val: s.cvd, format: v => (v/1000).toFixed(1) + 'k' },
+                                            { label: 'ASTO', val: s.asto, format: v => v?.toFixed(1) },
+                                            { label: 'RVOL', val: s.rv, format: v => (v * 100).toFixed(1) + '%' },
+                                            { label: 'RSI', val: s.rsi, format: v => v?.toFixed(0) },
+                                            { label: 'PCR', val: s.pcr, format: v => v?.toFixed(2) },
+                                            { label: 'HURST', val: s.hurst, format: v => v?.toFixed(2) },
+                                        ].map(m => (
+                                            <div key={m.label} className="flex flex-col">
+                                                <span className="text-[8px] font-bold text-gray-500 uppercase tracking-tight">{m.label}</span>
+                                                <span className={`text-[13px] font-black mono ${m.color ? m.color(m.val) : 'text-gray-200'}`}>
+                                                    {m.format(m.val)}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    <div className="w-32 flex-shrink-0 text-right border-l border-white/5 pl-6">
+                                        <div className="text-[9px] font-bold text-gray-600 uppercase mb-1 tracking-widest">REGIME CODE</div>
+                                        <div className="text-sm font-black mono text-indigo-400 bg-indigo-500/5 px-2 py-1 rounded inline-block">
+                                            {r.hmm_state || 'S0'}
+                                        </div>
+                                    </div>
+                                </div>
+                            )
+                        })}
+                    </div>
+
+                    {/* Level 3: MetaRouter & Liquidation */}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                         <div className="oled-card p-8 rounded-[2rem] bg-black border-white/5 flex flex-col items-center justify-center text-center relative overflow-hidden group">
-                            <div className="absolute inset-0 bg-accent/5 opacity-0 group-hover:opacity-100 transition-opacity duration-1000"></div>
-                            <div className="text-[10px] font-black text-gray-500 uppercase mb-4 tracking-[0.2em]">Cross-Asset Delta Correlation</div>
-                            <div className="text-4xl font-black text-white mono">0.94</div>
-                            <div className="text-[9px] font-bold text-success uppercase mt-2">Highly Correlated Market</div>
+                        <DeepDiveCard title="Meta Router Decision Matrix" tagline="15-GATE VETO ENGINE + GREEKS" neonClass="neon-purple">
+                            <div className="grid grid-cols-2 gap-8 h-full">
+                                <div className="space-y-4">
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div className="bg-white/5 p-3 rounded-xl border border-white/5">
+                                            <div className="text-[8px] font-bold text-gray-500 uppercase">Intents</div>
+                                            <div className="text-xl font-black text-white mono">{meta_router.metrics.intents_processed || 0}</div>
+                                        </div>
+                                        <div className="bg-white/5 p-3 rounded-xl border border-white/5">
+                                            <div className="text-[8px] font-bold text-gray-500 uppercase">Vetoes</div>
+                                            <div className="text-xl font-black text-danger mono">{meta_router.metrics.strategy_vetos || 0}</div>
+                                        </div>
+                                    </div>
+                                    <div className="space-y-2 pt-2">
+                                        <div className="text-[8px] font-bold text-gray-500 uppercase">Portfolio Greeks</div>
+                                        {Object.entries(meta_router.greeks).map(([g, v]) => (
+                                            <div key={g} className="flex justify-between items-center text-[10px] mono">
+                                                <span className="text-gray-400 uppercase">{g}</span>
+                                                <span className={`${v >= 0 ? 'text-success' : 'text-danger'} font-bold`}>{v?.toFixed(2)}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div className="pt-2">
+                                        <div className="text-[8px] font-bold text-gray-500 uppercase mb-2">Active Gates</div>
+                                        <div className="flex flex-wrap gap-1">
+                                            {Object.entries(meta_router.gates_enabled).map(([g, e]) => (
+                                                <span key={g} className={`text-[7px] font-black px-1.5 py-0.5 rounded border ${e ? 'bg-success/10 border-success/30 text-success' : 'bg-white/5 border-white/10 text-gray-600'}`}>{g}</span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div className="flex flex-col h-full bg-black/40 rounded-xl border border-white/5 overflow-hidden">
+                                    <div className="p-2 bg-white/5 border-b border-white/10 text-[8px] font-black text-gray-500 uppercase tracking-widest">Decision Ledger</div>
+                                    <div className="flex-1 p-2 space-y-2 overflow-y-auto scroll-hide font-mono text-[9px]">
+                                        {meta_router.veto_ledger.length > 0 ? meta_router.veto_ledger.slice().reverse().map((l, i) => (
+                                            <div key={i} className="border-l-2 border-accent/30 pl-2 py-0.5">
+                                                <div className="text-accent flex justify-between">
+                                                    <span>{l.strategy_id}</span>
+                                                    <span>{new Date(l.time).toLocaleTimeString()}</span>
+                                                </div>
+                                                <div className="text-danger flex justify-between">
+                                                    <span>VETO: {l.veto_reason}</span>
+                                                    <span>{l.asset}</span>
+                                                </div>
+                                            </div>
+                                        )) : <div className="text-gray-600 text-center py-10 italic">Awaiting intents...</div>}
+                                    </div>
+                                </div>
+                            </div>
+                        </DeepDiveCard>
+
+                        <DeepDiveCard title="Risk & Liquidation Monitor" tagline="EOD GATEWAYS + PROTECTIVE EXITS" neonClass="neon-rose">
+                            <div className="space-y-4">
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="bg-white/5 p-4 rounded-2xl border border-white/5 relative">
+                                        <div className="text-[8px] font-bold text-gray-500 uppercase">Live P&L</div>
+                                        <div className={`text-2xl font-black mono ${liquidation.daily_pnl_live >= 0 ? 'text-success' : 'text-danger'}`}>
+                                            ₹{liquidation.daily_pnl_live?.toLocaleString()}
+                                        </div>
+                                        {liquidation.stop_loss_breached_live && <div className="absolute top-2 right-2 w-2 h-2 rounded-full bg-danger animate-ping"></div>}
+                                    </div>
+                                    <div className="bg-white/5 p-4 rounded-2xl border border-white/5">
+                                        <div className="text-[8px] font-bold text-gray-500 uppercase">Paper P&L</div>
+                                        <div className={`text-2xl font-black mono ${liquidation.daily_pnl_paper >= 0 ? 'text-accent' : 'text-danger'}`}>
+                                            ₹{liquidation.daily_pnl_paper?.toLocaleString()}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-2">
+                                    <div className="flex justify-between items-center text-[10px]">
+                                        <span className="text-gray-400 font-bold uppercase">Slippage Halt Status</span>
+                                        <span className={`font-black uppercase ${liquidation.slippage_halt ? 'text-danger animate-pulse' : 'text-success'}`}>
+                                            {liquidation.slippage_halt ? 'HALTED' : 'NOMINAL'}
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between items-center text-[10px]">
+                                        <span className="text-gray-400 font-bold uppercase">VIX (Fear Index)</span>
+                                        <span className="text-white font-black mono">{meta_router.vix}</span>
+                                    </div>
+                                </div>
+
+                                <div className="mt-4">
+                                    <div className="text-[8px] font-bold text-gray-500 uppercase mb-2">Active Surveillance</div>
+                                    <div className="grid grid-cols-1 gap-2 max-h-[120px] overflow-y-auto scroll-hide">
+                                        {liquidation.active_monitors.length > 0 ? liquidation.active_monitors.map((m, i) => (
+                                            <div key={i} className="flex justify-between items-center p-2 bg-white/5 rounded-lg border border-white/5">
+                                                <div className="flex gap-3 items-center">
+                                                    <div className={`w-1.5 h-1.5 rounded-full ${m.risk === 'RED' ? 'bg-danger animate-pulse' : (m.risk === 'YELLOW' ? 'bg-warning' : 'bg-success')}`}></div>
+                                                    <span className="text-[10px] font-black text-gray-300 mb-0">{m.symbol}</span>
+                                                </div>
+                                                <div className="text-[9px] mono text-gray-400">
+                                                    SL @ <span className="text-white">₹{m.sl?.toFixed(1)}</span>
+                                                </div>
+                                            </div>
+                                        )) : <div className="text-center py-6 text-gray-600 text-[9px] uppercase font-bold tracking-widest border border-dashed border-white/10 rounded-xl">No active risk vectors</div>}
+                                    </div>
+                                </div>
+                            </div>
+                        </DeepDiveCard>
+                    </div>
+
+                    {/* Level 4: Intent History Log */}
+                    <div className="oled-card neon-cyan p-4 rounded-2xl bg-black border-white/10">
+                        <div className="flex justify-between items-center mb-3">
+                            <h4 className="text-[9px] font-black text-gray-500 uppercase tracking-widest">Strategy Intent Logs</h4>
+                            <span className="text-[8px] font-bold text-accent px-2 py-0.5 bg-accent/10 rounded uppercase">Real-time Stream</span>
                         </div>
-                        <div className="oled-card p-8 rounded-[2rem] bg-black border-white/5 flex flex-col items-center justify-center text-center">
-                            <div className="text-[10px] font-black text-gray-500 uppercase mb-4 tracking-[0.2em]">Institutional Bias</div>
-                            <div className="text-2xl font-black text-accent uppercase">NET LONG ACCUMULATION</div>
-                            <div className="text-[9px] font-bold text-gray-500 uppercase mt-2">Veto Efficacy: 91%</div>
+                        <div className="grid grid-cols-1 gap-2">
+                            {strategy_intents.map((intent, i) => (
+                                <div key={i} className="flex items-center gap-4 text-[9px] mono p-2 hover:bg-white/5 rounded border-b border-white/[0.03]">
+                                    <span className="text-gray-600">{new Date(intent.timestamp).toLocaleTimeString()}</span>
+                                    <span className={`font-bold ${intent.event_type==='SUCCESS'?'text-success':'text-accent'}`}>{intent.event_type}</span>
+                                    <span className="text-gray-400 truncate flex-1">{intent.details}</span>
+                                </div>
+                            ))}
+                            {strategy_intents.length === 0 && <div className="text-center py-4 text-gray-700 text-[10px] uppercase">Awaiting strategy triggers...</div>}
                         </div>
                     </div>
                 </div>
@@ -699,7 +828,7 @@
             const [mode, setMode] = useState('Paper');
             const [asset, setAsset] = useState('NIFTY50');
             const [activeTab, setActiveTab] = useState('CMD');
-            const [state, setState] = useState({ hmm_regime: 'UNKNOWN', signals: {}, power_five: {} });
+            const [state, setState] = useState({ regime: 'UNKNOWN', signals: {}, power_five: {} });
             const [positions, setPositions] = useState([]);
             const [telemetry, setTelemetry] = useState({});
             
