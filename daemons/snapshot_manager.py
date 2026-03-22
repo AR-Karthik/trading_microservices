@@ -54,6 +54,8 @@ CIRCUIT_BREAKER_MATRIX = {
     20: {"before_1_pm": 0, "before_2_30_pm": 0, "after_2_30_pm": 0},
 }
 
+HEDGE_RESERVE_PCT = 0.15  # 15% margin reserve for regulatory safety
+
 
 class SnapshotManager:
     def __init__(self):
@@ -240,7 +242,7 @@ class SnapshotManager:
             },
             "SENSEX": {
                 "search": "S&P BSE SENSEX",
-                "csv_url": "https://docs.google.com/spreadsheets/d/1XlU-uKjT2sB1zY3f3wW5F0g1Q7z1e5N9/export?format=csv",
+                "csv_url": "https://www.bseindia.com/markets/Equity/EquityClick.aspx?reportName=EquityMarketReport", # Fallback to manual link info
                 "fallback": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "ITC", "TCS", "LT", "AXISBANK", "SBIN", "KOTAKBANK"]
             }
         }
@@ -391,7 +393,7 @@ class SnapshotManager:
 
         try:
             for asset, search in [("NIFTY50", "NIFTY"), ("BANKNIFTY", "BANKNIFTY"), ("SENSEX", "SENSEX")]:
-                res = await self._call_api('search_scrip', exchange="NFO", searchtext=search)
+                res = await self._call_api('searchscrip', exchange="NFO", searchtext=search)
                 if res and res.get('stat') == 'Ok':
                     # Extract earliest expiry from search results
                     values = res.get('values', [])
@@ -411,7 +413,7 @@ class SnapshotManager:
         try:
             if not self.sim_mode:
                 for idx, sym in [("NIFTY50", "NIFTY"), ("BANKNIFTY", "BANKNIFTY"), ("SENSEX", "SENSEX")]:
-                    res = await self._call_api('search_scrip', exchange="NFO", searchtext=sym)
+                    res = await self._call_api('searchscrip', exchange="NFO", searchtext=sym)
                     if res and res.get('stat') == 'Ok':
                         for val in res.get('values', []):
                             if 'ls' in val: lot_sizes[idx] = int(val['ls']); break
@@ -511,7 +513,7 @@ class SnapshotManager:
                     # [Audit-Fix] Component 2: Gatekeeper API call
                     res = await self._call_api('get_option_chain', 
                                               exchange=exch, tradingsymbol=shoonya_symbol, 
-                                              strike=atm, count=15)
+                                              strikeprice=atm, count=15)
                     
                     if res and res.get('stat') == 'Ok':
                         values = res.get('values', [])
@@ -583,7 +585,7 @@ class SnapshotManager:
                 self.active_option_tokens[fake_token] = search_text
                 return
 
-            res = await self._call_api('search_scrip', exchange=exch, searchtext=search_text)
+            res = await self._call_api('searchscrip', exchange=exch, searchtext=search_text)
             if res and res.get('stat') == 'Ok':
                 val = res.get('values', [{}])[0]
                 token = val.get('token')

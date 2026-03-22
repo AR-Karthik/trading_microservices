@@ -37,26 +37,25 @@ services:
       dockerfile: Dockerfile.local
     container_name: tick_sensor
     command: python -m daemons.tick_sensor
-    cpuset: "0"
+    ipc: host
     env_file: .env
     depends_on:
       - redis
     volumes:
       - .:/app
-      - /dev/shm:/ram_disk
 
   snapshot_manager:
     build:
       context: .
       dockerfile: Dockerfile.local
     container_name: snapshot_manager
-    command: python -m daemons.snapshot_manager
+    command: python -u -m daemons.snapshot_manager
+    ipc: host
     env_file: .env
     depends_on:
       - redis
     volumes:
       - .:/app
-      - /dev/shm:/ram_disk
 
   fii_dii_fetcher:
     build:
@@ -74,105 +73,106 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.regime_detector --asset NIFTY50 --core 1
+    command: python -u -m daemons.regime_detector --asset NIFTY50
+    ipc: host
     env_file: .env
     depends_on:
       - redis
     volumes:
       - .:/app
-      - /dev/shm:/ram_disk
 
   regime_detector_banknifty:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.regime_detector --asset BANKNIFTY --core 2
+    command: python -u -m daemons.regime_detector --asset BANKNIFTY
+    ipc: host
     env_file: .env
     depends_on:
       - redis
     volumes:
       - .:/app
-      - /dev/shm:/ram_disk
 
   regime_detector_sensex:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.regime_detector --asset SENSEX --core 4
+    command: python -u -m daemons.regime_detector --asset SENSEX
+    ipc: host
     env_file: .env
     depends_on:
       - redis
     volumes:
       - .:/app
-      - /dev/shm:/ram_disk
 
   market_sensor:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.market_sensor
+    command: python -u -m daemons.market_sensor
+    ipc: host
     env_file: .env
     depends_on:
       - redis
     volumes:
       - .:/app
-      - /dev/shm:/ram_disk
 
   meta_router:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.meta_router
+    command: python -u -m daemons.meta_router
+    ipc: host
     env_file: .env
     depends_on:
       - redis
       - postgres
     volumes:
       - .:/app
-      - /dev/shm:/ram_disk
 
   strategy_engine:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.strategy_engine
+    command: python -u -m daemons.strategy_engine
+    ipc: host
     env_file: .env
     depends_on:
       - redis
     volumes:
       - .:/app
-      - /dev/shm:/ram_disk
 
   liquidation_daemon:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.liquidation_daemon
+    command: python -u -m daemons.liquidation_daemon
+    ipc: host
     env_file: .env
     depends_on:
       - redis
       - postgres
     volumes:
       - .:/app
-      - /dev/shm:/ram_disk
 
   system_controller:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m daemons.system_controller
+    command: python -u -m daemons.system_controller
+    ipc: host
     env_file: .env
     depends_on:
       - redis
       - postgres
     volumes:
       - .:/app
-      - /dev/shm:/ram_disk
 
   shoonya_gateway:
     build:
       context: .
       dockerfile: Dockerfile.local
+    ipc: host
     container_name: shoonya_gateway
     command: python -m daemons.shoonya_gateway
     env_file: .env
@@ -180,12 +180,12 @@ services:
       - redis
     volumes:
       - .:/app
-      - /dev/shm:/ram_disk
 
   unified_bridge:
     build:
       context: .
       dockerfile: Dockerfile.local
+    ipc: host
     container_name: unified_bridge
     command: python -m daemons.unified_bridge
     env_file: .env
@@ -194,12 +194,12 @@ services:
       - postgres
     volumes:
       - .:/app
-      - /dev/shm:/ram_disk
 
   order_reconciler:
     build:
       context: .
       dockerfile: Dockerfile.local
+    ipc: host
     command: python -m daemons.order_reconciler
     depends_on:
       - redis
@@ -207,7 +207,6 @@ services:
     env_file: .env
     volumes:
       - .:/app
-      - /dev/shm:/ram_disk
 
 
   telegram_alerter:
@@ -237,7 +236,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.local
-    command: python -m uvicorn dashboard.api.main:app --host 0.0.0.0 --port 8000
+    command: python -u -m uvicorn dashboard.api.main:app --host 0.0.0.0 --port 8000
+    ipc: host
     depends_on:
       - redis
       - postgres
