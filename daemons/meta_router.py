@@ -5,6 +5,10 @@ Implements a 15-Gate Veto Matrix, Bayesian regime tracking, and portfolio stress
 """
 import asyncio
 import json
+try:
+    import orjson as fast_json
+except ImportError:
+    fast_json = json
 import logging
 import os
 import sys
@@ -712,13 +716,15 @@ class MetaRouter:
             raw_intent_json = await self._redis.get(f"RAW_INTENT:{asset}")
             if not raw_intent_json: continue
             
-            intent = json.loads(raw_intent_json)
+            # [Audit-Fix 7.1] Switched to fast C-level parsing for high TPS loops
+            intent = fast_json.loads(raw_intent_json)
             intent["parent_uuid"] = f"{asset}_{uuid.uuid4().hex[:6]}"
             intent["timestamp_router"] = datetime.now(timezone.utc).isoformat()
             
             # Step 3: Apply Alpha Decay
             decay_factor = await self._calculate_alpha_decay(intent, state)
-            intent["lots"] = round(intent["lots"] * decay_factor, 4)
+            # [Audit-Fix 7.2] Removed premature rounding to preserve variance
+            intent["lots"] = intent["lots"] * decay_factor
             intent["decay_factor"] = decay_factor
 
             # Step 4: Run the 15-Gate Veto Matrix
@@ -959,7 +965,8 @@ class MetaRouter:
                 async def _bg_correl_update():
                     try:
                         self.local_signals["CORRELATION"] = await self.correlation_engine.get_correlation("NIFTY50", "BANKNIFTY")
-                    except Exception: pass
+                    except Exception as e:
+                        logger.warning(f"⚠️ Correlation Engine update failed: {e}")
                 asyncio.create_task(_bg_correl_update())
                 
                 self.local_signals["_last_update"] = time.time()
@@ -967,7 +974,7 @@ class MetaRouter:
                 # Also sync regimes from this pulse
                 regimes_raw = await self._redis.hgetall("hmm_regime_state")
                 for k, v in regimes_raw.items():
-                    self.regime_cache[k] = json.loads(v)
+                    self.regime_cache[k] = fast_json.loads(v)
             except Exception: 
                 await asyncio.sleep(0.1)
 

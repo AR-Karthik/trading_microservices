@@ -18,6 +18,10 @@ import asyncio
 import logging
 import uuid
 import json
+try:
+    import orjson as fast_json
+except ImportError:
+    fast_json = json
 import os
 import time
 import hashlib
@@ -84,7 +88,8 @@ async def init_db(pool):
         try:
             await conn.execute("SELECT create_hypertable('trades', 'time', if_not_exists => TRUE);")
             logger.info("trades hypertable verified.")
-        except Exception: pass
+        except Exception as e:
+            logger.warning(f"Failed to verify trades hypertable: {e}")
 
         # 2. Portfolio State
         await conn.execute("""
@@ -135,7 +140,8 @@ async def init_db(pool):
         try:
             await conn.execute("SELECT create_hypertable('shadow_trades', 'time', if_not_exists => TRUE);")
             logger.info("shadow_trades hypertable verified.")
-        except Exception: pass
+        except Exception as e:
+            logger.warning(f"Failed to verify shadow_trades hypertable: {e}")
 
         # 4. Rejection Journal (Layer 7)
         await conn.execute("""
@@ -507,7 +513,7 @@ class UnifiedExecutionBridge:
             
             tick_raw = await self.redis.get(f"latest_tick:{intent['symbol']}")
             if tick_raw:
-                tick = json.loads(tick_raw)
+                tick = fast_json.loads(tick_raw)
                 tick_ts = datetime.fromisoformat(tick.get("timestamp")).astimezone(timezone.utc)
                 if (datetime.now(timezone.utc) - tick_ts).total_seconds() > 0.25:
                     logger.critical(f"🛑 FEED LATENCY BLOCK for {intent['symbol']}")
@@ -612,7 +618,7 @@ class UnifiedExecutionBridge:
         async for message in self.pubsub.listen():
             if message['type'] == 'message':
                 try:
-                    data = json.loads(message['data'])
+                    data = fast_json.loads(message['data'])
                     action = data.get('action', '')
                     exec_type = data.get('execution_type', 'ALL')
                     

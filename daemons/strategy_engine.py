@@ -10,6 +10,10 @@ All strategy classes have been extracted into core/strategy/*_knight.py.
 
 import asyncio
 import json
+try:
+    import orjson as fast_json
+except ImportError:
+    fast_json = json
 import logging
 import sys
 import time
@@ -62,7 +66,7 @@ async def _calibrate_vol_context(redis_client):
 
             tick_raw = await redis_client.lindex(f"tick_history:{symbol}", -1)
             if not tick_raw: continue
-            tick = json.loads(tick_raw)
+            tick = fast_json.loads(tick_raw)
             open_price = float(tick.get("price", 0) or 0)
             if open_price <= 0: continue
 
@@ -71,7 +75,8 @@ async def _calibrate_vol_context(redis_client):
             if rolling_std <= 0: rolling_std = 50.0
 
             gap_z = (open_price - prev_close) / rolling_std
-            await redis_client.set(f"VOL_GAP_Z:{symbol}", round(gap_z, 4), ex=7200)
+            # [Audit-Fix 7.2] Discard early rounding down to full IEEE float fidelity
+            await redis_client.set(f"VOL_GAP_Z:{symbol}", gap_z, ex=7200)
             logger.info(f"📊 Vol Gap Calibration [{symbol}]: Z={gap_z:.2f}")
             calibrated += 1
         except Exception as e:
