@@ -15,6 +15,7 @@ from core.health import HeartbeatProvider
 from core.alerts import send_cloud_alert
 from NorenRestApiPy.NorenApi import NorenApi
 from core.shared_memory import TickSharedMemory, MAX_SLOTS, SYMBOL_TO_SLOT
+from core.auth import get_redis_url
 
 try:
     import uvloop
@@ -465,8 +466,7 @@ async def main():
     logger.info("Starting Shoonya Live Data Gateway...")
     
     # Connect to Data Vault & ZeroMQ
-    redis_host = os.getenv("REDIS_HOST", "localhost")
-    redis_client = redis.Redis(host=redis_host, port=6379, db=0)
+    redis_client = redis.from_url(get_redis_url(), decode_responses=True)
     mq = MQManager()
     pub_socket = mq.create_publisher(Ports.MARKET_DATA)
     

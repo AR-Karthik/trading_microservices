@@ -34,6 +34,7 @@ from core.mq import MQManager, Ports, Topics, NumpyEncoder
 from core.alerts import send_cloud_alert
 from core.shared_memory import TickSharedMemory, SYMBOL_TO_SLOT
 from NorenRestApiPy.NorenApi import NorenApi
+from core.auth import get_redis_url
 
 load_dotenv()
 
@@ -88,7 +89,7 @@ class SnapshotManager:
             self.shm_ticks = None
 
     async def start(self):
-        from core.auth import get_redis_url, get_db_dsn
+        # 0. Redis Connectivity
         self.redis_client = redis.from_url(get_redis_url(), decode_responses=True)
         await self.redis_client.ping()
         
@@ -98,6 +99,7 @@ class SnapshotManager:
         # [Audit-Fix] Component 3: Database Pool for Ghost Position Sync
         if _HAS_ASYNCPG:
             try:
+                from core.auth import get_db_dsn
                 self.pool = await asyncpg.create_pool(get_db_dsn(), min_size=1, max_size=5)
                 logger.info("✅ SnapshotManager connected to TimescaleDB.")
             except Exception as e:
@@ -106,6 +108,9 @@ class SnapshotManager:
         logger.info("🚀 SnapshotManager (Slow Lane) active. Beginning Boot-Time Hydration...")
         
         # --- STEP 1: HYDRATION (Blocking) ---
+        logger.info(f"Checking simulation mode: {self.sim_mode}")
+        if not self.sim_mode:
+            await self._connect_shoonya()
         await self._boot_hydration()
         
         logger.info("🌊 Hydration Complete. Launching verifier loops.")
@@ -124,6 +129,42 @@ class SnapshotManager:
             self._run_heartbeat()
         ]
         await asyncio.gather(*tasks)
+
+    async def _connect_shoonya(self):
+        """[Audit-Fix] Component 1: Centralized Shoonya API connection and login."""
+        if self.api: return # Already connected
+
+        self.user = os.getenv("SHOONYA_USER")
+        self.pwd = os.getenv("SHOONYA_PWD")
+        self.factor2 = os.getenv("SHOONYA_FACTOR2")
+        self.vc = os.getenv("SHOONYA_VC")
+        self.app_key = os.getenv("SHOONYA_APP_KEY")
+        self.imei = os.getenv("SHOONYA_IMEI")
+
+        if not all([self.user, self.pwd, self.factor2, self.vc, self.app_key, self.imei]):
+            logger.critical("❌ Shoonya API credentials not fully set. Check .env file.")
+            raise ValueError("Shoonya API credentials missing.")
+
+        host = os.getenv("SHOONYA_HOST", "https://api.shoonya.com/NorenWClientTP")
+        ws_url = host.replace('https', 'wss').replace('NorenWClientTP', 'NorenWSTP')
+        if not ws_url.endswith('/'): ws_url += '/'
+        self.api = NorenApi(host=host, websocket=ws_url)
+
+        # 2. Shoonya API Auth (Gatekeeper)
+        if not self.sim_mode:
+            logger.info(f"Authenticating with Shoonya API as {self.user}...")
+            totp = pyotp.TOTP(self.factor2).now()
+            res = self.api.login(userid=self.user, password=self.pwd, twoFA=totp, 
+                           vendor_code=self.vc, api_secret=self.app_key, imei=self.imei)
+            
+            if res and res.get('stat') == 'Ok':
+                logger.info(f"Successfully logged in to Shoonya API. Name: {res.get('uname')}")
+                self._master_fetched = True # Allow history sync
+            else:
+                logger.error(f"❌ Shoonya API Login Failed: {res}")
+                # [Audit-Fix] Critical failure alert
+                asyncio.create_task(send_cloud_alert(f"CRITICAL: SnapshotManager failed Shoonya login: {res}", alert_type="ERROR"))
+                raise ConnectionError(f"Shoonya API Login Failed: {res}")
 
     async def _call_api(self, func_name, *args, **kwargs):
         """[Audit-Fix] Component 2: Centralized REST Gatekeeper (Semaphore + Delay)."""
@@ -567,8 +608,8 @@ class SnapshotManager:
                 # Increment simulation clock
                 self._sim_ltt_counter += 1
                 now = datetime.now(tz=IST)
-                sim_ltt = (datetime.combine(now.date(), datetime.min.time()) + 
-                           (now - datetime.combine(now.date(), datetime.min.time()))).strftime("%H:%M:%S")
+                sim_ltt = (datetime.combine(now.date(), datetime.min.time(), tzinfo=IST) + 
+                           (now - datetime.combine(now.date(), datetime.min.time(), tzinfo=IST))).strftime("%H:%M:%S")
                 sim_ft = time.time()
 
                 for asset in ["NIFTY50", "BANKNIFTY", "SENSEX"]:
@@ -780,24 +821,12 @@ class SnapshotManager:
                         self.atr_values[idx['id']] = atr
                         await self.redis_client.set(f"ATR:{idx['id']}", str(round(atr, 2)))
 
-                    await self.redis_client.set(f"history_14d:{idx['id']}", json.dumps(closes))
+                    await self.redis_client.set(f"history_14d:{idx['id']}", json.dumps(closes, cls=NumpyEncoder))
                     logger.info(f"✅ History Sync: Stored 14D history/ATR for {idx['id']}")
             
         except Exception as e:
             logger.error(f"History fetch failed: {e}")
 
-    async def _connect_shoonya(self):
-        try:
-            host = os.getenv("SHOONYA_HOST")
-            self.api = NorenApi(host=host)
-            totp = pyotp.TOTP(os.getenv("SHOONYA_FACTOR2")).now()
-            await asyncio.to_thread(self.api.login, 
-                userid=os.getenv("SHOONYA_USER"), password=os.getenv("SHOONYA_PWD"),
-                twoFA=totp, vendor_code=os.getenv("SHOONYA_VC"),
-                api_secret=os.getenv("SHOONYA_APP_KEY"), imei=os.getenv("SHOONYA_IMEI")
-            )
-        except Exception as e:
-            logger.error(f"Rest login failed: {e}")
 
     async def _persistent_alpha_snapshots(self):
         """[Layer 7] Pulse task: Persists global signal state to TimescaleDB every 10s."""

@@ -236,21 +236,35 @@ class ShoonyaHandler:
         exchange = self.get_exchange(order['symbol'])
         symbol = order['symbol']
 
-        logger.warning(f"🚀 [LIVE STRIKE] {action} {order['quantity']} {symbol}")
+        # [Reconciler Audit §3] Inject parent_uuid into remarks for O(1) basket routing
+        p_uuid = order.get('parent_uuid', 'NONE')
+        oid = order.get('order_id', '')
+        remarks = f"K7:{p_uuid}:{oid}"
+
+        logger.warning(f"🚀 [LIVE STRIKE] {action} {order['quantity']} {symbol} (remarks={remarks[:30]})")
         loop = asyncio.get_running_loop()
         res = await loop.run_in_executor(None, lambda: self.api.place_order(
             buy_or_sell=action, product_type='I', exchange=exchange, tradingsymbol=symbol,
             quantity=order['quantity'], disclosedquantity=0, price_type=order.get('order_type', 'MKT'),
-            price=order.get('price', 0), retention='DAY'
+            price=order.get('price', 0), retention='DAY', remarks=remarks
         ))
 
         if res and res.get('stat') == 'Ok':
             broker_oid = res['norenordno']
+            # [Reconciler Audit §4] Write Hash-based order status for fast reconciliation
+            try:
+                await redis_client.hset(f"order_status:{oid}", mapping={
+                    "status": "COMPLETE", "filled_qty": str(order['quantity']),
+                    "remaining_qty": "0", "broker_orderno": broker_oid,
+                    "parent_uuid": p_uuid,
+                })
+            except Exception as e:
+                logger.error(f"Hash status write failed: {e}")
             return {
                 "id": broker_oid, "time": datetime.now(timezone.utc),
                 "symbol": symbol, "action": order['action'], "quantity": float(order['quantity']),
                 "price": float(order.get('price', 0.0)), "fees": 20.0, "strategy_id": order['strategy_id'],
-                "execution_type": "Actual", "parent_uuid": order.get('parent_uuid', 'NONE'),
+                "execution_type": "Actual", "parent_uuid": p_uuid,
                 "broker_oid": broker_oid
             }
         
@@ -265,17 +279,35 @@ class ShoonyaHandler:
             new_price = float(order.get('price', 0)) * (1 + (nudge if action == 'B' else -nudge))
             res = await loop.run_in_executor(None, lambda: self.api.place_order(
                 buy_or_sell=action, product_type='I', exchange=exchange, tradingsymbol=symbol, 
-                quantity=order['quantity'], disclosedquantity=0, price_type='LMT', price=new_price, retention='DAY'
+                quantity=order['quantity'], disclosedquantity=0, price_type='LMT', price=new_price,
+                retention='DAY', remarks=remarks
             ))
             if res and res.get('stat') == 'Ok':
+                nudge_oid = res['norenordno']
+                try:
+                    await redis_client.hset(f"order_status:{oid}", mapping={
+                        "status": "COMPLETE", "filled_qty": str(order['quantity']),
+                        "remaining_qty": "0", "broker_orderno": nudge_oid,
+                        "parent_uuid": p_uuid,
+                    })
+                except Exception as e:
+                    logger.error(f"Hash status write (nudge) failed: {e}")
                 return {
-                    "id": res['norenordno'], "time": datetime.now(timezone.utc),
+                    "id": nudge_oid, "time": datetime.now(timezone.utc),
                     "symbol": symbol, "action": order['action'], "quantity": float(order['quantity']),
                     "price": new_price, "fees": 20.0, "strategy_id": order['strategy_id'],
-                    "execution_type": "Actual", "parent_uuid": order.get('parent_uuid', 'NONE')
+                    "execution_type": "Actual", "parent_uuid": p_uuid,
                 }
 
         logger.error(f"❌ Live Order Failed: {res}")
+        # [Reconciler Audit §4] Write REJECTED status for fast reconciliation
+        try:
+            await redis_client.hset(f"order_status:{oid}", mapping={
+                "status": "REJECTED", "filled_qty": "0", "remaining_qty": "0",
+                "parent_uuid": p_uuid, "error": str(res.get('emsg', 'Unknown')),
+            })
+        except Exception as e:
+            logger.error(f"Hash status write (reject) failed: {e}")
         return None
 
     async def get_order_status(self, broker_oid: str) -> str:

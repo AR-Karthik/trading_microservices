@@ -1,4 +1,5 @@
 import mmap
+import math
 import struct
 import time
 import json
@@ -6,6 +7,16 @@ import os
 import logging
 
 logger = logging.getLogger("SHM")
+
+# Sentinel value for "SHM has no data for this field".
+# Using NaN instead of 0.0 so consumers can distinguish
+# "value is genuinely zero" from "data not available".
+SHM_MISSING = float('nan')
+
+
+def is_shm_missing(value: float) -> bool:
+    """Check if a value is the SHM_MISSING sentinel."""
+    return math.isnan(value) if isinstance(value, float) else False
 
 from dataclasses import dataclass
 
@@ -175,6 +186,58 @@ class ShmManager:
         except Exception as e:
             logger.error(f"SHM read error: {e}")
             return None
+
+    def read_dict(self) -> dict:
+        """Read SHM as a dict with SHM_MISSING sentinels for unavailable data.
+        
+        Returns a dict where zero-ambiguous fields use SHM_MISSING (NaN)
+        when SHM data is stale or unavailable, so consumers can distinguish
+        'value is genuinely zero' from 'data not available'.
+        """
+        sig = self.read()
+        if sig is None:
+            # SHM unavailable — return all-MISSING dict
+            return {
+                "s_total": SHM_MISSING, "vpin": SHM_MISSING, "ofi_z": SHM_MISSING,
+                "vanna": SHM_MISSING, "charm": SHM_MISSING,
+                "s_env": SHM_MISSING, "s_str": SHM_MISSING, "s_div": SHM_MISSING,
+                "rv": SHM_MISSING, "adx": SHM_MISSING, "pcr": SHM_MISSING,
+                "asto": SHM_MISSING, "asto_regime": SHM_MISSING,
+                "whale_pivot": SHM_MISSING, "net_delta": SHM_MISSING,
+                "cvd_score": SHM_MISSING,
+                "high_z": SHM_MISSING, "low_z": SHM_MISSING,
+                "iv_percentile": SHM_MISSING, "iv_rv_spread": SHM_MISSING,
+                "smart_flow": SHM_MISSING, "buy_p": SHM_MISSING, "sell_p": SHM_MISSING,
+                "pcr_roc": SHM_MISSING, "iv_atm": SHM_MISSING,
+                "slope_15m": SHM_MISSING, "atr": SHM_MISSING,
+                "hb_ts": 0.0, "latency_ms": 0.0,
+                "day_high": 0.0, "day_low": 0.0,
+                "veto": False, "raw_veto": False, "stale_flag": True,
+                "hw_alpha": [0.0] * 10,
+                "_source": "SHM_MISSING",
+            }
+        # SHM available — convert dataclass to dict
+        return {
+            "s_total": sig.s_total, "vpin": sig.vpin, "ofi_z": sig.ofi_z,
+            "vanna": sig.vanna, "charm": sig.charm,
+            "s_env": sig.s_env, "s_str": sig.s_str, "s_div": sig.s_div,
+            "rv": sig.rv, "adx": sig.adx, "pcr": sig.pcr,
+            "asto": sig.asto, "asto_regime": sig.asto_regime,
+            "whale_pivot": sig.whale_pivot,
+            "net_delta": sig.net_delta_nifty,  # Caller should pick the right one
+            "cvd_score": sig.s_total,  # Mapped from composite for CVD check
+            "high_z": sig.high_z, "low_z": sig.low_z,
+            "iv_percentile": sig.iv_percentile, "iv_rv_spread": sig.iv_rv_spread,
+            "smart_flow": sig.smart_flow, "buy_p": sig.buy_p, "sell_p": sig.sell_p,
+            "pcr_roc": sig.pcr_roc, "iv_atm": sig.iv_atm,
+            "slope_15m": 0.0,  # Not in SHM struct — stays zero until Rust engine
+            "atr": 0.0,  # Not in SHM struct — fetched from Redis
+            "hb_ts": sig.hb_ts, "latency_ms": sig.latency_ms,
+            "day_high": sig.day_high, "day_low": sig.day_low,
+            "veto": sig.veto, "raw_veto": sig.raw_veto, "stale_flag": sig.stale_flag,
+            "hw_alpha": sig.hw_alpha,
+            "_source": "SHM_LIVE",
+        }
 
 class RegimeShm:
     """

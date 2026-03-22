@@ -1,0 +1,58 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: trading_redis_test
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-trading_redis}
+      - TZ=Asia/Kolkata
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-trading_redis}"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-trading_redis}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  shoonya_gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: shoonya_gateway_test
+    command: python -m daemons.shoonya_gateway
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /dev/shm:/ram_disk
+
+  tick_sensor:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: tick_sensor_test
+    command: python -m daemons.tick_sensor
+    cpuset: "0"
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /dev/shm:/ram_disk
+
+  snapshot_manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: snapshot_manager_test
+    command: python -m daemons.snapshot_manager
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /dev/shm:/ram_disk

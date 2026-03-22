@@ -4,6 +4,7 @@ import zipfile
 import pandas as pd
 import redis
 import logging
+from core.auth import get_redis_url
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('shoonya_master')
@@ -63,10 +64,7 @@ def parse_and_cache(exchange: str):
     logger.info(f"Loaded {len(df)} {exchange} symbols. Syncing to Redis...")
     
     try:
-        # Avoid local hardcoding, use env if available or default to localhost
-        host = os.getenv("REDIS_HOST", "localhost")
-        password = os.getenv("REDIS_PASSWORD", "")
-        r = redis.Redis(host=host, port=6379, db=0, password=password, decode_responses=True)
+        r = redis.from_url(get_redis_url(), decode_responses=True)
         r.ping()
         
         symbol_to_token = dict(zip(df['TradingSymbol'], df['Token']))
@@ -95,9 +93,7 @@ def parse_and_cache(exchange: str):
 def get_token(symbol: str, exchange: str = "NFO") -> str:
     """Helper function to fetch Token from Redis for a given exchange"""
     try:
-        host = os.getenv("REDIS_HOST", "localhost")
-        password = os.getenv("REDIS_PASSWORD", "")
-        r = redis.Redis(host=host, port=6379, db=0, password=password, decode_responses=True)
+        r = redis.from_url(get_redis_url(), decode_responses=True)
         return r.hget(f'shoonya_{exchange.lower()}_tokens', symbol)
     except Exception:
         return None
@@ -105,9 +101,7 @@ def get_token(symbol: str, exchange: str = "NFO") -> str:
 def get_symbol(token: str, exchange: str = "NFO") -> str:
     """Helper function to fetch TradingSymbol from Redis for a given exchange"""
     try:
-        host = os.getenv("REDIS_HOST", "localhost")
-        password = os.getenv("REDIS_PASSWORD", "")
-        r = redis.Redis(host=host, port=6379, db=0, password=password, decode_responses=True)
+        r = redis.from_url(get_redis_url(), decode_responses=True)
         return r.hget(f'shoonya_{exchange.lower()}_symbols', token)
     except Exception:
         return None

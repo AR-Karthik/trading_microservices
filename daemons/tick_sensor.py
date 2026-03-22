@@ -438,8 +438,8 @@ class TickSensor:
             try:
                 self._sim_ltt_counter += 1
                 now = datetime.now(tz=IST)
-                sim_ltt = (datetime.combine(now.date(), datetime.min.time()) + 
-                           (now - datetime.combine(now.date(), datetime.min.time()))).strftime("%H:%M:%S")
+                sim_ltt = (datetime.combine(now.date(), datetime.min.time(), tzinfo=IST) + 
+                           (now - datetime.combine(now.date(), datetime.min.time(), tzinfo=IST))).strftime("%H:%M:%S")
                 sim_ft = time.time()
 
                 for sym in ["NIFTY50", "BANKNIFTY"]:
