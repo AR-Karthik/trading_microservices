@@ -765,7 +765,7 @@ class DataGateway:
             "silent": silent
         }))
 
-    # ── PCR Heuristic Ingestion (Phase 0) ────────────────────────────────────
+    # ── PCR Regime Ingestion (Deterministic) ────────────────────────────────────
 
     async def _pcr_ingestion_loop(self):
         """Fetches live Put-Call Ratio (PCR) for Nifty & BankNifty every 5 minutes."""

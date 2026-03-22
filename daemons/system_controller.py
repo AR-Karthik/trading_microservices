@@ -79,7 +79,7 @@ SHUTDOWN_MM = 0
 LOGGER_STOP_HH = 15
 LOGGER_STOP_MM = 25
 
-# Heuristic Engine parameters (Phase 0)
+# Regime Engine parameters (Deterministic)
 HISTORY_FETCH_HH = 9
 HISTORY_FETCH_MM = 0
 LOOKBACK_DAYS = 14

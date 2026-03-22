@@ -54,7 +54,7 @@ CORRELATION_LIMIT          = 0.70      # Max cross-index correlation allowed
 MIN_IV_THRESHOLD           = 0.12      # Veto positional entries if IV is crushed
 MAX_LOTS_PER_ASSET         = 50        # Hard ceiling for safety
 REJECTION_THROTTLE_SEC     = 5.0       # Seconds between repeated alerts
-BAYESIAN_SMOOTHING         = 0.05      # Regime probability smoothing factor
+REGIME_SMOOTHING           = 0.05      # Regime probability smoothing factor
 
 # Lifecycle Classifications
 LIFECYCLE_MAP = {
@@ -109,7 +109,7 @@ class DeterministicRegimeTracker:
         likelihood = {r: (confidence if r == observation else (1.0 - confidence)/(len(prior)-1)) for r in prior}
         
         # Step 3: Posterior normalization with Smoothing Constant
-        raw_post = {r: (prior[r] * likelihood[r]) + BAYESIAN_SMOOTHING for r in prior}
+        raw_post = {r: (prior[r] * likelihood[r]) + REGIME_SMOOTHING for r in prior}
         total = sum(raw_post.values())
         if total > 0:
             self.posteriors[asset] = {r: val / total for r, val in raw_post.items()}
@@ -286,7 +286,7 @@ class MetaRouter:
         self.stress_tester = PortfolioStressTestEngine(self.greek_engine)
         self.circuit_breaker = RegulatoryCircuitBreaker(self._redis)
         self.correlation_engine = AssetCorrelationEngine(self._redis)
-        self.regime_tracker = BayesianRegimeTracker(["NIFTY50", "BANKNIFTY", "SENSEX"])
+        self.regime_tracker = DeterministicRegimeTracker(["NIFTY50", "BANKNIFTY", "SENSEX"])
         
         # Low-Latency Alpha Collectors
         self.alpha_state = collections.defaultdict(dict)

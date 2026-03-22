@@ -636,7 +636,7 @@ def get_telemetry():
     try:
         r = get_redis()
         daemons = [
-            "NSE_MD", "BSE_MD", "OMS_EXEC", "META_ROUTER", "HMM_ENGINE",
+            "NSE_MD", "BSE_MD", "OMS_EXEC", "META_ROUTER", "REGIME_DETECTOR",
             "VOL_SURFACE", "RISK_ENGINE", "DB_WORKER", "CLOUD_SYNC", "HFT_LOGS",
             "BACKTESTER", "REPLAY_SVC", "SIGNAL_GEN", "HEALTH_MON"
         ]
@@ -673,7 +673,7 @@ def get_telemetry():
         return {
             "nse_latency_ms": 0.4, "bse_latency_ms": 0.8, "slippage_leakage_inr": 450.0,
             "cpu_cores": [random.uniform(5, 95) for _ in range(8)],
-            "daemons": ["NSE_MD", "BSE_MD", "OMS_EXEC", "META_ROUTER", "HMM_ENGINE", "HEALTH_MON"],
+            "daemons": ["NSE_MD", "BSE_MD", "OMS_EXEC", "META_ROUTER", "REGIME_DETECTOR", "HEALTH_MON"],
             "redis_memory": "145.2M",
             "sys_memory_pct": 52.0,
             "disk_usage_pct": 65.5,

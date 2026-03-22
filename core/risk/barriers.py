@@ -50,7 +50,7 @@ class BarrierContext:
     runner_active: bool = False
     local_high: float = 0.0
     best_price: float = 0.0
-    entry_hmm: str = ""
+    entry_regime: str = ""
     dte: float = 7.0
     
     # Signal Vector (from SHM)
@@ -69,7 +69,7 @@ class BarrierContext:
     net_delta: float = 0.0
     
     # Regime
-    current_hmm: str = "0"
+    current_regime: str = "0"
     
     # Stagnation data
     hurst: float = 0.5
@@ -158,9 +158,9 @@ class KineticBarrier(BaseBarrier):
         else:
             sl = entry - sl_mult * ctx.atr
 
-        entry_hmm = ctx.entry_hmm or ctx.current_hmm
-        if not ctx.entry_hmm:
-            state_updates["entry_hmm"] = entry_hmm
+        entry_regime = ctx.entry_regime or ctx.current_regime
+        if not ctx.entry_regime:
+            state_updates["entry_regime"] = entry_regime
 
         tp1 = entry + tp1_mult * ctx.atr
         tp2 = entry + tp2_mult * ctx.atr
@@ -199,8 +199,8 @@ class KineticBarrier(BaseBarrier):
                     exit_reason = f"TP2_HIT: {price:.2f} >= {tp2:.2f}"
                 elif price <= sl:
                     exit_reason = f"INV_HUNT_SL: {price:.2f} <= {sl:.2f}"
-                elif ctx.current_hmm != entry_hmm and ctx.current_hmm in ["RANGING", "CRASH"]:
-                    exit_reason = f"HMM_SHIFT: {entry_hmm} -> {ctx.current_hmm}"
+                elif ctx.current_regime != entry_regime and ctx.current_regime in ["RANGING", "CRASH"]:
+                    exit_reason = f"REGIME_SHIFT: {entry_regime} -> {ctx.current_regime}"
             elif price <= sl:
                 exit_reason = f"SL_HIT: {price:.2f} <= {sl:.2f}"
 
@@ -217,8 +217,8 @@ class KineticBarrier(BaseBarrier):
                     exit_reason = f"TP2_HIT_SHORT: {price:.2f} <= {tp2_short:.2f}"
                 elif price >= sl_short:
                     exit_reason = f"INV_HUNT_SL_SHORT: {price:.2f} >= {sl_short:.2f}"
-                elif ctx.current_hmm != entry_hmm and ctx.current_hmm in ["RANGING", "BOOM"]:
-                    exit_reason = f"HMM_SHIFT_SHORT: {entry_hmm} -> {ctx.current_hmm}"
+                elif ctx.current_regime != entry_regime and ctx.current_regime in ["RANGING", "BOOM"]:
+                    exit_reason = f"REGIME_SHIFT_SHORT: {entry_regime} -> {ctx.current_regime}"
             elif price >= sl_short:
                 exit_reason = f"SL_HIT_SHORT: {price:.2f} >= {sl_short:.2f}"
 

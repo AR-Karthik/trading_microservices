@@ -16,9 +16,9 @@ class Daemons:
     """Standardized daemon names for health tracking [Audit 11.2]."""
     DATA_GATEWAY = "DataGateway"
     MARKET_SENSOR = "MarketSensor"
-    HMM_NIFTY = "HMMEngine_NIFTY50"
-    HMM_BANKNIFTY = "HMMEngine_BANKNIFTY"
-    HMM_SENSEX = "HMMEngine_SENSEX"
+    REGIME_NIFTY = "RegimeDetector_NIFTY50"
+    REGIME_BANKNIFTY = "RegimeDetector_BANKNIFTY"
+    REGIME_SENSEX = "RegimeDetector_SENSEX"
     META_ROUTER = "MetaRouter"
     STRATEGY_ENGINE = "StrategyEngine"
     PAPER_BRIDGE = "PaperBridge"
@@ -63,9 +63,9 @@ class HealthAggregator:
         self.required_daemons = [
             Daemons.DATA_GATEWAY, 
             Daemons.MARKET_SENSOR, 
-            Daemons.HMM_NIFTY,
-            Daemons.HMM_BANKNIFTY,
-            Daemons.HMM_SENSEX,
+            Daemons.REGIME_NIFTY,
+            Daemons.REGIME_BANKNIFTY,
+            Daemons.REGIME_SENSEX,
             Daemons.META_ROUTER, 
             Daemons.STRATEGY_ENGINE, 
             Daemons.PAPER_BRIDGE, 
